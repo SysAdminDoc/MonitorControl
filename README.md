@@ -9,9 +9,6 @@
 
 A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI protocol. Adjust brightness, contrast, color temperature, input sources, and more — all without touching your monitor's physical buttons.
 
-![MonitorControl Pro Screenshot](screenshot.png)
-*Add your own screenshot*
-
 ## Features
 
 ### Display Controls
@@ -63,14 +60,12 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 
 ### Option 2: From PowerShell
 ```powershell
-# Download and run
-irm https://raw.githubusercontent.com/YOUR_USERNAME/MonitorControlPro/main/MonitorControlPro.ps1 -OutFile MonitorControlPro.ps1
+irm https://raw.githubusercontent.com/SysAdminDoc/MonitorControl/main/MonitorControlPro.ps1 -OutFile MonitorControlPro.ps1
 .\MonitorControlPro.ps1
 ```
 
 ### Option 3: Create a Shortcut
 ```powershell
-# Create a desktop shortcut
 $WshShell = New-Object -ComObject WScript.Shell
 $Shortcut = $WshShell.CreateShortcut("$env:USERPROFILE\Desktop\MonitorControl Pro.lnk")
 $Shortcut.TargetPath = "powershell.exe"
@@ -277,6 +272,6 @@ This software interacts with monitor hardware via DDC/CI protocol. While DDC/CI 
 
 <p align="center">
   Made with PowerShell and WPF<br>
-  <a href="https://github.com/YOUR_USERNAME/MonitorControlPro/issues">Report Bug</a> · 
-  <a href="https://github.com/YOUR_USERNAME/MonitorControlPro/issues">Request Feature</a>
+  <a href="https://github.com/SysAdminDoc/MonitorControl/issues">Report Bug</a> ·
+  <a href="https://github.com/SysAdminDoc/MonitorControl/issues">Request Feature</a>
 </p>
