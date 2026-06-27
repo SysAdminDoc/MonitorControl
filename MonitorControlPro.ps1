@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.3.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro v3.4.0 - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.3.0 - Enhanced with scheduled profile switching
+    Version: 3.4.0 - Enhanced with idle-dim automation
 #>
 
 param([switch]$StartMinimized, [string]$LoadProfile)
@@ -32,10 +32,17 @@ public class MonitorAPI
     public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")]
     public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+    [DllImport("user32.dll")]
+    public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+    [DllImport("kernel32.dll")]
+    public static extern uint GetTickCount();
     public delegate bool MonitorEnumDelegate(IntPtr hMonitor, IntPtr hdcMonitor, ref RECT lprcMonitor, IntPtr dwData);
 
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT { public int Left, Top, Right, Bottom; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
     public struct MONITORINFOEX {
@@ -132,6 +139,7 @@ $script:AutoModeTimer = $null
 $script:ProfilesPath = "$env:APPDATA\MonitorControlPro"
 $script:AppProfileRulesPath = Join-Path $script:ProfilesPath "app-profile-rules.json"
 $script:ProfileScheduleRulesPath = Join-Path $script:ProfilesPath "profile-schedules.json"
+$script:IdleDimSettingsPath = Join-Path $script:ProfilesPath "idle-dim.json"
 $script:UpdatingUI = $false
 $script:ApplyToAll = $false
 $script:AutoModeEnabled = $false
@@ -147,6 +155,14 @@ $script:ProfileSchedules = @()
 $script:ProfileScheduleTimer = $null
 $script:UpdatingScheduleUI = $false
 $script:LastAppliedScheduleKey = $null
+$script:IdleDimEnabled = $false
+$script:IdleDimMinutes = 10
+$script:IdleDimBrightness = 20
+$script:IdleDimRestoreOnActivity = $true
+$script:IdleDimTimer = $null
+$script:IdleDimActive = $false
+$script:IdleDimPreviousBrightness = $null
+$script:UpdatingIdleDimUI = $false
 $script:TrayIcon = $null
 $script:TrayPopup = $null
 $script:TrayBrightnessSlider = $null
@@ -311,7 +327,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.3.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
+        Title="MonitorControl Pro v3.4.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
         Background="#0a0a0a" WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
     <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
@@ -445,7 +461,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
             <TextBlock Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
-            <TextBlock Text="v3.3.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
+            <TextBlock Text="v3.4.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal">
             <CheckBox x:Name="ApplyAllCheckbox" Content="All Monitors" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -633,7 +649,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
         </TabItem>
         <TabItem Header="Schedule">
             <Border Background="#151515" CornerRadius="0,5,5,5" Padding="10"><Grid>
-                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="*"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Border Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid>
                     <CheckBox x:Name="ScheduleEnabledCheckbox" Content="Scheduled profiles" VerticalAlignment="Center"/>
                     <TextBlock x:Name="ScheduleStatusText" Text="Off" FontSize="9" Foreground="#707070" HorizontalAlignment="Right" VerticalAlignment="Center"/>
@@ -649,6 +665,17 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="*"/></Grid.RowDefinitions>
                     <TextBlock Text="Profile schedule" FontSize="10" Foreground="#909090"/>
                     <ListBox x:Name="ScheduleRulesList" Grid.Row="2" Background="#111" BorderThickness="0" Foreground="#e0e0e0" FontSize="11"/>
+                </Grid></Border>
+                <Border Grid.Row="6" Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <Grid><CheckBox x:Name="IdleDimEnabledCheckbox" Content="Idle dim" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="IdleDimStatusText" Text="Off" FontSize="9" Foreground="#707070" HorizontalAlignment="Right" VerticalAlignment="Center"/></Grid>
+                    <Grid Grid.Row="2"><Grid.ColumnDefinitions><ColumnDefinition Width="70"/><ColumnDefinition Width="6"/><ColumnDefinition Width="70"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                        <TextBox x:Name="IdleDimMinutesBox" Text="10" VerticalAlignment="Center"/>
+                        <TextBox x:Name="IdleDimBrightnessBox" Grid.Column="2" Text="20" VerticalAlignment="Center"/>
+                        <CheckBox x:Name="IdleDimRestoreCheckbox" Grid.Column="4" Content="Restore" VerticalAlignment="Center"/>
+                        <Button x:Name="IdleDimSaveBtn" Grid.Column="6" Content="Save" Style="{StaticResource GreenBtn}" Padding="10,4" FontSize="9"/>
+                    </Grid>
                 </Grid></Border>
             </Grid></Border>
         </TabItem>
@@ -733,6 +760,9 @@ $appProfileRemoveBtn = $window.FindName("AppProfileRemoveBtn"); $appProfileRules
 $scheduleEnabledCheckbox = $window.FindName("ScheduleEnabledCheckbox"); $scheduleStatusText = $window.FindName("ScheduleStatusText")
 $scheduleTimeBox = $window.FindName("ScheduleTimeBox"); $scheduleProfileCombo = $window.FindName("ScheduleProfileCombo")
 $scheduleAddBtn = $window.FindName("ScheduleAddBtn"); $scheduleRemoveBtn = $window.FindName("ScheduleRemoveBtn"); $scheduleRulesList = $window.FindName("ScheduleRulesList")
+$idleDimEnabledCheckbox = $window.FindName("IdleDimEnabledCheckbox"); $idleDimStatusText = $window.FindName("IdleDimStatusText")
+$idleDimMinutesBox = $window.FindName("IdleDimMinutesBox"); $idleDimBrightnessBox = $window.FindName("IdleDimBrightnessBox")
+$idleDimRestoreCheckbox = $window.FindName("IdleDimRestoreCheckbox"); $idleDimSaveBtn = $window.FindName("IdleDimSaveBtn")
 $displaySettingsBtn = $window.FindName("DisplaySettingsBtn"); $colorMgmtBtn = $window.FindName("ColorMgmtBtn"); $gpuControlPanelBtn = $window.FindName("GpuControlPanelBtn")
 $resetGammaBtn = $window.FindName("ResetGammaBtn")
 $gammaRedSlider = $window.FindName("GammaRedSlider"); $gammaRedValue = $window.FindName("GammaRedValue")
@@ -1062,6 +1092,112 @@ function Start-ProfileScheduleWatcher {
     } else {
         $script:ProfileScheduleTimer.Stop()
     }
+}
+
+function Load-IdleDimSettings {
+    if (-not (Test-Path $script:IdleDimSettingsPath)) { return }
+    try {
+        $data = Get-Content -Path $script:IdleDimSettingsPath -Raw | ConvertFrom-Json
+        $script:IdleDimEnabled = [bool]$data.Enabled
+        $script:IdleDimMinutes = [Math]::Max(1, [Math]::Min(240, [int]$data.Minutes))
+        $script:IdleDimBrightness = [Math]::Max(0, [Math]::Min(100, [int]$data.Brightness))
+        $script:IdleDimRestoreOnActivity = [bool]$data.RestoreOnActivity
+    } catch {
+        Update-Status "Idle dim settings could not be loaded"
+    }
+}
+
+function Save-IdleDimSettings {
+    $payload = [PSCustomObject]@{
+        Enabled = [bool]$script:IdleDimEnabled
+        Minutes = [int]$script:IdleDimMinutes
+        Brightness = [int]$script:IdleDimBrightness
+        RestoreOnActivity = [bool]$script:IdleDimRestoreOnActivity
+    }
+    $payload | ConvertTo-Json | Set-Content -Path $script:IdleDimSettingsPath -Encoding UTF8
+}
+
+function Update-IdleDimControls {
+    if ($null -eq $idleDimEnabledCheckbox) { return }
+    $script:UpdatingIdleDimUI = $true
+    try {
+        $idleDimEnabledCheckbox.IsChecked = [bool]$script:IdleDimEnabled
+        $idleDimMinutesBox.Text = ([int]$script:IdleDimMinutes).ToString()
+        $idleDimBrightnessBox.Text = ([int]$script:IdleDimBrightness).ToString()
+        $idleDimRestoreCheckbox.IsChecked = [bool]$script:IdleDimRestoreOnActivity
+        $idleDimStatusText.Text = if ($script:IdleDimEnabled) { if ($script:IdleDimActive) { "Dimmed" } else { "Watching" } } else { "Off" }
+    } finally {
+        $script:UpdatingIdleDimUI = $false
+    }
+}
+
+function Read-IdleDimSettingsFromUI {
+    $minutes = 0
+    $brightness = 0
+    if (-not [int]::TryParse($idleDimMinutesBox.Text.Trim(), [ref]$minutes)) { Update-Status "Idle minutes must be a number"; return $false }
+    if (-not [int]::TryParse($idleDimBrightnessBox.Text.Trim(), [ref]$brightness)) { Update-Status "Idle brightness must be a number"; return $false }
+    $script:IdleDimMinutes = [Math]::Max(1, [Math]::Min(240, $minutes))
+    $script:IdleDimBrightness = [Math]::Max(0, [Math]::Min(100, $brightness))
+    $script:IdleDimRestoreOnActivity = [bool]$idleDimRestoreCheckbox.IsChecked
+    Update-IdleDimControls
+    return $true
+}
+
+function Get-IdleSeconds {
+    $info = New-Object MonitorAPI+LASTINPUTINFO
+    $info.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf($info)
+    if (-not [MonitorAPI]::GetLastInputInfo([ref]$info)) { return 0 }
+    $current = [MonitorAPI]::GetTickCount()
+    $elapsedMs = if ($current -ge $info.dwTime) { $current - $info.dwTime } else { ([uint64][uint32]::MaxValue - $info.dwTime) + $current }
+    return [int]($elapsedMs / 1000)
+}
+
+function Invoke-IdleDimCheck {
+    if (-not $script:IdleDimEnabled) { return }
+    $idleSeconds = Get-IdleSeconds
+    $thresholdSeconds = [Math]::Max(1, [int]$script:IdleDimMinutes) * 60
+    if (-not $script:IdleDimActive -and $idleSeconds -ge $thresholdSeconds) {
+        $script:IdleDimPreviousBrightness = [int]$brightnessSlider.Value
+        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value ([uint32]$script:IdleDimBrightness) -Force
+        $script:UpdatingUI = $true
+        try {
+            $brightnessSlider.Value = $script:IdleDimBrightness
+            $brightnessValue.Text = ([int]$script:IdleDimBrightness).ToString()
+        } finally {
+            $script:UpdatingUI = $false
+        }
+        $script:IdleDimActive = $true
+        Update-IdleDimControls
+        Update-TrayPopupState
+        Update-TrayIconText
+        Update-Status "Idle dim active"
+    } elseif ($script:IdleDimActive -and $idleSeconds -lt 5) {
+        if ($script:IdleDimRestoreOnActivity -and $null -ne $script:IdleDimPreviousBrightness) {
+            Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value ([uint32]$script:IdleDimPreviousBrightness) -Force
+            $script:UpdatingUI = $true
+            try {
+                $brightnessSlider.Value = $script:IdleDimPreviousBrightness
+                $brightnessValue.Text = ([int]$script:IdleDimPreviousBrightness).ToString()
+            } finally {
+                $script:UpdatingUI = $false
+            }
+        }
+        $script:IdleDimActive = $false
+        $script:IdleDimPreviousBrightness = $null
+        Update-IdleDimControls
+        Update-TrayPopupState
+        Update-TrayIconText
+        Update-Status "Idle dim restored"
+    }
+}
+
+function Start-IdleDimWatcher {
+    if ($null -eq $script:IdleDimTimer) {
+        $script:IdleDimTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:IdleDimTimer.Interval = [TimeSpan]::FromSeconds(15)
+        $script:IdleDimTimer.Add_Tick({ Invoke-IdleDimCheck })
+    }
+    if ($script:IdleDimEnabled) { $script:IdleDimTimer.Start() } else { $script:IdleDimTimer.Stop() }
 }
 
 function Get-CurrentMonitorLabel {
@@ -1515,6 +1651,30 @@ $scheduleRemoveBtn.Add_Click({
     Update-Status "Removed schedule at $time"
 })
 
+$idleDimEnabledCheckbox.Add_Checked({
+    if ($script:UpdatingIdleDimUI) { return }
+    if (-not (Read-IdleDimSettingsFromUI)) { return }
+    $script:IdleDimEnabled = $true
+    Save-IdleDimSettings
+    Start-IdleDimWatcher
+    Update-IdleDimControls
+    Update-Status "Idle dim on"
+})
+$idleDimEnabledCheckbox.Add_Unchecked({
+    if ($script:UpdatingIdleDimUI) { return }
+    $script:IdleDimEnabled = $false
+    Save-IdleDimSettings
+    Start-IdleDimWatcher
+    Update-IdleDimControls
+    Update-Status "Idle dim off"
+})
+$idleDimSaveBtn.Add_Click({
+    if (-not (Read-IdleDimSettingsFromUI)) { return }
+    Save-IdleDimSettings
+    Start-IdleDimWatcher
+    Update-Status "Idle dim settings saved"
+})
+
 $displaySettingsBtn.Add_Click({ Start-Process "ms-settings:display" }); $colorMgmtBtn.Add_Click({ Start-Process "colorcpl.exe" })
 $gpuControlPanelBtn.Add_Click({ if ($script:HasNvidia) { Start-Process "nvidia-settings" -ErrorAction SilentlyContinue } else { Start-Process "ms-settings:display" } })
 $resetGammaBtn.Add_Click({ Set-GammaRamp -Gamma 1.0; $script:UpdatingUI = $true; $gammaSlider.Value = 100; $gammaValue.Text = "1.00"; $gammaRedSlider.Value = 100; $gammaRedValue.Text = "1.00"; $gammaGreenSlider.Value = 100; $gammaGreenValue.Text = "1.00"; $gammaBlueSlider.Value = 100; $gammaBlueValue.Text = "1.00"; $script:UpdatingUI = $false; Update-Status "Gamma Reset" })
@@ -1538,6 +1698,7 @@ function Update-GpuStats {
 Get-Monitors; Initialize-GPU; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList
 Load-AppProfileRules; Update-AppProfileControls; Start-AppProfileWatcher
 Load-ProfileSchedules; Update-ScheduleControls; Start-ProfileScheduleWatcher
+Load-IdleDimSettings; Update-IdleDimControls; Start-IdleDimWatcher
 if (-not $script:HasNvidia) { $gpuTab.Visibility = "Collapsed" } else {
     $script:GpuTimer = New-Object System.Windows.Threading.DispatcherTimer; $script:GpuTimer.Interval = [TimeSpan]::FromSeconds(2)
     $script:GpuTimer.Add_Tick({ Update-GpuStats }); $script:GpuTimer.Start(); Update-GpuStats
@@ -1550,7 +1711,7 @@ $window.Add_StateChanged({
     if ($window.WindowState -eq [System.Windows.WindowState]::Minimized) { Hide-MainWindowToTray }
 })
 
-$window.Add_Closed({ if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }; if ($script:ProfileScheduleTimer) { $script:ProfileScheduleTimer.Stop() }
+$window.Add_Closed({ if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }; if ($script:ProfileScheduleTimer) { $script:ProfileScheduleTimer.Stop() }; if ($script:IdleDimTimer) { $script:IdleDimTimer.Stop() }
     Dispose-TrayMode
     foreach ($mon in $script:PhysicalMonitors) { if ($mon.Handle -ne [IntPtr]::Zero) { [MonitorAPI]::DestroyPhysicalMonitor($mon.Handle) | Out-Null } }
 })

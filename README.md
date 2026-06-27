@@ -1,7 +1,7 @@
 # MonitorControl Pro
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v3.3.0-brightgreen" alt="Version v3.3.0">
+  <img src="https://img.shields.io/badge/Version-v3.4.0-brightgreen" alt="Version v3.4.0">
   <img src="https://img.shields.io/badge/PowerShell-5.1+-blue?logo=powershell" alt="PowerShell 5.1+">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/DDC%2FCI-Supported-green" alt="DDC/CI">
@@ -29,6 +29,7 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 - **System Tray Mode** - Persistent notification-area icon with a brightness popup, linked-monitor toggle, and profile cycling
 - **Per-Application Profiles** - Watch the foreground app and automatically apply a saved profile when its executable matches a rule
 - **Scheduled Profiles** - Apply saved profiles automatically from explicit `HH:mm` daily schedule rules
+- **Idle Dim** - Poll Windows idle time and dim all monitors after inactivity, with optional brightness restore on activity
 - **Auto Mode** - Automatic brightness and color temperature based on time of day:
   - Day (7 AM - 6 PM): 80% brightness, neutral colors
   - Evening (6 PM - 9 PM): 60% brightness, slightly warm
@@ -114,6 +115,11 @@ $Shortcut.Save()
 - Open the **Schedule** tab, enable **Scheduled profiles**, and add `HH:mm` rules that map times to profiles
 - The watcher applies the latest due rule once per schedule boundary, including the current effective rule when scheduling is enabled
 - Rules are saved in `%APPDATA%\MonitorControlPro\profile-schedules.json`
+
+### Idle Dim
+- Open the **Schedule** tab and enable **Idle dim**
+- Set the idle threshold in minutes, target brightness, and whether activity should restore the previous brightness
+- Settings are saved in `%APPDATA%\MonitorControlPro\idle-dim.json`
 
 ### Navigation
 - Click on monitor rectangles to select different displays
