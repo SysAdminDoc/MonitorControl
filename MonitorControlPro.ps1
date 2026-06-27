@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.2.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro v3.3.0 - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.2.0 - Enhanced with per-application profile switching
+    Version: 3.3.0 - Enhanced with scheduled profile switching
 #>
 
 param([switch]$StartMinimized, [string]$LoadProfile)
@@ -131,6 +131,7 @@ $script:GpuTimer = $null
 $script:AutoModeTimer = $null
 $script:ProfilesPath = "$env:APPDATA\MonitorControlPro"
 $script:AppProfileRulesPath = Join-Path $script:ProfilesPath "app-profile-rules.json"
+$script:ProfileScheduleRulesPath = Join-Path $script:ProfilesPath "profile-schedules.json"
 $script:UpdatingUI = $false
 $script:ApplyToAll = $false
 $script:AutoModeEnabled = $false
@@ -141,6 +142,11 @@ $script:AppProfileCaptureTimer = $null
 $script:UpdatingAppProfileUI = $false
 $script:LastForegroundExe = $null
 $script:LastAppliedAppProfileKey = $null
+$script:ProfileScheduleEnabled = $false
+$script:ProfileSchedules = @()
+$script:ProfileScheduleTimer = $null
+$script:UpdatingScheduleUI = $false
+$script:LastAppliedScheduleKey = $null
 $script:TrayIcon = $null
 $script:TrayPopup = $null
 $script:TrayBrightnessSlider = $null
@@ -305,7 +311,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.2.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
+        Title="MonitorControl Pro v3.3.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
         Background="#0a0a0a" WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
     <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
@@ -439,7 +445,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
             <TextBlock Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
-            <TextBlock Text="v3.2.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
+            <TextBlock Text="v3.3.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal">
             <CheckBox x:Name="ApplyAllCheckbox" Content="All Monitors" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -625,6 +631,27 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
                 </Grid></Border>
             </Grid></Border>
         </TabItem>
+        <TabItem Header="Schedule">
+            <Border Background="#151515" CornerRadius="0,5,5,5" Padding="10"><Grid>
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                <Border Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid>
+                    <CheckBox x:Name="ScheduleEnabledCheckbox" Content="Scheduled profiles" VerticalAlignment="Center"/>
+                    <TextBlock x:Name="ScheduleStatusText" Text="Off" FontSize="9" Foreground="#707070" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                </Grid></Border>
+                <Border Grid.Row="2" Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="76"/><ColumnDefinition Width="6"/><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <TextBox x:Name="ScheduleTimeBox" Text="21:00" VerticalAlignment="Center"/>
+                    <ComboBox x:Name="ScheduleProfileCombo" Grid.Column="2"/>
+                    <Button x:Name="ScheduleAddBtn" Grid.Column="4" Content="Add" Style="{StaticResource GreenBtn}" Padding="10,4" FontSize="9"/>
+                    <Button x:Name="ScheduleRemoveBtn" Grid.Column="6" Content="Remove" Style="{StaticResource WarnBtn}" Padding="10,4" FontSize="9"/>
+                </Grid></Border>
+                <Border Grid.Row="4" Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                    <TextBlock Text="Profile schedule" FontSize="10" Foreground="#909090"/>
+                    <ListBox x:Name="ScheduleRulesList" Grid.Row="2" Background="#111" BorderThickness="0" Foreground="#e0e0e0" FontSize="11"/>
+                </Grid></Border>
+            </Grid></Border>
+        </TabItem>
         <TabItem Header="System">
             <Border Background="#151515" CornerRadius="0,5,5,5" Padding="10"><Grid>
                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
@@ -703,6 +730,9 @@ $appProfileEnabledCheckbox = $window.FindName("AppProfileEnabledCheckbox"); $app
 $appProfileExeBox = $window.FindName("AppProfileExeBox"); $appProfileCaptureBtn = $window.FindName("AppProfileCaptureBtn")
 $appProfileProfileCombo = $window.FindName("AppProfileProfileCombo"); $appProfileAddBtn = $window.FindName("AppProfileAddBtn")
 $appProfileRemoveBtn = $window.FindName("AppProfileRemoveBtn"); $appProfileRulesList = $window.FindName("AppProfileRulesList")
+$scheduleEnabledCheckbox = $window.FindName("ScheduleEnabledCheckbox"); $scheduleStatusText = $window.FindName("ScheduleStatusText")
+$scheduleTimeBox = $window.FindName("ScheduleTimeBox"); $scheduleProfileCombo = $window.FindName("ScheduleProfileCombo")
+$scheduleAddBtn = $window.FindName("ScheduleAddBtn"); $scheduleRemoveBtn = $window.FindName("ScheduleRemoveBtn"); $scheduleRulesList = $window.FindName("ScheduleRulesList")
 $displaySettingsBtn = $window.FindName("DisplaySettingsBtn"); $colorMgmtBtn = $window.FindName("ColorMgmtBtn"); $gpuControlPanelBtn = $window.FindName("GpuControlPanelBtn")
 $resetGammaBtn = $window.FindName("ResetGammaBtn")
 $gammaRedSlider = $window.FindName("GammaRedSlider"); $gammaRedValue = $window.FindName("GammaRedValue")
@@ -836,16 +866,22 @@ function Save-AppProfileRules {
     $payload | ConvertTo-Json -Depth 4 | Set-Content -Path $script:AppProfileRulesPath -Encoding UTF8
 }
 
-function Update-AppProfileProfileCombo {
-    if ($null -eq $appProfileProfileCombo) { return }
-    $selected = if ($appProfileProfileCombo.SelectedItem) { [string]$appProfileProfileCombo.SelectedItem } else { $null }
-    $appProfileProfileCombo.Items.Clear()
-    foreach ($profile in @($profilesList.Items)) { $appProfileProfileCombo.Items.Add([string]$profile) | Out-Null }
-    if ($selected -and $appProfileProfileCombo.Items.Contains($selected)) {
-        $appProfileProfileCombo.SelectedItem = $selected
-    } elseif ($appProfileProfileCombo.Items.Count -gt 0) {
-        $appProfileProfileCombo.SelectedIndex = 0
+function Update-ProfileCombo {
+    param($Combo)
+    if ($null -eq $Combo) { return }
+    $selected = if ($Combo.SelectedItem) { [string]$Combo.SelectedItem } else { $null }
+    $Combo.Items.Clear()
+    foreach ($profile in @($profilesList.Items)) { $Combo.Items.Add([string]$profile) | Out-Null }
+    if ($selected -and $Combo.Items.Contains($selected)) {
+        $Combo.SelectedItem = $selected
+    } elseif ($Combo.Items.Count -gt 0) {
+        $Combo.SelectedIndex = 0
     }
+}
+
+function Update-AppProfileProfileCombo {
+    Update-ProfileCombo -Combo $appProfileProfileCombo
+    Update-ProfileCombo -Combo $scheduleProfileCombo
 }
 
 function Update-AppProfileControls {
@@ -930,6 +966,102 @@ function Start-AppProfileWatcher {
         $script:AppProfileTimer.Add_Tick({ Invoke-AppProfileCheck })
     }
     if ($script:AppProfileEnabled) { $script:AppProfileTimer.Start() } else { $script:AppProfileTimer.Stop() }
+}
+
+function Normalize-ScheduleTime {
+    param([string]$TimeText)
+    $text = $TimeText.Trim()
+    if ($text -notmatch '^([01]?\d|2[0-3]):([0-5]\d)$') { return "" }
+    $hour = [int]$matches[1]
+    $minute = [int]$matches[2]
+    return "{0:D2}:{1:D2}" -f $hour, $minute
+}
+
+function Get-ScheduleMinutes {
+    param([string]$TimeText)
+    $time = Normalize-ScheduleTime -TimeText $TimeText
+    if (-not $time) { return -1 }
+    $parts = $time.Split(':')
+    return ([int]$parts[0] * 60) + [int]$parts[1]
+}
+
+function Load-ProfileSchedules {
+    $script:ProfileScheduleEnabled = $false
+    $script:ProfileSchedules = @()
+    if (-not (Test-Path $script:ProfileScheduleRulesPath)) { return }
+    try {
+        $data = Get-Content -Path $script:ProfileScheduleRulesPath -Raw | ConvertFrom-Json
+        $script:ProfileScheduleEnabled = [bool]$data.Enabled
+        foreach ($rule in @($data.Rules)) {
+            $time = Normalize-ScheduleTime -TimeText ([string]$rule.Time)
+            $profile = ([string]$rule.Profile).Trim()
+            if ($time -and $profile) { $script:ProfileSchedules += [PSCustomObject]@{ Time = $time; Profile = $profile } }
+        }
+    } catch {
+        Update-Status "Profile schedule could not be loaded"
+    }
+}
+
+function Save-ProfileSchedules {
+    $payload = [PSCustomObject]@{
+        Enabled = [bool]$script:ProfileScheduleEnabled
+        Rules = @($script:ProfileSchedules | Sort-Object -Property Time)
+    }
+    $payload | ConvertTo-Json -Depth 4 | Set-Content -Path $script:ProfileScheduleRulesPath -Encoding UTF8
+}
+
+function Update-ScheduleControls {
+    if ($null -eq $scheduleEnabledCheckbox) { return }
+    $script:UpdatingScheduleUI = $true
+    try {
+        $scheduleRulesList.Items.Clear()
+        foreach ($rule in ($script:ProfileSchedules | Sort-Object -Property Time)) {
+            $item = New-Object System.Windows.Controls.ListBoxItem
+            $item.Content = "$($rule.Time) -> $($rule.Profile)"
+            $item.Tag = $rule.Time
+            $scheduleRulesList.Items.Add($item) | Out-Null
+        }
+        $scheduleEnabledCheckbox.IsChecked = [bool]$script:ProfileScheduleEnabled
+        $scheduleStatusText.Text = if ($script:ProfileScheduleEnabled) { "Watching" } else { "Off" }
+        Update-ProfileCombo -Combo $scheduleProfileCombo
+    } finally {
+        $script:UpdatingScheduleUI = $false
+    }
+}
+
+function Get-ActiveScheduleRule {
+    if ($script:ProfileSchedules.Count -eq 0) { return $null }
+    $now = Get-Date
+    $nowMinutes = ($now.Hour * 60) + $now.Minute
+    $ordered = @($script:ProfileSchedules | Sort-Object @{ Expression = { Get-ScheduleMinutes -TimeText $_.Time } })
+    $due = @($ordered | Where-Object { (Get-ScheduleMinutes -TimeText $_.Time) -le $nowMinutes })
+    $rule = if ($due.Count -gt 0) { $due[-1] } else { $ordered[-1] }
+    $effectiveDate = if ($due.Count -gt 0) { $now.ToString("yyyy-MM-dd") } else { $now.AddDays(-1).ToString("yyyy-MM-dd") }
+    return [PSCustomObject]@{ Rule = $rule; Key = "$effectiveDate $($rule.Time)|$($rule.Profile)" }
+}
+
+function Invoke-ScheduleCheck {
+    if (-not $script:ProfileScheduleEnabled -or $script:ProfileSchedules.Count -eq 0) { return }
+    $active = Get-ActiveScheduleRule
+    if ($null -eq $active -or $null -eq $active.Rule) { return }
+    if ($script:LastAppliedScheduleKey -eq $active.Key) { return }
+    if (Apply-ProfileByName -Name $active.Rule.Profile -Reason "Schedule $($active.Rule.Time) ->") {
+        $script:LastAppliedScheduleKey = $active.Key
+    }
+}
+
+function Start-ProfileScheduleWatcher {
+    if ($null -eq $script:ProfileScheduleTimer) {
+        $script:ProfileScheduleTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:ProfileScheduleTimer.Interval = [TimeSpan]::FromSeconds(30)
+        $script:ProfileScheduleTimer.Add_Tick({ Invoke-ScheduleCheck })
+    }
+    if ($script:ProfileScheduleEnabled) {
+        $script:ProfileScheduleTimer.Start()
+        Invoke-ScheduleCheck
+    } else {
+        $script:ProfileScheduleTimer.Stop()
+    }
 }
 
 function Get-CurrentMonitorLabel {
@@ -1285,9 +1417,12 @@ $deleteProfileBtn.Add_Click({
         $deletedProfile = [string]$profilesList.SelectedItem
         Remove-Item "$script:ProfilesPath\$deletedProfile.json" -ErrorAction SilentlyContinue
         $script:AppProfileRules = @($script:AppProfileRules | Where-Object { $_.Profile -ne $deletedProfile })
+        $script:ProfileSchedules = @($script:ProfileSchedules | Where-Object { $_.Profile -ne $deletedProfile })
         Save-AppProfileRules
+        Save-ProfileSchedules
         Update-ProfilesList
         Update-AppProfileControls
+        Update-ScheduleControls
     }
 })
 
@@ -1344,6 +1479,42 @@ $appProfileRemoveBtn.Add_Click({
     Update-Status "Removed app profile for $exe"
 })
 
+$scheduleEnabledCheckbox.Add_Checked({
+    if ($script:UpdatingScheduleUI) { return }
+    $script:ProfileScheduleEnabled = $true
+    Save-ProfileSchedules
+    Start-ProfileScheduleWatcher
+    Update-ScheduleControls
+    Update-Status "Scheduled profiles on"
+})
+$scheduleEnabledCheckbox.Add_Unchecked({
+    if ($script:UpdatingScheduleUI) { return }
+    $script:ProfileScheduleEnabled = $false
+    Save-ProfileSchedules
+    Start-ProfileScheduleWatcher
+    Update-ScheduleControls
+    Update-Status "Scheduled profiles off"
+})
+$scheduleAddBtn.Add_Click({
+    $time = Normalize-ScheduleTime -TimeText $scheduleTimeBox.Text
+    $profile = if ($scheduleProfileCombo.SelectedItem) { [string]$scheduleProfileCombo.SelectedItem } else { "" }
+    if (-not $time -or -not $profile) { Update-Status "Use HH:mm and choose a profile"; return }
+    $script:ProfileSchedules = @($script:ProfileSchedules | Where-Object { $_.Time -ne $time })
+    $script:ProfileSchedules += [PSCustomObject]@{ Time = $time; Profile = $profile }
+    Save-ProfileSchedules
+    Update-ScheduleControls
+    Update-Status "Scheduled $profile at $time"
+    Invoke-ScheduleCheck
+})
+$scheduleRemoveBtn.Add_Click({
+    if ($scheduleRulesList.SelectedItem -eq $null) { return }
+    $time = [string]$scheduleRulesList.SelectedItem.Tag
+    $script:ProfileSchedules = @($script:ProfileSchedules | Where-Object { $_.Time -ne $time })
+    Save-ProfileSchedules
+    Update-ScheduleControls
+    Update-Status "Removed schedule at $time"
+})
+
 $displaySettingsBtn.Add_Click({ Start-Process "ms-settings:display" }); $colorMgmtBtn.Add_Click({ Start-Process "colorcpl.exe" })
 $gpuControlPanelBtn.Add_Click({ if ($script:HasNvidia) { Start-Process "nvidia-settings" -ErrorAction SilentlyContinue } else { Start-Process "ms-settings:display" } })
 $resetGammaBtn.Add_Click({ Set-GammaRamp -Gamma 1.0; $script:UpdatingUI = $true; $gammaSlider.Value = 100; $gammaValue.Text = "1.00"; $gammaRedSlider.Value = 100; $gammaRedValue.Text = "1.00"; $gammaGreenSlider.Value = 100; $gammaGreenValue.Text = "1.00"; $gammaBlueSlider.Value = 100; $gammaBlueValue.Text = "1.00"; $script:UpdatingUI = $false; Update-Status "Gamma Reset" })
@@ -1366,6 +1537,7 @@ function Update-GpuStats {
 # Initialize
 Get-Monitors; Initialize-GPU; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList
 Load-AppProfileRules; Update-AppProfileControls; Start-AppProfileWatcher
+Load-ProfileSchedules; Update-ScheduleControls; Start-ProfileScheduleWatcher
 if (-not $script:HasNvidia) { $gpuTab.Visibility = "Collapsed" } else {
     $script:GpuTimer = New-Object System.Windows.Threading.DispatcherTimer; $script:GpuTimer.Interval = [TimeSpan]::FromSeconds(2)
     $script:GpuTimer.Add_Tick({ Update-GpuStats }); $script:GpuTimer.Start(); Update-GpuStats
@@ -1378,7 +1550,7 @@ $window.Add_StateChanged({
     if ($window.WindowState -eq [System.Windows.WindowState]::Minimized) { Hide-MainWindowToTray }
 })
 
-$window.Add_Closed({ if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }
+$window.Add_Closed({ if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }; if ($script:ProfileScheduleTimer) { $script:ProfileScheduleTimer.Stop() }
     Dispose-TrayMode
     foreach ($mon in $script:PhysicalMonitors) { if ($mon.Handle -ne [IntPtr]::Zero) { [MonitorAPI]::DestroyPhysicalMonitor($mon.Handle) | Out-Null } }
 })

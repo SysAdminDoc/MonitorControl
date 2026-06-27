@@ -1,7 +1,7 @@
 # MonitorControl Pro
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v3.2.0-brightgreen" alt="Version v3.2.0">
+  <img src="https://img.shields.io/badge/Version-v3.3.0-brightgreen" alt="Version v3.3.0">
   <img src="https://img.shields.io/badge/PowerShell-5.1+-blue?logo=powershell" alt="PowerShell 5.1+">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/DDC%2FCI-Supported-green" alt="DDC/CI">
@@ -28,6 +28,7 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 ### Automation
 - **System Tray Mode** - Persistent notification-area icon with a brightness popup, linked-monitor toggle, and profile cycling
 - **Per-Application Profiles** - Watch the foreground app and automatically apply a saved profile when its executable matches a rule
+- **Scheduled Profiles** - Apply saved profiles automatically from explicit `HH:mm` daily schedule rules
 - **Auto Mode** - Automatic brightness and color temperature based on time of day:
   - Day (7 AM - 6 PM): 80% brightness, neutral colors
   - Evening (6 PM - 9 PM): 60% brightness, slightly warm
@@ -107,6 +108,12 @@ $Shortcut.Save()
 - Open the **Profiles** tab, enable **Per-application profiles**, and map an executable name such as `photoshop.exe` to a profile
 - Use **Capture** to grab the foreground executable after a short delay, or type the executable name directly
 - Rules are saved in `%APPDATA%\MonitorControlPro\app-profile-rules.json`
+
+### Scheduled Profiles
+- Create or load a saved monitor profile
+- Open the **Schedule** tab, enable **Scheduled profiles**, and add `HH:mm` rules that map times to profiles
+- The watcher applies the latest due rule once per schedule boundary, including the current effective rule when scheduling is enabled
+- Rules are saved in `%APPDATA%\MonitorControlPro\profile-schedules.json`
 
 ### Navigation
 - Click on monitor rectangles to select different displays
@@ -270,7 +277,6 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 - [ ] AMD GPU monitoring support
 - [ ] NVAPI integration for digital vibrance
 - [ ] WMI fallback for laptop displays
-- [ ] Scheduled profile switching
 
 ## License
 
