@@ -1,7 +1,7 @@
 # MonitorControl Pro
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v3.1.0-brightgreen" alt="Version v3.1.0">
+  <img src="https://img.shields.io/badge/Version-v3.2.0-brightgreen" alt="Version v3.2.0">
   <img src="https://img.shields.io/badge/PowerShell-5.1+-blue?logo=powershell" alt="PowerShell 5.1+">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/DDC%2FCI-Supported-green" alt="DDC/CI">
@@ -27,6 +27,7 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 
 ### Automation
 - **System Tray Mode** - Persistent notification-area icon with a brightness popup, linked-monitor toggle, and profile cycling
+- **Per-Application Profiles** - Watch the foreground app and automatically apply a saved profile when its executable matches a rule
 - **Auto Mode** - Automatic brightness and color temperature based on time of day:
   - Day (7 AM - 6 PM): 80% brightness, neutral colors
   - Evening (6 PM - 9 PM): 60% brightness, slightly warm
@@ -100,6 +101,12 @@ $Shortcut.Save()
 - Click the tray icon to open the compact brightness popup
 - Double-click the tray icon or use **Next Profile** in the tray menu to cycle saved profiles
 - Use **Link Monitors** in the tray popup or menu to apply brightness changes to every detected monitor
+
+### Per-Application Profiles
+- Create or load a saved monitor profile
+- Open the **Profiles** tab, enable **Per-application profiles**, and map an executable name such as `photoshop.exe` to a profile
+- Use **Capture** to grab the foreground executable after a short delay, or type the executable name directly
+- Rules are saved in `%APPDATA%\MonitorControlPro\app-profile-rules.json`
 
 ### Navigation
 - Click on monitor rectangles to select different displays
@@ -264,7 +271,6 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 - [ ] NVAPI integration for digital vibrance
 - [ ] WMI fallback for laptop displays
 - [ ] Scheduled profile switching
-- [ ] Per-application profiles
 
 ## License
 

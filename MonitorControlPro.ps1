@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.1.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro v3.2.0 - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.1.0 - Enhanced with tray mode and profile cycling
+    Version: 3.2.0 - Enhanced with per-application profile switching
 #>
 
 param([switch]$StartMinimized, [string]$LoadProfile)
@@ -28,6 +28,10 @@ public class MonitorAPI
     public static extern bool EnumDisplayDevices(string lpDevice, uint iDevNum, ref DISPLAY_DEVICE lpDisplayDevice, uint dwFlags);
     [DllImport("user32.dll", CharSet = CharSet.Auto)]
     public static extern bool EnumDisplaySettingsEx(string lpszDeviceName, int iModeNum, ref DEVMODE lpDevMode, uint dwFlags);
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
     public delegate bool MonitorEnumDelegate(IntPtr hMonitor, IntPtr hdcMonitor, ref RECT lprcMonitor, IntPtr dwData);
 
     [StructLayout(LayoutKind.Sequential)]
@@ -126,9 +130,17 @@ $script:NvidiaSmiPath = $null
 $script:GpuTimer = $null
 $script:AutoModeTimer = $null
 $script:ProfilesPath = "$env:APPDATA\MonitorControlPro"
+$script:AppProfileRulesPath = Join-Path $script:ProfilesPath "app-profile-rules.json"
 $script:UpdatingUI = $false
 $script:ApplyToAll = $false
 $script:AutoModeEnabled = $false
+$script:AppProfileEnabled = $false
+$script:AppProfileRules = @()
+$script:AppProfileTimer = $null
+$script:AppProfileCaptureTimer = $null
+$script:UpdatingAppProfileUI = $false
+$script:LastForegroundExe = $null
+$script:LastAppliedAppProfileKey = $null
 $script:TrayIcon = $null
 $script:TrayPopup = $null
 $script:TrayBrightnessSlider = $null
@@ -293,7 +305,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.1.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
+        Title="MonitorControl Pro v3.2.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
         Background="#0a0a0a" WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
     <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
@@ -427,7 +439,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
             <TextBlock Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
-            <TextBlock Text="v3.1.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
+            <TextBlock Text="v3.2.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal">
             <CheckBox x:Name="ApplyAllCheckbox" Content="All Monitors" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -583,7 +595,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
         </TabItem>
         <TabItem Header="Profiles">
             <Border Background="#151515" CornerRadius="0,5,5,5" Padding="10"><Grid>
-                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="*"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="*"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Border Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                     <TextBox x:Name="ProfileNameBox" Text="My Profile"/>
                     <Button x:Name="SaveProfileBtn" Grid.Column="2" Content="Save" Style="{StaticResource GreenBtn}" Padding="10,4"/>
@@ -596,6 +608,21 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
                     <Button x:Name="LoadProfileBtn" Content="Load" Style="{StaticResource AccBtn}"/>
                     <Button x:Name="DeleteProfileBtn" Grid.Column="2" Content="Delete" Style="{StaticResource WarnBtn}"/>
                 </Grid>
+                <Border Grid.Row="6" Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <Grid><CheckBox x:Name="AppProfileEnabledCheckbox" Content="Per-application profiles" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="AppProfileStatusText" Text="Off" FontSize="9" Foreground="#707070" HorizontalAlignment="Right" VerticalAlignment="Center"/></Grid>
+                    <Grid Grid.Row="2"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                        <TextBox x:Name="AppProfileExeBox" Text="app.exe"/>
+                        <Button x:Name="AppProfileCaptureBtn" Grid.Column="2" Content="Capture" Style="{StaticResource Btn}" Padding="8,4" FontSize="9"/>
+                    </Grid>
+                    <Grid Grid.Row="4"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                        <ComboBox x:Name="AppProfileProfileCombo"/>
+                        <Button x:Name="AppProfileAddBtn" Grid.Column="2" Content="Add" Style="{StaticResource GreenBtn}" Padding="10,4" FontSize="9"/>
+                        <Button x:Name="AppProfileRemoveBtn" Grid.Column="4" Content="Remove" Style="{StaticResource WarnBtn}" Padding="10,4" FontSize="9"/>
+                    </Grid>
+                    <ListBox x:Name="AppProfileRulesList" Grid.Row="6" Height="66" Background="#111" BorderThickness="0" Foreground="#e0e0e0" FontSize="10"/>
+                </Grid></Border>
             </Grid></Border>
         </TabItem>
         <TabItem Header="System">
@@ -672,6 +699,10 @@ $vcpCodeBox = $window.FindName("VCPCodeBox"); $vcpPresetCombo = $window.FindName
 $vcpResultBox = $window.FindName("VCPResultBox"); $vcpSetValueBox = $window.FindName("VCPSetValueBox"); $vcpSetBtn = $window.FindName("VCPSetBtn"); $vcpScanBtn = $window.FindName("VCPScanBtn")
 $profileNameBox = $window.FindName("ProfileNameBox"); $profilesList = $window.FindName("ProfilesList")
 $saveProfileBtn = $window.FindName("SaveProfileBtn"); $loadProfileBtn = $window.FindName("LoadProfileBtn"); $deleteProfileBtn = $window.FindName("DeleteProfileBtn")
+$appProfileEnabledCheckbox = $window.FindName("AppProfileEnabledCheckbox"); $appProfileStatusText = $window.FindName("AppProfileStatusText")
+$appProfileExeBox = $window.FindName("AppProfileExeBox"); $appProfileCaptureBtn = $window.FindName("AppProfileCaptureBtn")
+$appProfileProfileCombo = $window.FindName("AppProfileProfileCombo"); $appProfileAddBtn = $window.FindName("AppProfileAddBtn")
+$appProfileRemoveBtn = $window.FindName("AppProfileRemoveBtn"); $appProfileRulesList = $window.FindName("AppProfileRulesList")
 $displaySettingsBtn = $window.FindName("DisplaySettingsBtn"); $colorMgmtBtn = $window.FindName("ColorMgmtBtn"); $gpuControlPanelBtn = $window.FindName("GpuControlPanelBtn")
 $resetGammaBtn = $window.FindName("ResetGammaBtn")
 $gammaRedSlider = $window.FindName("GammaRedSlider"); $gammaRedValue = $window.FindName("GammaRedValue")
@@ -747,7 +778,159 @@ function Load-MonitorSettings {
 }
 
 function Refresh-Monitors { Get-Monitors; if ($script:CurrentMonitorIndex -ge $script:PhysicalMonitors.Count) { $script:CurrentMonitorIndex = 0 }; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList }
-function Update-ProfilesList { $profilesList.Items.Clear(); if (Test-Path $script:ProfilesPath) { Get-ChildItem -Path $script:ProfilesPath -Filter "*.json" | ForEach-Object { $profilesList.Items.Add($_.BaseName) | Out-Null } } }
+function Update-ProfilesList {
+    $profilesList.Items.Clear()
+    if (Test-Path $script:ProfilesPath) {
+        Get-ChildItem -Path $script:ProfilesPath -Filter "*.json" |
+            Where-Object { $_.Name -ne "app-profile-rules.json" } |
+            ForEach-Object { $profilesList.Items.Add($_.BaseName) | Out-Null }
+    }
+    Update-AppProfileProfileCombo
+}
+
+function Normalize-AppExeName {
+    param([string]$ExeName)
+    $name = $ExeName.Trim()
+    if ([string]::IsNullOrWhiteSpace($name)) { return "" }
+    $name = [System.IO.Path]::GetFileName($name)
+    if ($name -notmatch '\.exe$') { $name = "$name.exe" }
+    return $name.ToLowerInvariant()
+}
+
+function Get-ForegroundProcessExe {
+    $hwnd = [MonitorAPI]::GetForegroundWindow()
+    if ($hwnd -eq [IntPtr]::Zero) { return $null }
+    $pid = [uint32]0
+    [MonitorAPI]::GetWindowThreadProcessId($hwnd, [ref]$pid) | Out-Null
+    if ($pid -eq 0) { return $null }
+    try {
+        $process = Get-Process -Id $pid -ErrorAction Stop
+        return (Normalize-AppExeName -ExeName "$($process.ProcessName).exe")
+    } catch {
+        return $null
+    }
+}
+
+function Load-AppProfileRules {
+    $script:AppProfileEnabled = $false
+    $script:AppProfileRules = @()
+    if (-not (Test-Path $script:AppProfileRulesPath)) { return }
+    try {
+        $data = Get-Content -Path $script:AppProfileRulesPath -Raw | ConvertFrom-Json
+        $script:AppProfileEnabled = [bool]$data.Enabled
+        foreach ($rule in @($data.Rules)) {
+            $exe = Normalize-AppExeName -ExeName ([string]$rule.Exe)
+            $profile = ([string]$rule.Profile).Trim()
+            if ($exe -and $profile) { $script:AppProfileRules += [PSCustomObject]@{ Exe = $exe; Profile = $profile } }
+        }
+    } catch {
+        Update-Status "App profile rules could not be loaded"
+    }
+}
+
+function Save-AppProfileRules {
+    $payload = [PSCustomObject]@{
+        Enabled = [bool]$script:AppProfileEnabled
+        Rules = @($script:AppProfileRules)
+    }
+    $payload | ConvertTo-Json -Depth 4 | Set-Content -Path $script:AppProfileRulesPath -Encoding UTF8
+}
+
+function Update-AppProfileProfileCombo {
+    if ($null -eq $appProfileProfileCombo) { return }
+    $selected = if ($appProfileProfileCombo.SelectedItem) { [string]$appProfileProfileCombo.SelectedItem } else { $null }
+    $appProfileProfileCombo.Items.Clear()
+    foreach ($profile in @($profilesList.Items)) { $appProfileProfileCombo.Items.Add([string]$profile) | Out-Null }
+    if ($selected -and $appProfileProfileCombo.Items.Contains($selected)) {
+        $appProfileProfileCombo.SelectedItem = $selected
+    } elseif ($appProfileProfileCombo.Items.Count -gt 0) {
+        $appProfileProfileCombo.SelectedIndex = 0
+    }
+}
+
+function Update-AppProfileControls {
+    if ($null -eq $appProfileEnabledCheckbox) { return }
+    $script:UpdatingAppProfileUI = $true
+    try {
+        $appProfileRulesList.Items.Clear()
+        foreach ($rule in ($script:AppProfileRules | Sort-Object -Property Exe)) {
+            $item = New-Object System.Windows.Controls.ListBoxItem
+            $item.Content = "$($rule.Exe) -> $($rule.Profile)"
+            $item.Tag = $rule.Exe
+            $appProfileRulesList.Items.Add($item) | Out-Null
+        }
+        $appProfileEnabledCheckbox.IsChecked = [bool]$script:AppProfileEnabled
+        $appProfileStatusText.Text = if ($script:AppProfileEnabled) { "Watching" } else { "Off" }
+        Update-AppProfileProfileCombo
+    } finally {
+        $script:UpdatingAppProfileUI = $false
+    }
+}
+
+function Apply-ProfileByName {
+    param([string]$Name, [string]$Reason = "Loaded")
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
+    $path = Join-Path $script:ProfilesPath "$Name.json"
+    if (-not (Test-Path $path)) {
+        Update-Status "Profile '$Name' not found"
+        return $false
+    }
+    try {
+        $p = Get-Content $path -Raw | ConvertFrom-Json
+        $script:UpdatingUI = $true
+        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value $p.Brightness
+        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_CONTRAST) -Value $p.Contrast
+        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_RED_GAIN) -Value $p.Red
+        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_GREEN_GAIN) -Value $p.Green
+        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BLUE_GAIN) -Value $p.Blue
+        $brightnessSlider.Value = $p.Brightness; $brightnessValue.Text = $p.Brightness
+        $contrastSlider.Value = $p.Contrast; $contrastValue.Text = $p.Contrast
+        $redSlider.Value = $p.Red; $redValue.Text = $p.Red
+        $greenSlider.Value = $p.Green; $greenValue.Text = $p.Green
+        $blueSlider.Value = $p.Blue; $blueValue.Text = $p.Blue
+        if ($p.Gamma) { $gammaSlider.Value = $p.Gamma; $gammaValue.Text = ($p.Gamma / 100).ToString("F2") }
+        if ($p.GammaRed) {
+            $gammaRedSlider.Value = $p.GammaRed
+            $gammaGreenSlider.Value = $p.GammaGreen
+            $gammaBlueSlider.Value = $p.GammaBlue
+            Set-GammaRamp -Gamma ($p.Gamma/100) -RedMult ($p.GammaRed/100) -GreenMult ($p.GammaGreen/100) -BlueMult ($p.GammaBlue/100)
+        }
+    } catch {
+        Update-Status "Profile '$Name' failed"
+        return $false
+    } finally {
+        $script:UpdatingUI = $false
+    }
+    $profilesList.SelectedItem = $Name
+    Update-Status "$Reason '$Name'"
+    Update-TrayPopupState
+    Update-TrayIconText
+    return $true
+}
+
+function Invoke-AppProfileCheck {
+    if (-not $script:AppProfileEnabled -or $script:AppProfileRules.Count -eq 0) { return }
+    $exe = Get-ForegroundProcessExe
+    if (-not $exe) { return }
+    if ($exe -eq $script:LastForegroundExe) { return }
+    $script:LastForegroundExe = $exe
+    $rule = $script:AppProfileRules | Where-Object { $_.Exe -eq $exe } | Select-Object -First 1
+    if ($null -eq $rule) { return }
+    $key = "$($rule.Exe)|$($rule.Profile)"
+    if ($script:LastAppliedAppProfileKey -eq $key) { return }
+    if (Apply-ProfileByName -Name $rule.Profile -Reason "App profile $exe ->") {
+        $script:LastAppliedAppProfileKey = $key
+    }
+}
+
+function Start-AppProfileWatcher {
+    if ($null -eq $script:AppProfileTimer) {
+        $script:AppProfileTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:AppProfileTimer.Interval = [TimeSpan]::FromSeconds(5)
+        $script:AppProfileTimer.Add_Tick({ Invoke-AppProfileCheck })
+    }
+    if ($script:AppProfileEnabled) { $script:AppProfileTimer.Start() } else { $script:AppProfileTimer.Stop() }
+}
 
 function Get-CurrentMonitorLabel {
     if ($script:ApplyToAll) { return "All monitors" }
@@ -918,7 +1101,7 @@ function Hide-MainWindowToTray {
 function Invoke-NextProfile {
     $profiles = @()
     if (Test-Path $script:ProfilesPath) {
-        $profiles = @(Get-ChildItem -Path $script:ProfilesPath -Filter "*.json" | Sort-Object -Property BaseName)
+        $profiles = @(Get-ChildItem -Path $script:ProfilesPath -Filter "*.json" | Where-Object { $_.Name -ne "app-profile-rules.json" } | Sort-Object -Property BaseName)
     }
     if ($profiles.Count -eq 0) {
         Update-Status "No profiles saved"
@@ -1094,17 +1277,72 @@ $saveProfileBtn.Add_Click({
     $profile | ConvertTo-Json | Set-Content -Path "$script:ProfilesPath\$name.json" -Encoding UTF8; Update-ProfilesList; Update-Status "Saved '$name'"
 })
 $loadProfileBtn.Add_Click({
-    if ($profilesList.SelectedItem -eq $null) { return }; $name = $profilesList.SelectedItem; $path = "$script:ProfilesPath\$name.json"; if (-not (Test-Path $path)) { return }
-    $p = Get-Content $path -Raw | ConvertFrom-Json; $script:UpdatingUI = $true
-    Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value $p.Brightness; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_CONTRAST) -Value $p.Contrast
-    Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_RED_GAIN) -Value $p.Red; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_GREEN_GAIN) -Value $p.Green; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BLUE_GAIN) -Value $p.Blue
-    $brightnessSlider.Value = $p.Brightness; $brightnessValue.Text = $p.Brightness; $contrastSlider.Value = $p.Contrast; $contrastValue.Text = $p.Contrast
-    $redSlider.Value = $p.Red; $redValue.Text = $p.Red; $greenSlider.Value = $p.Green; $greenValue.Text = $p.Green; $blueSlider.Value = $p.Blue; $blueValue.Text = $p.Blue
-    if ($p.Gamma) { $gammaSlider.Value = $p.Gamma; $gammaValue.Text = ($p.Gamma / 100).ToString("F2") }
-    if ($p.GammaRed) { $gammaRedSlider.Value = $p.GammaRed; $gammaGreenSlider.Value = $p.GammaGreen; $gammaBlueSlider.Value = $p.GammaBlue; Set-GammaRamp -Gamma ($p.Gamma/100) -RedMult ($p.GammaRed/100) -GreenMult ($p.GammaGreen/100) -BlueMult ($p.GammaBlue/100) }
-    $script:UpdatingUI = $false; Update-Status "Loaded '$name'"; Update-TrayPopupState; Update-TrayIconText
+    if ($profilesList.SelectedItem -eq $null) { return }
+    Apply-ProfileByName -Name ([string]$profilesList.SelectedItem) | Out-Null
 })
-$deleteProfileBtn.Add_Click({ if ($profilesList.SelectedItem -ne $null -and [System.Windows.MessageBox]::Show("Delete '$($profilesList.SelectedItem)'?", "Delete", "YesNo", "Question") -eq "Yes") { Remove-Item "$script:ProfilesPath\$($profilesList.SelectedItem).json" -ErrorAction SilentlyContinue; Update-ProfilesList } })
+$deleteProfileBtn.Add_Click({
+    if ($profilesList.SelectedItem -ne $null -and [System.Windows.MessageBox]::Show("Delete '$($profilesList.SelectedItem)'?", "Delete", "YesNo", "Question") -eq "Yes") {
+        $deletedProfile = [string]$profilesList.SelectedItem
+        Remove-Item "$script:ProfilesPath\$deletedProfile.json" -ErrorAction SilentlyContinue
+        $script:AppProfileRules = @($script:AppProfileRules | Where-Object { $_.Profile -ne $deletedProfile })
+        Save-AppProfileRules
+        Update-ProfilesList
+        Update-AppProfileControls
+    }
+})
+
+$appProfileEnabledCheckbox.Add_Checked({
+    if ($script:UpdatingAppProfileUI) { return }
+    $script:AppProfileEnabled = $true
+    Save-AppProfileRules
+    Start-AppProfileWatcher
+    Update-AppProfileControls
+    Update-Status "Per-application profiles on"
+})
+$appProfileEnabledCheckbox.Add_Unchecked({
+    if ($script:UpdatingAppProfileUI) { return }
+    $script:AppProfileEnabled = $false
+    Save-AppProfileRules
+    Start-AppProfileWatcher
+    Update-AppProfileControls
+    Update-Status "Per-application profiles off"
+})
+$appProfileCaptureBtn.Add_Click({
+    $appProfileStatusText.Text = "Switch apps..."
+    if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }
+    $script:AppProfileCaptureTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:AppProfileCaptureTimer.Interval = [TimeSpan]::FromSeconds(3)
+    $script:AppProfileCaptureTimer.Add_Tick({
+        $script:AppProfileCaptureTimer.Stop()
+        $exe = Get-ForegroundProcessExe
+        if ($exe) {
+            $appProfileExeBox.Text = $exe
+            $appProfileStatusText.Text = "Captured $exe"
+        } else {
+            $appProfileStatusText.Text = "Capture failed"
+        }
+        $script:AppProfileCaptureTimer = $null
+    })
+    $script:AppProfileCaptureTimer.Start()
+})
+$appProfileAddBtn.Add_Click({
+    $exe = Normalize-AppExeName -ExeName $appProfileExeBox.Text
+    $profile = if ($appProfileProfileCombo.SelectedItem) { [string]$appProfileProfileCombo.SelectedItem } else { "" }
+    if (-not $exe -or -not $profile) { Update-Status "Choose an app and profile"; return }
+    $script:AppProfileRules = @($script:AppProfileRules | Where-Object { $_.Exe -ne $exe })
+    $script:AppProfileRules += [PSCustomObject]@{ Exe = $exe; Profile = $profile }
+    Save-AppProfileRules
+    Update-AppProfileControls
+    Update-Status "Mapped $exe to '$profile'"
+})
+$appProfileRemoveBtn.Add_Click({
+    if ($appProfileRulesList.SelectedItem -eq $null) { return }
+    $exe = [string]$appProfileRulesList.SelectedItem.Tag
+    $script:AppProfileRules = @($script:AppProfileRules | Where-Object { $_.Exe -ne $exe })
+    Save-AppProfileRules
+    Update-AppProfileControls
+    Update-Status "Removed app profile for $exe"
+})
 
 $displaySettingsBtn.Add_Click({ Start-Process "ms-settings:display" }); $colorMgmtBtn.Add_Click({ Start-Process "colorcpl.exe" })
 $gpuControlPanelBtn.Add_Click({ if ($script:HasNvidia) { Start-Process "nvidia-settings" -ErrorAction SilentlyContinue } else { Start-Process "ms-settings:display" } })
@@ -1127,6 +1365,7 @@ function Update-GpuStats {
 
 # Initialize
 Get-Monitors; Initialize-GPU; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList
+Load-AppProfileRules; Update-AppProfileControls; Start-AppProfileWatcher
 if (-not $script:HasNvidia) { $gpuTab.Visibility = "Collapsed" } else {
     $script:GpuTimer = New-Object System.Windows.Threading.DispatcherTimer; $script:GpuTimer.Interval = [TimeSpan]::FromSeconds(2)
     $script:GpuTimer.Add_Tick({ Update-GpuStats }); $script:GpuTimer.Start(); Update-GpuStats
@@ -1139,7 +1378,7 @@ $window.Add_StateChanged({
     if ($window.WindowState -eq [System.Windows.WindowState]::Minimized) { Hide-MainWindowToTray }
 })
 
-$window.Add_Closed({ if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }
+$window.Add_Closed({ if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }
     Dispose-TrayMode
     foreach ($mon in $script:PhysicalMonitors) { if ($mon.Handle -ne [IntPtr]::Zero) { [MonitorAPI]::DestroyPhysicalMonitor($mon.Handle) | Out-Null } }
 })
