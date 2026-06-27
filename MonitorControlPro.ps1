@@ -1,16 +1,16 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro v3.1.0 - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.0 - Enhanced with features from Twinkle Tray, Monitorian, ControlMyMonitor research
+    Version: 3.1.0 - Enhanced with tray mode and profile cycling
 #>
 
 param([switch]$StartMinimized, [string]$LoadProfile)
 
-Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing
 
 $nativeCode = @"
 using System;
@@ -129,6 +129,18 @@ $script:ProfilesPath = "$env:APPDATA\MonitorControlPro"
 $script:UpdatingUI = $false
 $script:ApplyToAll = $false
 $script:AutoModeEnabled = $false
+$script:TrayIcon = $null
+$script:TrayPopup = $null
+$script:TrayBrightnessSlider = $null
+$script:TrayBrightnessValue = $null
+$script:TrayMonitorText = $null
+$script:TrayLinkCheckbox = $null
+$script:TrayLinkMenuItem = $null
+$script:TrayPopupUpdating = $false
+$script:TrayHasShownMinimizeTip = $false
+$script:TraySuppressWindowStateEvent = $false
+$script:IsQuitting = $false
+$script:ProfileCycleIndex = -1
 
 $script:VCPCodeDescriptions = @{
     0x04 = "Factory Reset"; 0x08 = "Reset Color"; 0x10 = "Brightness"; 0x12 = "Contrast"
@@ -281,7 +293,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
+        Title="MonitorControl Pro v3.1.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
         Background="#0a0a0a" WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
     <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
@@ -415,7 +427,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
             <TextBlock Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
-            <TextBlock Text="v3.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
+            <TextBlock Text="v3.1.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal">
             <CheckBox x:Name="ApplyAllCheckbox" Content="All Monitors" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -624,15 +636,12 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
 $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [System.Windows.Markup.XamlReader]::Load($reader)
 
-# codex-branding:start
-                try {
-                    $brandingIconPath = Join-Path $PSScriptRoot 'icon.ico'
-                    if (Test-Path $brandingIconPath) {
-                        $window.Icon = [System.Windows.Media.Imaging.BitmapFrame]::Create((New-Object System.Uri($brandingIconPath)))
-                    }
-                } catch {
-                }
-                # codex-branding:end
+try {
+    $brandingIconPath = Join-Path $PSScriptRoot 'icon.ico'
+    if (Test-Path $brandingIconPath) {
+        $window.Icon = [System.Windows.Media.Imaging.BitmapFrame]::Create((New-Object System.Uri($brandingIconPath)))
+    }
+} catch {}
 # Get all UI elements
 $monitorCanvas = $window.FindName("MonitorCanvas"); $selectedMonitorName = $window.FindName("SelectedMonitorName")
 $selectedMonitorRes = $window.FindName("SelectedMonitorRes"); $selectedMonitorInfo = $window.FindName("SelectedMonitorInfo")
@@ -734,11 +743,265 @@ function Load-MonitorSettings {
         $item = New-Object System.Windows.Controls.ComboBoxItem; $item.Content = $_.N; $item.Tag = $_.V; $inputSourceCombo.Items.Add($item) | Out-Null
     }
     $capabilitiesBox.Text = if ($mon.Capabilities) { $mon.Capabilities } else { "DDC/CI capabilities not available" }
-    $script:UpdatingUI = $false; Update-Status "$($mon.Name)"
+    $script:UpdatingUI = $false; Update-Status "$($mon.Name)"; Update-TrayPopupState; Update-TrayIconText
 }
 
 function Refresh-Monitors { Get-Monitors; if ($script:CurrentMonitorIndex -ge $script:PhysicalMonitors.Count) { $script:CurrentMonitorIndex = 0 }; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList }
 function Update-ProfilesList { $profilesList.Items.Clear(); if (Test-Path $script:ProfilesPath) { Get-ChildItem -Path $script:ProfilesPath -Filter "*.json" | ForEach-Object { $profilesList.Items.Add($_.BaseName) | Out-Null } } }
+
+function Get-CurrentMonitorLabel {
+    if ($script:ApplyToAll) { return "All monitors" }
+    if ($script:PhysicalMonitors.Count -eq 0 -or $script:CurrentMonitorIndex -ge $script:PhysicalMonitors.Count) { return "No monitor" }
+    $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
+    return "$($mon.Index): $($mon.Name)"
+}
+
+function Update-TrayIconText {
+    if ($null -eq $script:TrayIcon) { return }
+    $brightness = [int]$brightnessSlider.Value
+    $text = "MonitorControl Pro - $(Get-CurrentMonitorLabel) - $brightness%"
+    if ($text.Length -gt 63) { $text = $text.Substring(0, 63) }
+    $script:TrayIcon.Text = $text
+}
+
+function Show-TrayNotification {
+    param([string]$Message)
+    if ($null -eq $script:TrayIcon -or -not $script:TrayIcon.Visible) { return }
+    $script:TrayIcon.BalloonTipTitle = "MonitorControl Pro"
+    $script:TrayIcon.BalloonTipText = $Message
+    $script:TrayIcon.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Info
+    $script:TrayIcon.ShowBalloonTip(1500)
+}
+
+function Set-ApplyToAllMode {
+    param([bool]$Enabled)
+    $script:ApplyToAll = $Enabled
+    if ($applyAllCheckbox -and $applyAllCheckbox.IsChecked -ne $Enabled) { $applyAllCheckbox.IsChecked = $Enabled }
+    if ($script:TrayLinkMenuItem -and $script:TrayLinkMenuItem.Checked -ne $Enabled) { $script:TrayLinkMenuItem.Checked = $Enabled }
+    if ($script:TrayLinkCheckbox -and $script:TrayLinkCheckbox.IsChecked -ne $Enabled) { $script:TrayLinkCheckbox.IsChecked = $Enabled }
+    Update-TrayPopupState
+    Update-TrayIconText
+}
+
+function Update-TrayPopupState {
+    if ($null -eq $script:TrayPopup -or $null -eq $script:TrayBrightnessSlider) { return }
+    $script:TrayPopupUpdating = $true
+    try {
+        $script:TrayBrightnessSlider.Minimum = $brightnessSlider.Minimum
+        $script:TrayBrightnessSlider.Maximum = $brightnessSlider.Maximum
+        $value = [Math]::Min($brightnessSlider.Maximum, [Math]::Max($brightnessSlider.Minimum, [double]$brightnessSlider.Value))
+        $script:TrayBrightnessSlider.Value = $value
+        $script:TrayBrightnessValue.Text = ([int]$value).ToString()
+        $script:TrayMonitorText.Text = Get-CurrentMonitorLabel
+        $script:TrayLinkCheckbox.IsChecked = [bool]$script:ApplyToAll
+    } finally {
+        $script:TrayPopupUpdating = $false
+    }
+}
+
+function New-TrayPopup {
+    if ($script:TrayPopup) { return }
+    [xml]$trayPopupXaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Width="300" Height="172" WindowStyle="None" AllowsTransparency="True" Background="Transparent"
+        ResizeMode="NoResize" ShowInTaskbar="False" Topmost="True">
+    <Border Background="#111111" BorderBrush="#333333" BorderThickness="1" CornerRadius="8" Padding="12">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="10"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="8"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="10"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <Grid>
+                <TextBlock x:Name="TrayMonitorText" Text="Monitor" FontSize="12" Foreground="#ffffff" FontFamily="Segoe UI" FontWeight="SemiBold"/>
+                <TextBlock x:Name="TrayBrightnessValue" Text="50" FontSize="12" Foreground="#f5b800" FontFamily="Segoe UI" FontWeight="SemiBold" HorizontalAlignment="Right"/>
+            </Grid>
+            <Slider x:Name="TrayBrightnessSlider" Grid.Row="2" Minimum="0" Maximum="100" Value="50" Height="24"/>
+            <CheckBox x:Name="TrayLinkCheckbox" Grid.Row="4" Content="Link monitors" Foreground="#d0d0d0" FontFamily="Segoe UI" FontSize="11"/>
+            <Grid Grid.Row="6">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="8"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="8"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <Button x:Name="TrayOpenButton" Content="Open" Padding="8,5" Background="#1a1a1a" Foreground="#e0e0e0" BorderBrush="#333333"/>
+                <Button x:Name="TrayProfileButton" Grid.Column="2" Content="Profile" Padding="8,5" Background="#0078d4" Foreground="#ffffff" BorderBrush="#0078d4"/>
+                <Button x:Name="TrayHideButton" Grid.Column="4" Content="Hide" Padding="8,5" Background="#1a1a1a" Foreground="#e0e0e0" BorderBrush="#333333"/>
+            </Grid>
+        </Grid>
+    </Border>
+</Window>
+"@
+    $trayReader = New-Object System.Xml.XmlNodeReader $trayPopupXaml
+    $script:TrayPopup = [System.Windows.Markup.XamlReader]::Load($trayReader)
+    $script:TrayBrightnessSlider = $script:TrayPopup.FindName("TrayBrightnessSlider")
+    $script:TrayBrightnessValue = $script:TrayPopup.FindName("TrayBrightnessValue")
+    $script:TrayMonitorText = $script:TrayPopup.FindName("TrayMonitorText")
+    $script:TrayLinkCheckbox = $script:TrayPopup.FindName("TrayLinkCheckbox")
+    $trayOpenButton = $script:TrayPopup.FindName("TrayOpenButton")
+    $trayProfileButton = $script:TrayPopup.FindName("TrayProfileButton")
+    $trayHideButton = $script:TrayPopup.FindName("TrayHideButton")
+
+    $script:TrayBrightnessSlider.Add_ValueChanged({
+        if ($script:TrayPopupUpdating) { return }
+        $value = [int]$script:TrayBrightnessSlider.Value
+        $script:TrayBrightnessValue.Text = $value.ToString()
+        $script:UpdatingUI = $true
+        try {
+            $brightnessSlider.Value = $value
+            $brightnessValue.Text = $value.ToString()
+        } finally {
+            $script:UpdatingUI = $false
+        }
+        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value $value
+        Update-Status "Brightness: $value"
+        Update-TrayIconText
+    })
+    $script:TrayLinkCheckbox.Add_Checked({ if (-not $script:TrayPopupUpdating) { Set-ApplyToAllMode -Enabled $true } })
+    $script:TrayLinkCheckbox.Add_Unchecked({ if (-not $script:TrayPopupUpdating) { Set-ApplyToAllMode -Enabled $false } })
+    $trayOpenButton.Add_Click({ Show-MainWindow })
+    $trayProfileButton.Add_Click({ Invoke-NextProfile })
+    $trayHideButton.Add_Click({ if ($script:TrayPopup -and $script:TrayPopup.IsVisible) { $script:TrayPopup.Hide() } })
+    $script:TrayPopup.Add_Deactivated({ if ($script:TrayPopup -and $script:TrayPopup.IsVisible) { $script:TrayPopup.Hide() } })
+}
+
+function Show-TrayPopup {
+    New-TrayPopup
+    Update-TrayPopupState
+    $cursor = [System.Windows.Forms.Cursor]::Position
+    $screen = [System.Windows.Forms.Screen]::FromPoint($cursor)
+    $cursorPoint = [System.Windows.Point]::new($cursor.X, $cursor.Y)
+    $workTopLeft = [System.Windows.Point]::new($screen.WorkingArea.Left, $screen.WorkingArea.Top)
+    $workBottomRight = [System.Windows.Point]::new($screen.WorkingArea.Right, $screen.WorkingArea.Bottom)
+    $source = [System.Windows.PresentationSource]::FromVisual($window)
+    if ($source -and $source.CompositionTarget) {
+        $transform = $source.CompositionTarget.TransformFromDevice
+        $cursorPoint = $transform.Transform($cursorPoint)
+        $workTopLeft = $transform.Transform($workTopLeft)
+        $workBottomRight = $transform.Transform($workBottomRight)
+    }
+    $left = [Math]::Min($cursorPoint.X - $script:TrayPopup.Width + 24, $workBottomRight.X - $script:TrayPopup.Width - 8)
+    $left = [Math]::Max($workTopLeft.X + 8, $left)
+    $top = $cursorPoint.Y - $script:TrayPopup.Height - 12
+    if ($top -lt ($workTopLeft.Y + 8)) { $top = $cursorPoint.Y + 12 }
+    $top = [Math]::Min($top, $workBottomRight.Y - $script:TrayPopup.Height - 8)
+    $top = [Math]::Max($workTopLeft.Y + 8, $top)
+    $script:TrayPopup.Left = $left
+    $script:TrayPopup.Top = $top
+    $script:TrayPopup.Show()
+    $script:TrayPopup.Activate() | Out-Null
+}
+
+function Show-MainWindow {
+    if ($script:TrayPopup) { $script:TrayPopup.Hide() }
+    $window.Show()
+    $window.ShowInTaskbar = $true
+    $window.WindowState = [System.Windows.WindowState]::Normal
+    $window.Activate() | Out-Null
+}
+
+function Hide-MainWindowToTray {
+    $window.ShowInTaskbar = $false
+    $window.Hide()
+    if (-not $script:TrayHasShownMinimizeTip) {
+        Show-TrayNotification -Message "MonitorControl is running in the notification area."
+        $script:TrayHasShownMinimizeTip = $true
+    }
+}
+
+function Invoke-NextProfile {
+    $profiles = @()
+    if (Test-Path $script:ProfilesPath) {
+        $profiles = @(Get-ChildItem -Path $script:ProfilesPath -Filter "*.json" | Sort-Object -Property BaseName)
+    }
+    if ($profiles.Count -eq 0) {
+        Update-Status "No profiles saved"
+        Show-TrayNotification -Message "No saved profiles are available to cycle."
+        return
+    }
+
+    $names = @($profiles | ForEach-Object { $_.BaseName })
+    if ($profilesList.SelectedItem -and $names -contains [string]$profilesList.SelectedItem) {
+        $script:ProfileCycleIndex = [Array]::IndexOf($names, [string]$profilesList.SelectedItem)
+    }
+    $script:ProfileCycleIndex = ($script:ProfileCycleIndex + 1) % $names.Count
+    $profileName = $names[$script:ProfileCycleIndex]
+    $profilesList.SelectedItem = $profileName
+    $loadProfileBtn.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
+    Show-TrayNotification -Message "Loaded profile: $profileName"
+    Update-TrayPopupState
+    Update-TrayIconText
+}
+
+function Initialize-TrayIcon {
+    if ($script:TrayIcon) { return }
+    $script:TrayIcon = New-Object System.Windows.Forms.NotifyIcon
+    $trayIconPath = Join-Path $PSScriptRoot 'icon.ico'
+    if (Test-Path $trayIconPath) {
+        $script:TrayIcon.Icon = New-Object System.Drawing.Icon($trayIconPath)
+    } else {
+        $script:TrayIcon.Icon = [System.Drawing.SystemIcons]::Application
+    }
+    $script:TrayIcon.Visible = $true
+
+    $menu = New-Object System.Windows.Forms.ContextMenuStrip
+    $openItem = New-Object System.Windows.Forms.ToolStripMenuItem("Open MonitorControl")
+    $brightnessItem = New-Object System.Windows.Forms.ToolStripMenuItem("Brightness Slider")
+    $script:TrayLinkMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem("Link Monitors")
+    $profileItem = New-Object System.Windows.Forms.ToolStripMenuItem("Next Profile")
+    $refreshItem = New-Object System.Windows.Forms.ToolStripMenuItem("Refresh Monitors")
+    $exitItem = New-Object System.Windows.Forms.ToolStripMenuItem("Exit")
+
+    $script:TrayLinkMenuItem.CheckOnClick = $true
+    $script:TrayLinkMenuItem.Checked = [bool]$script:ApplyToAll
+    $openItem.Add_Click({ Show-MainWindow })
+    $brightnessItem.Add_Click({ Show-TrayPopup })
+    $script:TrayLinkMenuItem.Add_CheckedChanged({ Set-ApplyToAllMode -Enabled $script:TrayLinkMenuItem.Checked })
+    $profileItem.Add_Click({ Invoke-NextProfile })
+    $refreshItem.Add_Click({ Refresh-Monitors })
+    $exitItem.Add_Click({
+        $script:IsQuitting = $true
+        if ($script:TrayPopup -and $script:TrayPopup.IsVisible) { $script:TrayPopup.Hide() }
+        $window.Close()
+    })
+
+    $menu.Items.Add($openItem) | Out-Null
+    $menu.Items.Add($brightnessItem) | Out-Null
+    $menu.Items.Add($script:TrayLinkMenuItem) | Out-Null
+    $menu.Items.Add($profileItem) | Out-Null
+    $menu.Items.Add($refreshItem) | Out-Null
+    $menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
+    $menu.Items.Add($exitItem) | Out-Null
+    $script:TrayIcon.ContextMenuStrip = $menu
+
+    $script:TrayIcon.Add_MouseUp({
+        param($sender, $args)
+        if ($args.Button -eq [System.Windows.Forms.MouseButtons]::Left) { Show-TrayPopup }
+    })
+    $script:TrayIcon.Add_MouseDoubleClick({
+        param($sender, $args)
+        if ($args.Button -eq [System.Windows.Forms.MouseButtons]::Left) { Invoke-NextProfile }
+    })
+    Update-TrayIconText
+}
+
+function Dispose-TrayMode {
+    if ($script:TrayPopup) {
+        try { $script:TrayPopup.Close() } catch {}
+        $script:TrayPopup = $null
+    }
+    if ($script:TrayIcon) {
+        $script:TrayIcon.Visible = $false
+        $script:TrayIcon.Dispose()
+        $script:TrayIcon = $null
+    }
+}
 
 function Show-IdentifyOverlays {
     foreach ($mon in $script:PhysicalMonitors) {
@@ -762,10 +1025,10 @@ foreach ($code in ($script:VCPCodeDescriptions.Keys | Sort-Object)) { $item = Ne
 $vcpPresetCombo.SelectedIndex = 0
 
 # Event handlers
-$applyAllCheckbox.Add_Checked({ $script:ApplyToAll = $true }); $applyAllCheckbox.Add_Unchecked({ $script:ApplyToAll = $false })
+$applyAllCheckbox.Add_Checked({ Set-ApplyToAllMode -Enabled $true }); $applyAllCheckbox.Add_Unchecked({ Set-ApplyToAllMode -Enabled $false })
 $refreshBtn.Add_Click({ Refresh-Monitors }); $identifyBtn.Add_Click({ Show-IdentifyOverlays })
 
-$brightnessSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$brightnessSlider.Value; $brightnessValue.Text = $v; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value $v })
+$brightnessSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$brightnessSlider.Value; $brightnessValue.Text = $v; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value $v; Update-TrayPopupState; Update-TrayIconText })
 $contrastSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$contrastSlider.Value; $contrastValue.Text = $v; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_CONTRAST) -Value $v })
 $redSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$redSlider.Value; $redValue.Text = $v; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_RED_GAIN) -Value $v })
 $greenSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$greenSlider.Value; $greenValue.Text = $v; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_GREEN_GAIN) -Value $v })
@@ -839,7 +1102,7 @@ $loadProfileBtn.Add_Click({
     $redSlider.Value = $p.Red; $redValue.Text = $p.Red; $greenSlider.Value = $p.Green; $greenValue.Text = $p.Green; $blueSlider.Value = $p.Blue; $blueValue.Text = $p.Blue
     if ($p.Gamma) { $gammaSlider.Value = $p.Gamma; $gammaValue.Text = ($p.Gamma / 100).ToString("F2") }
     if ($p.GammaRed) { $gammaRedSlider.Value = $p.GammaRed; $gammaGreenSlider.Value = $p.GammaGreen; $gammaBlueSlider.Value = $p.GammaBlue; Set-GammaRamp -Gamma ($p.Gamma/100) -RedMult ($p.GammaRed/100) -GreenMult ($p.GammaGreen/100) -BlueMult ($p.GammaBlue/100) }
-    $script:UpdatingUI = $false; Update-Status "Loaded '$name'"
+    $script:UpdatingUI = $false; Update-Status "Loaded '$name'"; Update-TrayPopupState; Update-TrayIconText
 })
 $deleteProfileBtn.Add_Click({ if ($profilesList.SelectedItem -ne $null -and [System.Windows.MessageBox]::Show("Delete '$($profilesList.SelectedItem)'?", "Delete", "YesNo", "Question") -eq "Yes") { Remove-Item "$script:ProfilesPath\$($profilesList.SelectedItem).json" -ErrorAction SilentlyContinue; Update-ProfilesList } })
 
@@ -869,11 +1132,29 @@ if (-not $script:HasNvidia) { $gpuTab.Visibility = "Collapsed" } else {
     $script:GpuTimer.Add_Tick({ Update-GpuStats }); $script:GpuTimer.Start(); Update-GpuStats
 }
 
+Initialize-TrayIcon
+
+$window.Add_StateChanged({
+    if ($script:TraySuppressWindowStateEvent -or $script:IsQuitting) { return }
+    if ($window.WindowState -eq [System.Windows.WindowState]::Minimized) { Hide-MainWindowToTray }
+})
+
 $window.Add_Closed({ if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }
+    Dispose-TrayMode
     foreach ($mon in $script:PhysicalMonitors) { if ($mon.Handle -ne [IntPtr]::Zero) { [MonitorAPI]::DestroyPhysicalMonitor($mon.Handle) | Out-Null } }
 })
 
-if ($StartMinimized) { $window.WindowState = "Minimized" }
+if ($StartMinimized) {
+    $window.Add_ContentRendered({
+        $script:TraySuppressWindowStateEvent = $true
+        try {
+            $window.WindowState = [System.Windows.WindowState]::Minimized
+            Hide-MainWindowToTray
+        } finally {
+            $script:TraySuppressWindowStateEvent = $false
+        }
+    })
+}
 if ($LoadProfile -and (Test-Path "$script:ProfilesPath\$LoadProfile.json")) { $profilesList.SelectedItem = $LoadProfile; $loadProfileBtn.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) }
 
 $window.ShowDialog() | Out-Null

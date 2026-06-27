@@ -1,6 +1,7 @@
 # MonitorControl Pro
 
 <p align="center">
+  <img src="https://img.shields.io/badge/Version-v3.1.0-brightgreen" alt="Version v3.1.0">
   <img src="https://img.shields.io/badge/PowerShell-5.1+-blue?logo=powershell" alt="PowerShell 5.1+">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/DDC%2FCI-Supported-green" alt="DDC/CI">
@@ -25,7 +26,8 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 - **Monitor Identification** — On-screen overlays showing monitor numbers
 
 ### Automation
-- **Auto Mode** — Automatic brightness and color temperature based on time of day:
+- **System Tray Mode** - Persistent notification-area icon with a brightness popup, linked-monitor toggle, and profile cycling
+- **Auto Mode** - Automatic brightness and color temperature based on time of day:
   - Day (7 AM - 6 PM): 80% brightness, neutral colors
   - Evening (6 PM - 9 PM): 60% brightness, slightly warm
   - Night (9 PM - 7 AM): 40% brightness, warm/reduced blue light
@@ -93,7 +95,13 @@ $Shortcut.Save()
 .\MonitorControlPro.ps1 -StartMinimized -LoadProfile "Night Mode"
 ```
 
-### Keyboard Navigation
+### Tray Mode
+- Minimize the window to keep MonitorControl running from the notification area
+- Click the tray icon to open the compact brightness popup
+- Double-click the tray icon or use **Next Profile** in the tray menu to cycle saved profiles
+- Use **Link Monitors** in the tray popup or menu to apply brightness changes to every detected monitor
+
+### Navigation
 - Click on monitor rectangles to select different displays
 - Use Tab to navigate between controls
 - Slider values update in real-time
@@ -251,7 +259,6 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 3. Test changes by running the script directly
 
 ### Areas for Improvement
-- [ ] System tray mode with persistent background operation
 - [ ] Hotkey support for quick adjustments
 - [ ] Multi-monitor profile linking
 - [ ] AMD GPU monitoring support
