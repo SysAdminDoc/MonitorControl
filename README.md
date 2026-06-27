@@ -259,7 +259,6 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 3. Test changes by running the script directly
 
 ### Areas for Improvement
-- [ ] Hotkey support for quick adjustments
 - [ ] Multi-monitor profile linking
 - [ ] AMD GPU monitoring support
 - [ ] NVAPI integration for digital vibrance
