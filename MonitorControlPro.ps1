@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.4.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro v3.5.0 - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.4.0 - Enhanced with idle-dim automation
+    Version: 3.5.0 - Enhanced with extended VCP presets
 #>
 
 param([switch]$StartMinimized, [string]$LoadProfile)
@@ -104,7 +104,7 @@ public class MonitorAPI
     public const byte VCP_SHARPNESS = 0x87, VCP_VOLUME = 0x62, VCP_MUTE = 0x8D;
     public const byte VCP_INPUT_SOURCE = 0x60, VCP_POWER_MODE = 0xD6;
     public const byte VCP_RESTORE_FACTORY_DEFAULTS = 0x04, VCP_RESTORE_FACTORY_COLOR = 0x08;
-    public const byte VCP_VERSION = 0xDF, VCP_DISPLAY_USAGE_TIME = 0xC6;
+    public const byte VCP_VERSION = 0xDF, VCP_DISPLAY_USAGE_TIME = 0xC0;
     public const uint POWER_ON = 0x01, POWER_STANDBY = 0x02, POWER_OFF = 0x04;
     public const uint COLOR_PRESET_SRGB = 0x01, COLOR_PRESET_5000K = 0x04, COLOR_PRESET_6500K = 0x05, COLOR_PRESET_9300K = 0x08;
 
@@ -179,8 +179,9 @@ $script:ProfileCycleIndex = -1
 $script:VCPCodeDescriptions = @{
     0x04 = "Factory Reset"; 0x08 = "Reset Color"; 0x10 = "Brightness"; 0x12 = "Contrast"
     0x14 = "Color Preset"; 0x16 = "Red Gain"; 0x18 = "Green Gain"; 0x1A = "Blue Gain"
-    0x60 = "Input Source"; 0x62 = "Volume"; 0x87 = "Sharpness"; 0x8D = "Mute"
-    0xC6 = "Usage Time"; 0xD6 = "Power Mode"; 0xDF = "VCP Version"
+    0x60 = "Input Source"; 0x62 = "Volume"; 0x72 = "Gamma"; 0x87 = "Sharpness"; 0x8D = "Mute"
+    0xC0 = "Display Usage Time"; 0xC6 = "Application Enable Key"; 0xCA = "OSD/Button Control"; 0xCC = "OSD Language"
+    0xCD = "Status Indicators / LED"; 0xD6 = "Power Mode"; 0xD7 = "Aux Power Output"; 0xDC = "Display Mode"; 0xDF = "VCP Version"
 }
 
 function Get-Monitors {
@@ -327,7 +328,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.4.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
+        Title="MonitorControl Pro v3.5.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
         Background="#0a0a0a" WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
     <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
@@ -461,7 +462,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
             <TextBlock Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
-            <TextBlock Text="v3.4.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
+            <TextBlock Text="v3.5.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal">
             <CheckBox x:Name="ApplyAllCheckbox" Content="All Monitors" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -1532,7 +1533,7 @@ $vcpSetBtn.Add_Click({
 $vcpScanBtn.Add_Click({
     $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]; if ($mon.Handle -eq [IntPtr]::Zero) { $vcpResultBox.Text = "No DDC/CI"; return }
     $vcpResultBox.Text = "Scanning...`n"; [System.Windows.Forms.Application]::DoEvents()
-    $found = @(); foreach ($code in @(0x04,0x08,0x10,0x12,0x14,0x16,0x18,0x1A,0x60,0x62,0x87,0x8D,0xC6,0xD6,0xDF)) {
+    $found = @(); foreach ($code in ($script:VCPCodeDescriptions.Keys | Sort-Object)) {
         $r = Get-VCPValue -Handle $mon.Handle -VCPCode ([byte]$code)
         if ($r.Success) { $desc = if ($script:VCPCodeDescriptions.ContainsKey($code)) { $script:VCPCodeDescriptions[$code] } else { "Unknown" }; $found += "0x{0:X2} {1,-20} = {2} (max:{3})" -f $code, $desc, $r.Current, $r.Maximum }
     }
