@@ -5,7 +5,6 @@ PowerShell/WPF utility for DDC/CI monitor control â€” brightness, contrast,
 ## Planned Features
 
 ### Display Controls
-- Dynamic contrast toggle (VCP 0xFC where supported)
 - Picture mode presets (Cinema/Game/Web) via VCP 0xDC
 - Dual-Input PiP/PbP control for ultrawide monitors that support it
 
