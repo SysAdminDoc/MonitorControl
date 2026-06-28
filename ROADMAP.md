@@ -5,8 +5,6 @@ PowerShell/WPF utility for DDC/CI monitor control â€” brightness, contrast,
 ## Planned Features
 
 ### Display Controls
-- Dual-Input PiP/PbP control for ultrawide monitors that support it
-
 ### GPU Monitoring
 - NVAPI integration for Digital Vibrance (stop being a placeholder)
 - AMD ADL SDK for Radeon temperature/clock/fan

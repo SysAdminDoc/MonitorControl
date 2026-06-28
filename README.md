@@ -1,7 +1,7 @@
 # MonitorControl Pro
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v3.7.0-brightgreen" alt="Version v3.7.0">
+  <img src="https://img.shields.io/badge/Version-v3.8.0-brightgreen" alt="Version v3.8.0">
   <img src="https://img.shields.io/badge/PowerShell-5.1+-blue?logo=powershell" alt="PowerShell 5.1+">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/DDC%2FCI-Supported-green" alt="DDC/CI">
@@ -24,6 +24,7 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 - **Visual Monitor Layout** — Click-to-select interface matching Windows Display Settings
 - **Input Source Switching** — Switch between HDMI, DisplayPort, USB-C, DVI, VGA
 - **Power Control** — Turn monitors On, Standby, or Off via software
+- **PiP / PbP Controls** — Toggle vendor-defined PiP/PbP modes and secondary input routing for ultrawide monitors that expose those DDC/CI controls
 - **Apply to All Monitors** — Sync settings across all connected displays
 - **Monitor Identification** — On-screen overlays showing monitor numbers
 
@@ -154,6 +155,8 @@ The VCP Explorer tab allows you to query and set any DDC/CI VCP code. Common cod
 | `0xD7` | Aux Power Output | varies | Auxiliary power output control when supported |
 | `0xDC` | Display Mode | varies | Preset picture/display modes |
 | `0xDF` | VCP Version | read-only | Monitor VCP/MCCS version |
+| `0xE8` | Secondary Input Source | vendor-defined | Secondary PiP/PbP input on some Dell-style ultrawides |
+| `0xE9` | PiP/PbP Mode | vendor-defined | PiP/PbP mode on some Dell-style ultrawides |
 | `0x04` | Factory Reset | 1 | Reset all settings |
 | `0x08` | Color Reset | 1 | Reset color settings only |
 
@@ -167,6 +170,16 @@ The VCP Explorer tab allows you to query and set any DDC/CI VCP code. Common cod
 | `0x11` | HDMI 1 |
 | `0x12` | HDMI 2 |
 | `0x13` | USB-C |
+
+### PiP / PbP Vendor Values
+| Code | Value | Meaning |
+|------|-------|---------|
+| `0xE9` | `0x00` | PiP/PbP off |
+| `0xE9` | `0x21` | PiP upper-right |
+| `0xE9` | `0x23` | PbP split |
+| `0xE8` | `0x21` | Secondary DisplayPort |
+| `0xE8` | `0x11` | Secondary HDMI 1 |
+| `0xE8` | `0x12` | Secondary HDMI 2 |
 
 ### Power Mode Values
 | Value | State |
