@@ -1,7 +1,7 @@
 # MonitorControl Pro
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v3.16.0-brightgreen" alt="Version v3.16.0">
+  <img src="https://img.shields.io/badge/Version-v3.17.0-brightgreen" alt="Version v3.17.0">
   <img src="https://img.shields.io/badge/PowerShell-5.1+-blue?logo=powershell" alt="PowerShell 5.1+">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/DDC%2FCI-Supported-green" alt="DDC/CI">
@@ -228,6 +228,9 @@ Profiles are saved as JSON files in `%APPDATA%\MonitorControlPro\`
 ```
 
 Profiles without `SchemaVersion` are treated as v1 and migrated to the current schema on load.
+
+Use **Export Bundle** on the Profiles tab to create a timestamped ZIP in `%APPDATA%\MonitorControlPro\exports`.
+Use **Import Bundle** to restore every profile JSON from a bundle; corrupt entries are skipped without blocking valid profiles.
 
 ### Example Profiles
 

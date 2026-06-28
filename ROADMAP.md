@@ -5,7 +5,6 @@ PowerShell/WPF utility for DDC/CI monitor control â€” brightness, contrast,
 ## Planned Features
 
 ### Data & Profiles
-- Export/import profile bundle (all profiles at once)
 - Cloud-sync profiles via OneDrive/Dropbox folder pointer
 - Profile scheduling UI (graphical timeline, not just trigger rules)
 
