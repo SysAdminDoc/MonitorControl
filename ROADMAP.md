@@ -5,8 +5,6 @@ PowerShell/WPF utility for DDC/CI monitor control â€” brightness, contrast,
 ## Planned Features
 
 ### Laptop Support
-- Battery-aware profile: dim on battery, bright on AC
-
 ### Data & Profiles
 - Profile JSON schema version + migration on load
 - Export/import profile bundle (all profiles at once)

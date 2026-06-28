@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.14.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro v3.15.0 - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.14.0 - Enhanced with ambient light auto-brightness
+    Version: 3.15.0 - Enhanced with battery-aware profiles
 #>
 
 param([switch]$StartMinimized, [string]$LoadProfile)
@@ -418,6 +418,7 @@ $script:ProfilesPath = "$env:APPDATA\MonitorControlPro"
 $script:AppProfileRulesPath = Join-Path $script:ProfilesPath "app-profile-rules.json"
 $script:ProfileScheduleRulesPath = Join-Path $script:ProfilesPath "profile-schedules.json"
 $script:IdleDimSettingsPath = Join-Path $script:ProfilesPath "idle-dim.json"
+$script:BatteryProfileSettingsPath = Join-Path $script:ProfilesPath "battery-profile.json"
 $script:UpdatingUI = $false
 $script:ApplyToAll = $false
 $script:AutoModeEnabled = $false
@@ -445,6 +446,12 @@ $script:IdleDimTimer = $null
 $script:IdleDimActive = $false
 $script:IdleDimPreviousBrightness = $null
 $script:UpdatingIdleDimUI = $false
+$script:BatteryProfileEnabled = $false
+$script:BatteryBrightness = 35
+$script:AcBrightness = 75
+$script:BatteryProfileTimer = $null
+$script:UpdatingBatteryProfileUI = $false
+$script:LastPowerLineStatus = $null
 $script:TrayIcon = $null
 $script:TrayPopup = $null
 $script:TrayBrightnessSlider = $null
@@ -779,7 +786,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.14.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
+        Title="MonitorControl Pro v3.15.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
         Background="#0a0a0a" WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
     <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
@@ -913,7 +920,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
             <TextBlock Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
-            <TextBlock Text="v3.14.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
+            <TextBlock Text="v3.15.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal">
             <CheckBox x:Name="ApplyAllCheckbox" Content="All Monitors" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -1138,7 +1145,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
         </TabItem>
         <TabItem Header="Schedule">
             <Border Background="#151515" CornerRadius="0,5,5,5" Padding="10"><Grid>
-                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="*"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="*"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Border Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid>
                     <CheckBox x:Name="ScheduleEnabledCheckbox" Content="Scheduled profiles" VerticalAlignment="Center"/>
                     <TextBlock x:Name="ScheduleStatusText" Text="Off" FontSize="9" Foreground="#707070" HorizontalAlignment="Right" VerticalAlignment="Center"/>
@@ -1164,6 +1171,16 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
                         <TextBox x:Name="IdleDimBrightnessBox" Grid.Column="2" Text="20" VerticalAlignment="Center"/>
                         <CheckBox x:Name="IdleDimRestoreCheckbox" Grid.Column="4" Content="Restore" VerticalAlignment="Center"/>
                         <Button x:Name="IdleDimSaveBtn" Grid.Column="6" Content="Save" Style="{StaticResource GreenBtn}" Padding="10,4" FontSize="9"/>
+                    </Grid>
+                </Grid></Border>
+                <Border Grid.Row="8" Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <Grid><CheckBox x:Name="BatteryProfileEnabledCheckbox" Content="Battery profile" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="BatteryProfileStatusText" Text="Off" FontSize="9" Foreground="#707070" HorizontalAlignment="Right" VerticalAlignment="Center"/></Grid>
+                    <Grid Grid.Row="2"><Grid.ColumnDefinitions><ColumnDefinition Width="70"/><ColumnDefinition Width="6"/><ColumnDefinition Width="70"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                        <TextBox x:Name="BatteryBrightnessBox" Text="35" VerticalAlignment="Center"/>
+                        <TextBox x:Name="AcBrightnessBox" Grid.Column="2" Text="75" VerticalAlignment="Center"/>
+                        <Button x:Name="BatteryProfileSaveBtn" Grid.Column="4" Content="Save" Style="{StaticResource GreenBtn}" Padding="10,4" FontSize="9"/>
                     </Grid>
                 </Grid></Border>
             </Grid></Border>
@@ -1258,6 +1275,8 @@ $scheduleAddBtn = $window.FindName("ScheduleAddBtn"); $scheduleRemoveBtn = $wind
 $idleDimEnabledCheckbox = $window.FindName("IdleDimEnabledCheckbox"); $idleDimStatusText = $window.FindName("IdleDimStatusText")
 $idleDimMinutesBox = $window.FindName("IdleDimMinutesBox"); $idleDimBrightnessBox = $window.FindName("IdleDimBrightnessBox")
 $idleDimRestoreCheckbox = $window.FindName("IdleDimRestoreCheckbox"); $idleDimSaveBtn = $window.FindName("IdleDimSaveBtn")
+$batteryProfileEnabledCheckbox = $window.FindName("BatteryProfileEnabledCheckbox"); $batteryProfileStatusText = $window.FindName("BatteryProfileStatusText")
+$batteryBrightnessBox = $window.FindName("BatteryBrightnessBox"); $acBrightnessBox = $window.FindName("AcBrightnessBox"); $batteryProfileSaveBtn = $window.FindName("BatteryProfileSaveBtn")
 $displaySettingsBtn = $window.FindName("DisplaySettingsBtn"); $colorMgmtBtn = $window.FindName("ColorMgmtBtn"); $gpuControlPanelBtn = $window.FindName("GpuControlPanelBtn")
 $resetGammaBtn = $window.FindName("ResetGammaBtn")
 $gammaRedSlider = $window.FindName("GammaRedSlider"); $gammaRedValue = $window.FindName("GammaRedValue")
@@ -1702,6 +1721,88 @@ function Start-IdleDimWatcher {
         $script:IdleDimTimer.Add_Tick({ Invoke-IdleDimCheck })
     }
     if ($script:IdleDimEnabled) { $script:IdleDimTimer.Start() } else { $script:IdleDimTimer.Stop() }
+}
+
+function Load-BatteryProfileSettings {
+    if (-not (Test-Path $script:BatteryProfileSettingsPath)) { return }
+    try {
+        $data = Get-Content -Path $script:BatteryProfileSettingsPath -Raw | ConvertFrom-Json
+        $script:BatteryProfileEnabled = [bool]$data.Enabled
+        $script:BatteryBrightness = [Math]::Max(0, [Math]::Min(100, [int]$data.BatteryBrightness))
+        $script:AcBrightness = [Math]::Max(0, [Math]::Min(100, [int]$data.AcBrightness))
+    } catch {
+        Update-Status "Battery profile settings could not be loaded"
+    }
+}
+
+function Save-BatteryProfileSettings {
+    $payload = @{
+        Enabled = [bool]$script:BatteryProfileEnabled
+        BatteryBrightness = [int]$script:BatteryBrightness
+        AcBrightness = [int]$script:AcBrightness
+    }
+    $payload | ConvertTo-Json | Set-Content -Path $script:BatteryProfileSettingsPath -Encoding UTF8
+}
+
+function Read-BatteryProfileSettingsFromUI {
+    $batteryValue = 0; $acValue = 0
+    if (-not [int]::TryParse($batteryBrightnessBox.Text, [ref]$batteryValue) -or $batteryValue -lt 0 -or $batteryValue -gt 100) {
+        Update-Status "Battery brightness must be 0-100"
+        return $false
+    }
+    if (-not [int]::TryParse($acBrightnessBox.Text, [ref]$acValue) -or $acValue -lt 0 -or $acValue -gt 100) {
+        Update-Status "AC brightness must be 0-100"
+        return $false
+    }
+    $script:BatteryBrightness = $batteryValue
+    $script:AcBrightness = $acValue
+    return $true
+}
+
+function Update-BatteryProfileControls {
+    $script:UpdatingBatteryProfileUI = $true
+    try {
+        $batteryProfileEnabledCheckbox.IsChecked = [bool]$script:BatteryProfileEnabled
+        $batteryBrightnessBox.Text = $script:BatteryBrightness.ToString()
+        $acBrightnessBox.Text = $script:AcBrightness.ToString()
+        $batteryProfileStatusText.Text = if ($script:BatteryProfileEnabled) { "Watching" } else { "Off" }
+    } finally {
+        $script:UpdatingBatteryProfileUI = $false
+    }
+}
+
+function Invoke-BatteryProfileCheck {
+    if (-not $script:BatteryProfileEnabled) { return }
+    $status = [System.Windows.Forms.SystemInformation]::PowerStatus.PowerLineStatus.ToString()
+    if ($script:LastPowerLineStatus -eq $status) { return }
+    $script:LastPowerLineStatus = $status
+    if ($status -eq "Offline") {
+        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value $script:BatteryBrightness -Force
+        Update-Status "Battery profile: $($script:BatteryBrightness)%"
+        $batteryProfileStatusText.Text = "Battery"
+    } elseif ($status -eq "Online") {
+        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value $script:AcBrightness -Force
+        Update-Status "AC profile: $($script:AcBrightness)%"
+        $batteryProfileStatusText.Text = "AC"
+    } else {
+        $batteryProfileStatusText.Text = "Unknown"
+    }
+}
+
+function Start-BatteryProfileWatcher {
+    if ($null -eq $script:BatteryProfileTimer) {
+        $script:BatteryProfileTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:BatteryProfileTimer.Interval = [TimeSpan]::FromSeconds(30)
+        $script:BatteryProfileTimer.Add_Tick({ Invoke-BatteryProfileCheck })
+    }
+    if ($script:BatteryProfileEnabled) {
+        $script:BatteryProfileTimer.Start()
+        $script:LastPowerLineStatus = $null
+        Invoke-BatteryProfileCheck
+    } else {
+        $script:BatteryProfileTimer.Stop()
+        $script:LastPowerLineStatus = $null
+    }
 }
 
 function Get-CurrentMonitorLabel {
@@ -2294,6 +2395,29 @@ $idleDimSaveBtn.Add_Click({
     Start-IdleDimWatcher
     Update-Status "Idle dim settings saved"
 })
+$batteryProfileEnabledCheckbox.Add_Checked({
+    if ($script:UpdatingBatteryProfileUI) { return }
+    if (-not (Read-BatteryProfileSettingsFromUI)) { return }
+    $script:BatteryProfileEnabled = $true
+    Save-BatteryProfileSettings
+    Start-BatteryProfileWatcher
+    Update-BatteryProfileControls
+    Update-Status "Battery profile on"
+})
+$batteryProfileEnabledCheckbox.Add_Unchecked({
+    if ($script:UpdatingBatteryProfileUI) { return }
+    $script:BatteryProfileEnabled = $false
+    Save-BatteryProfileSettings
+    Start-BatteryProfileWatcher
+    Update-BatteryProfileControls
+    Update-Status "Battery profile off"
+})
+$batteryProfileSaveBtn.Add_Click({
+    if (-not (Read-BatteryProfileSettingsFromUI)) { return }
+    Save-BatteryProfileSettings
+    Start-BatteryProfileWatcher
+    Update-Status "Battery profile settings saved"
+})
 
 $displaySettingsBtn.Add_Click({ Start-Process "ms-settings:display" }); $colorMgmtBtn.Add_Click({ Start-Process "colorcpl.exe" })
 $gpuControlPanelBtn.Add_Click({ if ($script:HasNvidia) { Start-Process "nvidia-settings" -ErrorAction SilentlyContinue } else { Start-Process "ms-settings:display" } })
@@ -2337,6 +2461,7 @@ Initialize-WmiBrightness; Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; D
 Load-AppProfileRules; Update-AppProfileControls; Start-AppProfileWatcher
 Load-ProfileSchedules; Update-ScheduleControls; Start-ProfileScheduleWatcher
 Load-IdleDimSettings; Update-IdleDimControls; Start-IdleDimWatcher
+Load-BatteryProfileSettings; Update-BatteryProfileControls; Start-BatteryProfileWatcher
 if (-not ($script:HasNvidia -or $script:HasAmd -or $script:HasCpuTempMonitor)) { $gpuTab.Visibility = "Collapsed" } else {
     $script:GpuTimer = New-Object System.Windows.Threading.DispatcherTimer; $script:GpuTimer.Interval = [TimeSpan]::FromSeconds(2)
     $script:GpuTimer.Add_Tick({ Update-GpuStats }); $script:GpuTimer.Start(); Update-GpuStats
@@ -2349,7 +2474,7 @@ $window.Add_StateChanged({
     if ($window.WindowState -eq [System.Windows.WindowState]::Minimized) { Hide-MainWindowToTray }
 })
 
-$window.Add_Closed({ if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AmbientLightTimer) { $script:AmbientLightTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }; if ($script:ProfileScheduleTimer) { $script:ProfileScheduleTimer.Stop() }; if ($script:IdleDimTimer) { $script:IdleDimTimer.Stop() }; if ($script:FpsOverlayTimer) { $script:FpsOverlayTimer.Stop() }
+$window.Add_Closed({ if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AmbientLightTimer) { $script:AmbientLightTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }; if ($script:ProfileScheduleTimer) { $script:ProfileScheduleTimer.Stop() }; if ($script:IdleDimTimer) { $script:IdleDimTimer.Stop() }; if ($script:BatteryProfileTimer) { $script:BatteryProfileTimer.Stop() }; if ($script:FpsOverlayTimer) { $script:FpsOverlayTimer.Stop() }
     if ($script:FpsOverlayWindow) { try { $script:FpsOverlayWindow.Close() } catch {} }
     if ($script:HardwareMonitorComputer) { try { $script:HardwareMonitorComputer.Close() } catch {} }
     Dispose-TrayMode
