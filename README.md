@@ -1,7 +1,7 @@
 # MonitorControl Pro
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v3.10.0-brightgreen" alt="Version v3.10.0">
+  <img src="https://img.shields.io/badge/Version-v3.11.0-brightgreen" alt="Version v3.11.0">
   <img src="https://img.shields.io/badge/PowerShell-5.1+-blue?logo=powershell" alt="PowerShell 5.1+">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/DDC%2FCI-Supported-green" alt="DDC/CI">
@@ -53,6 +53,7 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 - Power draw monitoring
 - Digital vibrance slider using NVAPI DVC where supported
 - AMD Radeon temperature, utilization, engine/memory clocks, and fan percent via ADL where supported by the installed driver
+- CPU package/core temperature via LibreHardwareMonitorLib or OpenHardwareMonitorLib when either library is installed or placed next to the script
 
 ## Requirements
 
@@ -60,6 +61,7 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 - **PowerShell 5.1+** (included with Windows)
 - **DDC/CI Compatible Monitor** — Most modern monitors support this; ensure it's enabled in your monitor's OSD settings
 - **NVIDIA or AMD GPU** (optional) — For GPU monitoring tab
+- **LibreHardwareMonitorLib.dll or OpenHardwareMonitorLib.dll** (optional) — For CPU temperature on the hardware tab
 
 ## Installation
 

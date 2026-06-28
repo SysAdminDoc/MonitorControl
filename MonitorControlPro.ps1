@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.10.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro v3.11.0 - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.10.0 - Enhanced with AMD ADL monitoring
+    Version: 3.11.0 - Enhanced with CPU temperature monitoring
 #>
 
 param([switch]$StartMinimized, [string]$LoadProfile)
@@ -404,7 +404,10 @@ $script:PhysicalMonitors = @()
 $script:CurrentMonitorIndex = 0
 $script:HasNvidia = $false
 $script:HasAmd = $false
+$script:HasCpuTempMonitor = $false
 $script:NvidiaSmiPath = $null
+$script:HardwareMonitorComputer = $null
+$script:HardwareMonitorKind = $null
 $script:GpuTimer = $null
 $script:AutoModeTimer = $null
 $script:ProfilesPath = "$env:APPDATA\MonitorControlPro"
@@ -610,11 +613,59 @@ function Get-AmdStats {
     return @{ Name = "AMD Radeon"; Temp = 0; Util = 0; MemUsed = 0; MemTotal = 0; Fan = 0; Power = 0; PowerLimit = 0; Clock = 0; MemoryClock = 0; Message = $message }
 }
 
+function Initialize-CpuMonitor {
+    $candidatePaths = @(
+        (Join-Path $PSScriptRoot "LibreHardwareMonitorLib.dll"),
+        (Join-Path $PSScriptRoot "OpenHardwareMonitorLib.dll"),
+        "${env:ProgramFiles}\LibreHardwareMonitor\LibreHardwareMonitorLib.dll",
+        "${env:ProgramFiles}\OpenHardwareMonitor\OpenHardwareMonitorLib.dll",
+        "${env:ProgramFiles(x86)}\LibreHardwareMonitor\LibreHardwareMonitorLib.dll",
+        "${env:ProgramFiles(x86)}\OpenHardwareMonitor\OpenHardwareMonitorLib.dll"
+    ) | Where-Object { $_ -and (Test-Path $_) }
+    foreach ($path in $candidatePaths) {
+        try {
+            [System.Reflection.Assembly]::LoadFrom($path) | Out-Null
+            $computerType = if ($path -like "*LibreHardwareMonitor*") {
+                [Type]::GetType("LibreHardwareMonitor.Hardware.Computer, LibreHardwareMonitorLib", $false)
+            } else {
+                [Type]::GetType("OpenHardwareMonitor.Hardware.Computer, OpenHardwareMonitorLib", $false)
+            }
+            if (-not $computerType) { continue }
+            $computer = [Activator]::CreateInstance($computerType)
+            $computer.IsCpuEnabled = $true
+            $computer.Open()
+            $script:HardwareMonitorComputer = $computer
+            $script:HardwareMonitorKind = if ($path -like "*LibreHardwareMonitor*") { "LibreHardwareMonitor" } else { "OpenHardwareMonitor" }
+            $script:HasCpuTempMonitor = $true
+            return
+        } catch {}
+    }
+}
+
+function Get-CpuTemperature {
+    if (-not $script:HardwareMonitorComputer) { return $null }
+    try {
+        $temperatures = @()
+        foreach ($hardware in $script:HardwareMonitorComputer.Hardware) {
+            if ($hardware.HardwareType.ToString() -ne "Cpu") { continue }
+            $hardware.Update()
+            foreach ($subHardware in $hardware.SubHardware) { $subHardware.Update() }
+            foreach ($sensor in @($hardware.Sensors) + @($hardware.SubHardware | ForEach-Object { $_.Sensors })) {
+                if ($sensor -and $sensor.SensorType.ToString() -eq "Temperature" -and $null -ne $sensor.Value) {
+                    $temperatures += [double]$sensor.Value
+                }
+            }
+        }
+        if ($temperatures.Count -gt 0) { return [math]::Round(($temperatures | Measure-Object -Maximum).Maximum, 0) }
+    } catch {}
+    return $null
+}
+
 if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path $script:ProfilesPath -Force | Out-Null }
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.10.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
+        Title="MonitorControl Pro v3.11.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
         Background="#0a0a0a" WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
     <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
@@ -748,7 +799,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
             <TextBlock Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
-            <TextBlock Text="v3.10.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
+            <TextBlock Text="v3.11.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal">
             <CheckBox x:Name="ApplyAllCheckbox" Content="All Monitors" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -877,7 +928,8 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Border Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                     <StackPanel><TextBlock x:Name="GpuNameText" Text="GPU" FontSize="12" Foreground="#76b900" FontWeight="SemiBold"/>
-                        <TextBlock x:Name="GpuStatsText" Text="-- C | -- MHz | -- W" FontSize="8" Foreground="#707070" Margin="0,2,0,0"/></StackPanel>
+                        <TextBlock x:Name="GpuStatsText" Text="-- C | -- MHz | -- W" FontSize="8" Foreground="#707070" Margin="0,2,0,0"/>
+                        <TextBlock x:Name="CpuTempText" Text="CPU: -- C" FontSize="8" Foreground="#707070" Margin="0,1,0,0"/></StackPanel>
                     <StackPanel Grid.Column="1" Orientation="Horizontal"><TextBlock x:Name="GpuTempText" Text="--" FontSize="20" Foreground="#fff" FontWeight="Light"/>
                         <TextBlock Text=" C" FontSize="10" Foreground="#606060" VerticalAlignment="Top" Margin="0,3,0,0"/></StackPanel>
                 </Grid></Border>
@@ -1063,6 +1115,7 @@ $resetColorBtn = $window.FindName("ResetColorBtn"); $factoryResetBtn = $window.F
 $allMonitorsStandbyBtn = $window.FindName("AllMonitorsStandbyBtn")
 $gpuTab = $window.FindName("GpuTab"); $gpuNameText = $window.FindName("GpuNameText"); $gpuStatsText = $window.FindName("GpuStatsText")
 $gpuTempText = $window.FindName("GpuTempText"); $gpuUtilText = $window.FindName("GpuUtilText"); $gpuUtilBar = $window.FindName("GpuUtilBar")
+$cpuTempText = $window.FindName("CpuTempText")
 $memUsageText = $window.FindName("MemUsageText"); $memUtilBar = $window.FindName("MemUtilBar")
 $fanSpeedText = $window.FindName("FanSpeedText"); $fanSpeedBar = $window.FindName("FanSpeedBar")
 $powerDrawText = $window.FindName("PowerDrawText"); $powerDrawBar = $window.FindName("PowerDrawBar")
@@ -2023,25 +2076,30 @@ $gammaGreenSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $gammaG
 $gammaBlueSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $gammaBlueValue.Text = ($gammaBlueSlider.Value / 100).ToString("F2"); Set-GammaRamp -Gamma ($gammaSlider.Value/100) -RedMult ($gammaRedSlider.Value/100) -GreenMult ($gammaGreenSlider.Value/100) -BlueMult ($gammaBlueSlider.Value/100) })
 
 function Update-GpuStats {
-    if (-not ($script:HasNvidia -or $script:HasAmd)) { return }
-    $stats = if ($script:HasNvidia) { Get-NvidiaStats } else { $null }
-    if (-not $stats -and $script:HasAmd) { $stats = Get-AmdStats }
-    if ($stats) {
-        $gpuNameText.Text = $stats.Name; $gpuTempText.Text = $stats.Temp.ToString(); $gpuStatsText.Text = "$($stats.Temp) C | $($stats.Clock) MHz | $($stats.Power) W"
-        $gpuUtilText.Text = "$($stats.Util)%"; $gpuUtilBar.Value = $stats.Util; $memUsageText.Text = "$($stats.MemUsed) / $($stats.MemTotal) GB"
-        $memUtilBar.Value = if ($stats.MemTotal -gt 0) { ($stats.MemUsed / $stats.MemTotal) * 100 } else { 0 }
-        $fanSpeedText.Text = "$($stats.Fan)%"; $fanSpeedBar.Value = $stats.Fan; $powerDrawText.Text = "$($stats.Power) / $($stats.PowerLimit) W"
-        $powerDrawBar.Value = if ($stats.PowerLimit -gt 0) { ($stats.Power / $stats.PowerLimit) * 100 } else { 0 }
-        if ($stats.Message) { Update-Status $stats.Message }
+    if ($script:HasNvidia -or $script:HasAmd) {
+        $stats = if ($script:HasNvidia) { Get-NvidiaStats } else { $null }
+        if (-not $stats -and $script:HasAmd) { $stats = Get-AmdStats }
+        if ($stats) {
+            $gpuNameText.Text = $stats.Name; $gpuTempText.Text = $stats.Temp.ToString(); $gpuStatsText.Text = "$($stats.Temp) C | $($stats.Clock) MHz | $($stats.Power) W"
+            $gpuUtilText.Text = "$($stats.Util)%"; $gpuUtilBar.Value = $stats.Util; $memUsageText.Text = "$($stats.MemUsed) / $($stats.MemTotal) GB"
+            $memUtilBar.Value = if ($stats.MemTotal -gt 0) { ($stats.MemUsed / $stats.MemTotal) * 100 } else { 0 }
+            $fanSpeedText.Text = "$($stats.Fan)%"; $fanSpeedBar.Value = $stats.Fan; $powerDrawText.Text = "$($stats.Power) / $($stats.PowerLimit) W"
+            $powerDrawBar.Value = if ($stats.PowerLimit -gt 0) { ($stats.Power / $stats.PowerLimit) * 100 } else { 0 }
+            if ($stats.Message) { Update-Status $stats.Message }
+        }
+    }
+    if ($script:HasCpuTempMonitor) {
+        $cpuTemp = Get-CpuTemperature
+        $cpuTempText.Text = if ($null -ne $cpuTemp) { "CPU: $cpuTemp C ($script:HardwareMonitorKind)" } else { "CPU: sensor unavailable" }
     }
 }
 
 # Initialize
-Get-Monitors; Initialize-GPU; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList
+Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList
 Load-AppProfileRules; Update-AppProfileControls; Start-AppProfileWatcher
 Load-ProfileSchedules; Update-ScheduleControls; Start-ProfileScheduleWatcher
 Load-IdleDimSettings; Update-IdleDimControls; Start-IdleDimWatcher
-if (-not ($script:HasNvidia -or $script:HasAmd)) { $gpuTab.Visibility = "Collapsed" } else {
+if (-not ($script:HasNvidia -or $script:HasAmd -or $script:HasCpuTempMonitor)) { $gpuTab.Visibility = "Collapsed" } else {
     $script:GpuTimer = New-Object System.Windows.Threading.DispatcherTimer; $script:GpuTimer.Interval = [TimeSpan]::FromSeconds(2)
     $script:GpuTimer.Add_Tick({ Update-GpuStats }); $script:GpuTimer.Start(); Update-GpuStats
 }
@@ -2054,6 +2112,7 @@ $window.Add_StateChanged({
 })
 
 $window.Add_Closed({ if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }; if ($script:ProfileScheduleTimer) { $script:ProfileScheduleTimer.Stop() }; if ($script:IdleDimTimer) { $script:IdleDimTimer.Stop() }
+    if ($script:HardwareMonitorComputer) { try { $script:HardwareMonitorComputer.Close() } catch {} }
     Dispose-TrayMode
     foreach ($mon in $script:PhysicalMonitors) { if ($mon.Handle -ne [IntPtr]::Zero) { [MonitorAPI]::DestroyPhysicalMonitor($mon.Handle) | Out-Null } }
 })
