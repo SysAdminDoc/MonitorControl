@@ -4,9 +4,6 @@ PowerShell/WPF utility for DDC/CI monitor control â€” brightness, contrast,
 
 ## Planned Features
 
-### Data & Profiles
-- Profile scheduling UI (graphical timeline, not just trigger rules)
-
 ## Competitive Research
 - **Twinkle Tray** â€” tray leader; borrow slider popup UX and time-based automation precision.
 - **Monitorian** â€” clean WPF unison-mode implementation; reference for multi-monitor grouping.
