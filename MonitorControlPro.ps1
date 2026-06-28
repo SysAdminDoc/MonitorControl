@@ -1,16 +1,16 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.16.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro v3.17.0 - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.16.0 - Enhanced with profile schema migration
+    Version: 3.17.0 - Enhanced with profile bundle export/import
 #>
 
 param([switch]$StartMinimized, [string]$LoadProfile)
 
-Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing, System.IO.Compression.FileSystem
 
 $nativeCode = @"
 using System;
@@ -420,6 +420,8 @@ $script:ProfileScheduleRulesPath = Join-Path $script:ProfilesPath "profile-sched
 $script:IdleDimSettingsPath = Join-Path $script:ProfilesPath "idle-dim.json"
 $script:BatteryProfileSettingsPath = Join-Path $script:ProfilesPath "battery-profile.json"
 $script:ProfileSchemaVersion = 2
+$script:ProfileBundleSchemaVersion = 1
+$script:ProfileExportsPath = Join-Path $script:ProfilesPath "exports"
 $script:ProfileMetadataFiles = @("app-profile-rules.json", "profile-schedules.json", "idle-dim.json", "battery-profile.json")
 $script:UpdatingUI = $false
 $script:ApplyToAll = $false
@@ -788,7 +790,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.16.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
+        Title="MonitorControl Pro v3.17.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
         Background="#0a0a0a" WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
     <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
@@ -922,7 +924,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
             <TextBlock Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
-            <TextBlock Text="v3.16.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
+            <TextBlock Text="v3.17.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal">
             <CheckBox x:Name="ApplyAllCheckbox" Content="All Monitors" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -1115,7 +1117,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
         </TabItem>
         <TabItem Header="Profiles">
             <Border Background="#151515" CornerRadius="0,5,5,5" Padding="10"><Grid>
-                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="*"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="*"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Border Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                     <TextBox x:Name="ProfileNameBox" Text="My Profile"/>
                     <Button x:Name="SaveProfileBtn" Grid.Column="2" Content="Save" Style="{StaticResource GreenBtn}" Padding="10,4"/>
@@ -1128,7 +1130,11 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
                     <Button x:Name="LoadProfileBtn" Content="Load" Style="{StaticResource AccBtn}"/>
                     <Button x:Name="DeleteProfileBtn" Grid.Column="2" Content="Delete" Style="{StaticResource WarnBtn}"/>
                 </Grid>
-                <Border Grid.Row="6" Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid>
+                <Grid Grid.Row="6"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                    <Button x:Name="ExportProfilesBtn" Content="Export Bundle" Style="{StaticResource Btn}"/>
+                    <Button x:Name="ImportProfilesBtn" Grid.Column="2" Content="Import Bundle" Style="{StaticResource Btn}"/>
+                </Grid>
+                <Border Grid.Row="8" Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid>
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                     <Grid><CheckBox x:Name="AppProfileEnabledCheckbox" Content="Per-application profiles" VerticalAlignment="Center"/>
                         <TextBlock x:Name="AppProfileStatusText" Text="Off" FontSize="9" Foreground="#707070" HorizontalAlignment="Right" VerticalAlignment="Center"/></Grid>
@@ -1267,6 +1273,7 @@ $vcpCodeBox = $window.FindName("VCPCodeBox"); $vcpPresetCombo = $window.FindName
 $vcpResultBox = $window.FindName("VCPResultBox"); $vcpSetValueBox = $window.FindName("VCPSetValueBox"); $vcpSetBtn = $window.FindName("VCPSetBtn"); $vcpScanBtn = $window.FindName("VCPScanBtn")
 $profileNameBox = $window.FindName("ProfileNameBox"); $profilesList = $window.FindName("ProfilesList")
 $saveProfileBtn = $window.FindName("SaveProfileBtn"); $loadProfileBtn = $window.FindName("LoadProfileBtn"); $deleteProfileBtn = $window.FindName("DeleteProfileBtn")
+$exportProfilesBtn = $window.FindName("ExportProfilesBtn"); $importProfilesBtn = $window.FindName("ImportProfilesBtn")
 $appProfileEnabledCheckbox = $window.FindName("AppProfileEnabledCheckbox"); $appProfileStatusText = $window.FindName("AppProfileStatusText")
 $appProfileExeBox = $window.FindName("AppProfileExeBox"); $appProfileCaptureBtn = $window.FindName("AppProfileCaptureBtn")
 $appProfileProfileCombo = $window.FindName("AppProfileProfileCombo"); $appProfileAddBtn = $window.FindName("AppProfileAddBtn")
@@ -1363,13 +1370,16 @@ function Load-MonitorSettings {
 }
 
 function Refresh-Monitors { Get-Monitors; if ($script:CurrentMonitorIndex -ge $script:PhysicalMonitors.Count) { $script:CurrentMonitorIndex = 0 }; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList }
+function Get-UserProfileFiles {
+    if (-not (Test-Path $script:ProfilesPath)) { return @() }
+    return @(Get-ChildItem -Path $script:ProfilesPath -Filter "*.json" -File |
+        Where-Object { $script:ProfileMetadataFiles -notcontains $_.Name } |
+        Sort-Object -Property BaseName)
+}
+
 function Update-ProfilesList {
     $profilesList.Items.Clear()
-    if (Test-Path $script:ProfilesPath) {
-        Get-ChildItem -Path $script:ProfilesPath -Filter "*.json" |
-            Where-Object { $script:ProfileMetadataFiles -notcontains $_.Name } |
-            ForEach-Object { $profilesList.Items.Add($_.BaseName) | Out-Null }
-    }
+    Get-UserProfileFiles | ForEach-Object { $profilesList.Items.Add($_.BaseName) | Out-Null }
     Update-AppProfileProfileCombo
 }
 
@@ -1433,6 +1443,110 @@ function Read-ProfileObject {
         Update-Status "Migrated profile '$Name' to schema v$script:ProfileSchemaVersion"
     }
     return $converted
+}
+
+function Export-ProfileBundle {
+    param([string]$OutputPath)
+    $profileFiles = @(Get-UserProfileFiles)
+    if ($profileFiles.Count -eq 0) {
+        Update-Status "No profiles to export"
+        return $null
+    }
+
+    if ([string]::IsNullOrWhiteSpace($OutputPath)) {
+        if (-not (Test-Path $script:ProfileExportsPath)) { New-Item -ItemType Directory -Path $script:ProfileExportsPath -Force | Out-Null }
+        $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+        $OutputPath = Join-Path $script:ProfileExportsPath "monitorcontrol-profiles-$timestamp.zip"
+    } else {
+        $parent = Split-Path -Path $OutputPath -Parent
+        if (-not [string]::IsNullOrWhiteSpace($parent) -and -not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+    }
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("MonitorControlProfileExport-" + [guid]::NewGuid())
+    $tempProfiles = Join-Path $tempRoot "profiles"
+    try {
+        New-Item -ItemType Directory -Path $tempProfiles -Force | Out-Null
+        $exportedProfiles = @()
+        foreach ($profileFile in $profileFiles) {
+            $profile = Read-ProfileObject -Name $profileFile.BaseName
+            if ($null -eq $profile) { continue }
+            $safeName = $profileFile.BaseName
+            $profile | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $tempProfiles "$safeName.json") -Encoding UTF8
+            $exportedProfiles += $safeName
+        }
+
+        if ($exportedProfiles.Count -eq 0) {
+            Update-Status "No profiles to export"
+            return $null
+        }
+
+        $manifest = [PSCustomObject]@{
+            BundleSchemaVersion = $script:ProfileBundleSchemaVersion
+            AppVersion = "3.17.0"
+            ProfileSchemaVersion = $script:ProfileSchemaVersion
+            ExportedAt = (Get-Date).ToString("o")
+            ProfileCount = $exportedProfiles.Count
+            Profiles = $exportedProfiles
+        }
+        $manifest | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $tempRoot "manifest.json") -Encoding UTF8
+        if (Test-Path $OutputPath) { Remove-Item -Path $OutputPath -Force }
+        [System.IO.Compression.ZipFile]::CreateFromDirectory($tempRoot, $OutputPath)
+        Update-Status "Exported $($exportedProfiles.Count) profiles to $(Split-Path -Path $OutputPath -Leaf)"
+        return $OutputPath
+    } catch {
+        Update-Status "Profile export failed: $($_.Exception.Message)"
+        return $null
+    } finally {
+        if (Test-Path $tempRoot) { Remove-Item -Path $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Import-ProfileBundle {
+    param([string]$BundlePath)
+    if ([string]::IsNullOrWhiteSpace($BundlePath) -or -not (Test-Path $BundlePath)) {
+        Update-Status "Profile bundle not found"
+        return 0
+    }
+
+    $archive = $null
+    $imported = 0
+    $skipped = 0
+    try {
+        $archive = [System.IO.Compression.ZipFile]::OpenRead($BundlePath)
+        $entries = @($archive.Entries | Where-Object {
+            -not [string]::IsNullOrWhiteSpace($_.Name) -and
+            $_.Name.ToLowerInvariant().EndsWith(".json") -and
+            $_.Name -ne "manifest.json" -and
+            $script:ProfileMetadataFiles -notcontains $_.Name
+        })
+
+        foreach ($entry in $entries) {
+            $fallbackName = [System.IO.Path]::GetFileNameWithoutExtension($entry.Name)
+            if ([string]::IsNullOrWhiteSpace($fallbackName)) { $skipped++; continue }
+            $reader = $null
+            try {
+                $reader = New-Object System.IO.StreamReader($entry.Open())
+                $rawProfile = $reader.ReadToEnd() | ConvertFrom-Json
+                $profile = ConvertTo-CurrentProfileSchema -Profile $rawProfile -FallbackName $fallbackName
+                if (Save-ProfileObject -Profile $profile) { $imported++ } else { $skipped++ }
+            } catch {
+                $skipped++
+            } finally {
+                if ($reader) { $reader.Dispose() }
+            }
+        }
+
+        Update-ProfilesList
+        $status = if ($imported -gt 0) { "Imported $imported profiles from $(Split-Path -Path $BundlePath -Leaf)" } else { "No profiles imported" }
+        if ($skipped -gt 0) { $status = "$status ($skipped skipped)" }
+        Update-Status $status
+        return $imported
+    } catch {
+        Update-Status "Profile import failed: $($_.Exception.Message)"
+        return 0
+    } finally {
+        if ($archive) { $archive.Dispose() }
+    }
 }
 
 function Normalize-AppExeName {
@@ -2035,10 +2149,7 @@ function Hide-MainWindowToTray {
 }
 
 function Invoke-NextProfile {
-    $profiles = @()
-    if (Test-Path $script:ProfilesPath) {
-        $profiles = @(Get-ChildItem -Path $script:ProfilesPath -Filter "*.json" | Where-Object { $script:ProfileMetadataFiles -notcontains $_.Name } | Sort-Object -Property BaseName)
-    }
+    $profiles = @(Get-UserProfileFiles)
     if ($profiles.Count -eq 0) {
         Update-Status "No profiles saved"
         Show-TrayNotification -Message "No saved profiles are available to cycle."
@@ -2343,6 +2454,20 @@ $deleteProfileBtn.Add_Click({
         Update-ProfilesList
         Update-AppProfileControls
         Update-ScheduleControls
+    }
+})
+$exportProfilesBtn.Add_Click({
+    Export-ProfileBundle | Out-Null
+})
+$importProfilesBtn.Add_Click({
+    $dialog = New-Object System.Windows.Forms.OpenFileDialog
+    $dialog.Title = "Import profile bundle"
+    $dialog.Filter = "MonitorControl profile bundles (*.zip)|*.zip|All files (*.*)|*.*"
+    $dialog.CheckFileExists = $true
+    $dialog.Multiselect = $false
+    $dialog.InitialDirectory = if (Test-Path $script:ProfileExportsPath) { $script:ProfileExportsPath } else { $script:ProfilesPath }
+    if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        Import-ProfileBundle -BundlePath $dialog.FileName | Out-Null
     }
 })
 
