@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.15.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro v3.16.0 - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.15.0 - Enhanced with battery-aware profiles
+    Version: 3.16.0 - Enhanced with profile schema migration
 #>
 
 param([switch]$StartMinimized, [string]$LoadProfile)
@@ -419,6 +419,8 @@ $script:AppProfileRulesPath = Join-Path $script:ProfilesPath "app-profile-rules.
 $script:ProfileScheduleRulesPath = Join-Path $script:ProfilesPath "profile-schedules.json"
 $script:IdleDimSettingsPath = Join-Path $script:ProfilesPath "idle-dim.json"
 $script:BatteryProfileSettingsPath = Join-Path $script:ProfilesPath "battery-profile.json"
+$script:ProfileSchemaVersion = 2
+$script:ProfileMetadataFiles = @("app-profile-rules.json", "profile-schedules.json", "idle-dim.json", "battery-profile.json")
 $script:UpdatingUI = $false
 $script:ApplyToAll = $false
 $script:AutoModeEnabled = $false
@@ -786,7 +788,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.15.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
+        Title="MonitorControl Pro v3.16.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
         Background="#0a0a0a" WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
     <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
@@ -920,7 +922,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
             <TextBlock Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
-            <TextBlock Text="v3.15.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
+            <TextBlock Text="v3.16.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal">
             <CheckBox x:Name="ApplyAllCheckbox" Content="All Monitors" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -1365,10 +1367,72 @@ function Update-ProfilesList {
     $profilesList.Items.Clear()
     if (Test-Path $script:ProfilesPath) {
         Get-ChildItem -Path $script:ProfilesPath -Filter "*.json" |
-            Where-Object { $_.Name -ne "app-profile-rules.json" } |
+            Where-Object { $script:ProfileMetadataFiles -notcontains $_.Name } |
             ForEach-Object { $profilesList.Items.Add($_.BaseName) | Out-Null }
     }
     Update-AppProfileProfileCombo
+}
+
+function New-ProfileObject {
+    param([string]$Name)
+    return [PSCustomObject]@{
+        SchemaVersion = $script:ProfileSchemaVersion
+        Name = $Name
+        Brightness = [int]$brightnessSlider.Value
+        Contrast = [int]$contrastSlider.Value
+        Red = [int]$redSlider.Value
+        Green = [int]$greenSlider.Value
+        Blue = [int]$blueSlider.Value
+        Gamma = [int]$gammaSlider.Value
+        GammaRed = [int]$gammaRedSlider.Value
+        GammaGreen = [int]$gammaGreenSlider.Value
+        GammaBlue = [int]$gammaBlueSlider.Value
+        UpdatedAt = (Get-Date).ToString("o")
+    }
+}
+
+function ConvertTo-CurrentProfileSchema {
+    param($Profile, [string]$FallbackName)
+    $schema = if ($Profile.PSObject.Properties.Name -contains "SchemaVersion") { [int]$Profile.SchemaVersion } else { 1 }
+    $name = if ($Profile.Name) { [string]$Profile.Name } else { $FallbackName }
+    $converted = [PSCustomObject]@{
+        SchemaVersion = $script:ProfileSchemaVersion
+        Name = $name
+        Brightness = [int]$Profile.Brightness
+        Contrast = [int]$Profile.Contrast
+        Red = [int]$Profile.Red
+        Green = [int]$Profile.Green
+        Blue = [int]$Profile.Blue
+        Gamma = if ($null -ne $Profile.Gamma) { [int]$Profile.Gamma } else { 100 }
+        GammaRed = if ($null -ne $Profile.GammaRed) { [int]$Profile.GammaRed } else { 100 }
+        GammaGreen = if ($null -ne $Profile.GammaGreen) { [int]$Profile.GammaGreen } else { 100 }
+        GammaBlue = if ($null -ne $Profile.GammaBlue) { [int]$Profile.GammaBlue } else { 100 }
+        UpdatedAt = if ($Profile.UpdatedAt) { [string]$Profile.UpdatedAt } else { (Get-Date).ToString("o") }
+    }
+    return $converted
+}
+
+function Save-ProfileObject {
+    param($Profile)
+    $safeName = [System.IO.Path]::GetFileNameWithoutExtension([string]$Profile.Name)
+    if ([string]::IsNullOrWhiteSpace($safeName)) { return $false }
+    $path = Join-Path $script:ProfilesPath "$safeName.json"
+    $Profile | ConvertTo-Json -Depth 4 | Set-Content -Path $path -Encoding UTF8
+    return $true
+}
+
+function Read-ProfileObject {
+    param([string]$Name)
+    $path = Join-Path $script:ProfilesPath "$Name.json"
+    if (-not (Test-Path $path)) { return $null }
+    $profile = Get-Content $path -Raw | ConvertFrom-Json
+    $schema = if ($profile.PSObject.Properties.Name -contains "SchemaVersion") { [int]$profile.SchemaVersion } else { 1 }
+    $converted = ConvertTo-CurrentProfileSchema -Profile $profile -FallbackName $Name
+    if ($schema -lt $script:ProfileSchemaVersion) {
+        Save-ProfileObject -Profile $converted | Out-Null
+        Update-Status "Migrated profile '$Name' to schema v$script:ProfileSchemaVersion"
+    }
+    return $converted
 }
 
 function Normalize-AppExeName {
@@ -1459,13 +1523,12 @@ function Update-AppProfileControls {
 function Apply-ProfileByName {
     param([string]$Name, [string]$Reason = "Loaded")
     if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
-    $path = Join-Path $script:ProfilesPath "$Name.json"
-    if (-not (Test-Path $path)) {
+    $p = Read-ProfileObject -Name $Name
+    if (-not $p) {
         Update-Status "Profile '$Name' not found"
         return $false
     }
     try {
-        $p = Get-Content $path -Raw | ConvertFrom-Json
         $script:UpdatingUI = $true
         Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value $p.Brightness
         Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_CONTRAST) -Value $p.Contrast
@@ -1974,7 +2037,7 @@ function Hide-MainWindowToTray {
 function Invoke-NextProfile {
     $profiles = @()
     if (Test-Path $script:ProfilesPath) {
-        $profiles = @(Get-ChildItem -Path $script:ProfilesPath -Filter "*.json" | Where-Object { $_.Name -ne "app-profile-rules.json" } | Sort-Object -Property BaseName)
+        $profiles = @(Get-ChildItem -Path $script:ProfilesPath -Filter "*.json" | Where-Object { $script:ProfileMetadataFiles -notcontains $_.Name } | Sort-Object -Property BaseName)
     }
     if ($profiles.Count -eq 0) {
         Update-Status "No profiles saved"
@@ -2262,8 +2325,8 @@ $vcpScanBtn.Add_Click({
 
 $saveProfileBtn.Add_Click({
     $name = $profileNameBox.Text.Trim(); if ([string]::IsNullOrEmpty($name)) { return }
-    $profile = @{ Name = $name; Brightness = $brightnessSlider.Value; Contrast = $contrastSlider.Value; Red = $redSlider.Value; Green = $greenSlider.Value; Blue = $blueSlider.Value; Gamma = $gammaSlider.Value; GammaRed = $gammaRedSlider.Value; GammaGreen = $gammaGreenSlider.Value; GammaBlue = $gammaBlueSlider.Value }
-    $profile | ConvertTo-Json | Set-Content -Path "$script:ProfilesPath\$name.json" -Encoding UTF8; Update-ProfilesList; Update-Status "Saved '$name'"
+    $profile = New-ProfileObject -Name $name
+    if (Save-ProfileObject -Profile $profile) { Update-ProfilesList; Update-Status "Saved '$name'" }
 })
 $loadProfileBtn.Add_Click({
     if ($profilesList.SelectedItem -eq $null) { return }

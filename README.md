@@ -1,7 +1,7 @@
 # MonitorControl Pro
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v3.15.0-brightgreen" alt="Version v3.15.0">
+  <img src="https://img.shields.io/badge/Version-v3.16.0-brightgreen" alt="Version v3.16.0">
   <img src="https://img.shields.io/badge/PowerShell-5.1+-blue?logo=powershell" alt="PowerShell 5.1+">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/DDC%2FCI-Supported-green" alt="DDC/CI">
@@ -212,6 +212,7 @@ Profiles are saved as JSON files in `%APPDATA%\MonitorControlPro\`
 ### Profile Contents
 ```json
 {
+  "SchemaVersion": 2,
   "Name": "Gaming",
   "Brightness": 80,
   "Contrast": 70,
@@ -221,9 +222,12 @@ Profiles are saved as JSON files in `%APPDATA%\MonitorControlPro\`
   "Gamma": 100,
   "GammaRed": 100,
   "GammaGreen": 100,
-  "GammaBlue": 100
+  "GammaBlue": 100,
+  "UpdatedAt": "2026-06-28T10:30:00.0000000-04:00"
 }
 ```
+
+Profiles without `SchemaVersion` are treated as v1 and migrated to the current schema on load.
 
 ### Example Profiles
 
