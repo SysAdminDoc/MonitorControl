@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.17.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro v3.18.0 - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.17.0 - Enhanced with profile bundle export/import
+    Version: 3.18.0 - Enhanced with cloud-sync profile storage
 #>
 
 param([switch]$StartMinimized, [string]$LoadProfile)
@@ -414,7 +414,24 @@ $script:FpsOverlayText = $null
 $script:FpsOverlayTimer = $null
 $script:GpuTimer = $null
 $script:AutoModeTimer = $null
-$script:ProfilesPath = "$env:APPDATA\MonitorControlPro"
+$script:DefaultProfilesPath = "$env:APPDATA\MonitorControlPro"
+$script:ProfileStorageSettingsPath = Join-Path $script:DefaultProfilesPath "profile-storage.json"
+$script:ProfilesPath = $script:DefaultProfilesPath
+$script:ProfileStorageMode = "Local"
+if (-not (Test-Path $script:DefaultProfilesPath)) { New-Item -ItemType Directory -Path $script:DefaultProfilesPath -Force | Out-Null }
+if (Test-Path $script:ProfileStorageSettingsPath) {
+    try {
+        $profileStorage = Get-Content -Path $script:ProfileStorageSettingsPath -Raw | ConvertFrom-Json
+        $configuredPath = [string]$profileStorage.ProfilePath
+        if (-not [string]::IsNullOrWhiteSpace($configuredPath)) {
+            $script:ProfilesPath = [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($configuredPath))
+            $script:ProfileStorageMode = if ($profileStorage.Mode) { [string]$profileStorage.Mode } else { "Sync" }
+        }
+    } catch {
+        $script:ProfilesPath = $script:DefaultProfilesPath
+        $script:ProfileStorageMode = "Local"
+    }
+}
 $script:AppProfileRulesPath = Join-Path $script:ProfilesPath "app-profile-rules.json"
 $script:ProfileScheduleRulesPath = Join-Path $script:ProfilesPath "profile-schedules.json"
 $script:IdleDimSettingsPath = Join-Path $script:ProfilesPath "idle-dim.json"
@@ -422,7 +439,7 @@ $script:BatteryProfileSettingsPath = Join-Path $script:ProfilesPath "battery-pro
 $script:ProfileSchemaVersion = 2
 $script:ProfileBundleSchemaVersion = 1
 $script:ProfileExportsPath = Join-Path $script:ProfilesPath "exports"
-$script:ProfileMetadataFiles = @("app-profile-rules.json", "profile-schedules.json", "idle-dim.json", "battery-profile.json")
+$script:ProfileMetadataFiles = @("app-profile-rules.json", "profile-schedules.json", "idle-dim.json", "battery-profile.json", "profile-storage.json")
 $script:UpdatingUI = $false
 $script:ApplyToAll = $false
 $script:AutoModeEnabled = $false
@@ -786,11 +803,22 @@ function Get-CpuTemperature {
     return $null
 }
 
-if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path $script:ProfilesPath -Force | Out-Null }
+try {
+    if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path $script:ProfilesPath -Force | Out-Null }
+} catch {
+    $script:ProfilesPath = $script:DefaultProfilesPath
+    $script:ProfileStorageMode = "Local"
+    $script:AppProfileRulesPath = Join-Path $script:ProfilesPath "app-profile-rules.json"
+    $script:ProfileScheduleRulesPath = Join-Path $script:ProfilesPath "profile-schedules.json"
+    $script:IdleDimSettingsPath = Join-Path $script:ProfilesPath "idle-dim.json"
+    $script:BatteryProfileSettingsPath = Join-Path $script:ProfilesPath "battery-profile.json"
+    $script:ProfileExportsPath = Join-Path $script:ProfilesPath "exports"
+    if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path $script:ProfilesPath -Force | Out-Null }
+}
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.17.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
+        Title="MonitorControl Pro v3.18.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
         Background="#0a0a0a" WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
     <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
@@ -924,7 +952,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
             <TextBlock Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
-            <TextBlock Text="v3.17.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
+            <TextBlock Text="v3.18.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal">
             <CheckBox x:Name="ApplyAllCheckbox" Content="All Monitors" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -1117,7 +1145,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
         </TabItem>
         <TabItem Header="Profiles">
             <Border Background="#151515" CornerRadius="0,5,5,5" Padding="10"><Grid>
-                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="*"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="*"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Border Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                     <TextBox x:Name="ProfileNameBox" Text="My Profile"/>
                     <Button x:Name="SaveProfileBtn" Grid.Column="2" Content="Save" Style="{StaticResource GreenBtn}" Padding="10,4"/>
@@ -1135,6 +1163,13 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
                     <Button x:Name="ImportProfilesBtn" Grid.Column="2" Content="Import Bundle" Style="{StaticResource Btn}"/>
                 </Grid>
                 <Border Grid.Row="8" Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <StackPanel><TextBlock Text="Profile Storage" FontSize="10" Foreground="#909090"/>
+                        <TextBlock x:Name="ProfileStorageStatusText" Text="Local" FontSize="8" Foreground="#707070" Margin="0,2,0,0" TextTrimming="CharacterEllipsis"/></StackPanel>
+                    <Button x:Name="ProfileSyncFolderBtn" Grid.Column="2" Content="Sync Folder" Style="{StaticResource Btn}" Padding="8,4" FontSize="9"/>
+                    <Button x:Name="ProfileLocalFolderBtn" Grid.Column="4" Content="Use Local" Style="{StaticResource Btn}" Padding="8,4" FontSize="9"/>
+                </Grid></Border>
+                <Border Grid.Row="10" Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid>
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                     <Grid><CheckBox x:Name="AppProfileEnabledCheckbox" Content="Per-application profiles" VerticalAlignment="Center"/>
                         <TextBlock x:Name="AppProfileStatusText" Text="Off" FontSize="9" Foreground="#707070" HorizontalAlignment="Right" VerticalAlignment="Center"/></Grid>
@@ -1274,6 +1309,7 @@ $vcpResultBox = $window.FindName("VCPResultBox"); $vcpSetValueBox = $window.Find
 $profileNameBox = $window.FindName("ProfileNameBox"); $profilesList = $window.FindName("ProfilesList")
 $saveProfileBtn = $window.FindName("SaveProfileBtn"); $loadProfileBtn = $window.FindName("LoadProfileBtn"); $deleteProfileBtn = $window.FindName("DeleteProfileBtn")
 $exportProfilesBtn = $window.FindName("ExportProfilesBtn"); $importProfilesBtn = $window.FindName("ImportProfilesBtn")
+$profileStorageStatusText = $window.FindName("ProfileStorageStatusText"); $profileSyncFolderBtn = $window.FindName("ProfileSyncFolderBtn"); $profileLocalFolderBtn = $window.FindName("ProfileLocalFolderBtn")
 $appProfileEnabledCheckbox = $window.FindName("AppProfileEnabledCheckbox"); $appProfileStatusText = $window.FindName("AppProfileStatusText")
 $appProfileExeBox = $window.FindName("AppProfileExeBox"); $appProfileCaptureBtn = $window.FindName("AppProfileCaptureBtn")
 $appProfileProfileCombo = $window.FindName("AppProfileProfileCombo"); $appProfileAddBtn = $window.FindName("AppProfileAddBtn")
@@ -1547,6 +1583,86 @@ function Import-ProfileBundle {
     } finally {
         if ($archive) { $archive.Dispose() }
     }
+}
+
+function Set-ProfileStorageRoot {
+    param([string]$Path, [string]$Mode = "Sync")
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        Update-Status "Profile storage path is empty"
+        return $false
+    }
+    try {
+        $expandedPath = [Environment]::ExpandEnvironmentVariables($Path)
+        $fullPath = [System.IO.Path]::GetFullPath($expandedPath)
+        if (-not (Test-Path $fullPath)) { New-Item -ItemType Directory -Path $fullPath -Force | Out-Null }
+        $script:ProfilesPath = $fullPath
+        $script:ProfileStorageMode = $Mode
+        $script:AppProfileRulesPath = Join-Path $script:ProfilesPath "app-profile-rules.json"
+        $script:ProfileScheduleRulesPath = Join-Path $script:ProfilesPath "profile-schedules.json"
+        $script:IdleDimSettingsPath = Join-Path $script:ProfilesPath "idle-dim.json"
+        $script:BatteryProfileSettingsPath = Join-Path $script:ProfilesPath "battery-profile.json"
+        $script:ProfileExportsPath = Join-Path $script:ProfilesPath "exports"
+        return $true
+    } catch {
+        Update-Status "Profile storage failed: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Save-ProfileStorageSettings {
+    if (-not (Test-Path $script:DefaultProfilesPath)) { New-Item -ItemType Directory -Path $script:DefaultProfilesPath -Force | Out-Null }
+    $payload = [PSCustomObject]@{
+        Mode = $script:ProfileStorageMode
+        ProfilePath = $script:ProfilesPath
+        UpdatedAt = (Get-Date).ToString("o")
+    }
+    $payload | ConvertTo-Json | Set-Content -Path $script:ProfileStorageSettingsPath -Encoding UTF8
+}
+
+function Reset-ProfileBackedAutomationState {
+    $script:AppProfileEnabled = $false
+    $script:AppProfileRules = @()
+    $script:LastForegroundExe = $null
+    $script:LastAppliedAppProfileKey = $null
+    $script:ProfileScheduleEnabled = $false
+    $script:ProfileSchedules = @()
+    $script:LastAppliedScheduleKey = $null
+    $script:IdleDimEnabled = $false
+    $script:IdleDimMinutes = 10
+    $script:IdleDimBrightness = 20
+    $script:IdleDimRestoreOnActivity = $true
+    $script:IdleDimActive = $false
+    $script:IdleDimPreviousBrightness = $null
+    $script:BatteryProfileEnabled = $false
+    $script:BatteryBrightness = 35
+    $script:AcBrightness = 75
+    $script:LastPowerLineStatus = $null
+    $script:ProfileCycleIndex = -1
+}
+
+function Update-ProfileStorageControls {
+    if ($null -eq $profileStorageStatusText) { return }
+    $mode = if ($script:ProfileStorageMode -eq "Local") { "Local" } else { "Sync" }
+    $profileStorageStatusText.Text = "$mode - $script:ProfilesPath"
+    $profileStorageStatusText.ToolTip = $script:ProfilesPath
+}
+
+function Reload-ProfileStorageState {
+    Reset-ProfileBackedAutomationState
+    Load-AppProfileRules
+    Load-ProfileSchedules
+    Load-IdleDimSettings
+    Load-BatteryProfileSettings
+    Update-ProfilesList
+    Update-AppProfileControls
+    Update-ScheduleControls
+    Update-IdleDimControls
+    Update-BatteryProfileControls
+    Start-AppProfileWatcher
+    Start-ProfileScheduleWatcher
+    Start-IdleDimWatcher
+    Start-BatteryProfileWatcher
+    Update-ProfileStorageControls
 }
 
 function Normalize-AppExeName {
@@ -2470,6 +2586,26 @@ $importProfilesBtn.Add_Click({
         Import-ProfileBundle -BundlePath $dialog.FileName | Out-Null
     }
 })
+$profileSyncFolderBtn.Add_Click({
+    $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dialog.Description = "Select a OneDrive or Dropbox folder for MonitorControl profiles"
+    $dialog.ShowNewFolderButton = $true
+    $dialog.SelectedPath = if (Test-Path $script:ProfilesPath) { $script:ProfilesPath } else { $script:DefaultProfilesPath }
+    if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        if (Set-ProfileStorageRoot -Path $dialog.SelectedPath -Mode "Sync") {
+            Save-ProfileStorageSettings
+            Reload-ProfileStorageState
+            Update-Status "Profile sync folder: $(Split-Path -Path $script:ProfilesPath -Leaf)"
+        }
+    }
+})
+$profileLocalFolderBtn.Add_Click({
+    if (Set-ProfileStorageRoot -Path $script:DefaultProfilesPath -Mode "Local") {
+        Save-ProfileStorageSettings
+        Reload-ProfileStorageState
+        Update-Status "Profile storage: local"
+    }
+})
 
 $appProfileEnabledCheckbox.Add_Checked({
     if ($script:UpdatingAppProfileUI) { return }
@@ -2650,6 +2786,7 @@ Load-AppProfileRules; Update-AppProfileControls; Start-AppProfileWatcher
 Load-ProfileSchedules; Update-ScheduleControls; Start-ProfileScheduleWatcher
 Load-IdleDimSettings; Update-IdleDimControls; Start-IdleDimWatcher
 Load-BatteryProfileSettings; Update-BatteryProfileControls; Start-BatteryProfileWatcher
+Update-ProfileStorageControls
 if (-not ($script:HasNvidia -or $script:HasAmd -or $script:HasCpuTempMonitor)) { $gpuTab.Visibility = "Collapsed" } else {
     $script:GpuTimer = New-Object System.Windows.Threading.DispatcherTimer; $script:GpuTimer.Interval = [TimeSpan]::FromSeconds(2)
     $script:GpuTimer.Add_Tick({ Update-GpuStats }); $script:GpuTimer.Start(); Update-GpuStats
