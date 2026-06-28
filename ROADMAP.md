@@ -4,9 +4,6 @@ PowerShell/WPF utility for DDC/CI monitor control â€” brightness, contrast,
 
 ## Planned Features
 
-### GPU Monitoring
-- Per-GPU FPS overlay (PresentMon integration)
-
 ### Laptop Support
 - WMI fallback (`WmiMonitorBrightnessMethods`) for integrated laptop displays
 - Ambient light sensor polling (`ILightSensor`) for auto-brightness
