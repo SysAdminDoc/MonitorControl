@@ -1,7 +1,7 @@
 # MonitorControl Pro
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v3.18.0-brightgreen" alt="Version v3.18.0">
+  <img src="https://img.shields.io/badge/Version-v3.19.0-brightgreen" alt="Version v3.19.0">
   <img src="https://img.shields.io/badge/PowerShell-5.1+-blue?logo=powershell" alt="PowerShell 5.1+">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/DDC%2FCI-Supported-green" alt="DDC/CI">
@@ -32,7 +32,7 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 ### Automation
 - **System Tray Mode** - Persistent notification-area icon with a brightness popup, linked-monitor toggle, and profile cycling
 - **Per-Application Profiles** - Watch the foreground app and automatically apply a saved profile when its executable matches a rule
-- **Scheduled Profiles** - Apply saved profiles automatically from explicit `HH:mm` daily schedule rules
+- **Scheduled Profiles** - Apply saved profiles automatically from explicit `HH:mm` daily schedule rules with a 24-hour timeline view
 - **Idle Dim** - Poll Windows idle time and dim all monitors after inactivity, with optional brightness restore on activity
 - **Ambient Light Mode** - Poll Windows `LightSensor` readings and map lux to monitor brightness automatically when a sensor is available
 - **Battery Profile** - Apply separate brightness targets when Windows switches between AC power and battery
@@ -124,6 +124,7 @@ $Shortcut.Save()
 ### Scheduled Profiles
 - Create or load a saved monitor profile
 - Open the **Schedule** tab, enable **Scheduled profiles**, and add `HH:mm` rules that map times to profiles
+- The timeline plots rules against a 24-hour axis so timing gaps are visible before saving more rules
 - The watcher applies the latest due rule once per schedule boundary, including the current effective rule when scheduling is enabled
 - Rules are saved in `%APPDATA%\MonitorControlPro\profile-schedules.json`
 

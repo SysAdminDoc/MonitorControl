@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.18.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro v3.19.0 - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.18.0 - Enhanced with cloud-sync profile storage
+    Version: 3.19.0 - Enhanced with schedule timeline UI
 #>
 
 param([switch]$StartMinimized, [string]$LoadProfile)
@@ -818,7 +818,7 @@ try {
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.18.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
+        Title="MonitorControl Pro v3.19.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
         Background="#0a0a0a" WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
     <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
@@ -952,7 +952,7 @@ try {
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
             <TextBlock Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
-            <TextBlock Text="v3.18.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
+            <TextBlock Text="v3.19.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal">
             <CheckBox x:Name="ApplyAllCheckbox" Content="All Monitors" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -1201,9 +1201,12 @@ try {
                     <Button x:Name="ScheduleRemoveBtn" Grid.Column="6" Content="Remove" Style="{StaticResource WarnBtn}" Padding="10,4" FontSize="9"/>
                 </Grid></Border>
                 <Border Grid.Row="4" Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid>
-                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="*"/></Grid.RowDefinitions>
                     <TextBlock Text="Profile schedule" FontSize="10" Foreground="#909090"/>
-                    <ListBox x:Name="ScheduleRulesList" Grid.Row="2" Background="#111" BorderThickness="0" Foreground="#e0e0e0" FontSize="11"/>
+                    <Border Grid.Row="2" Background="#111" BorderBrush="#252525" BorderThickness="1" CornerRadius="4" Height="48">
+                        <Canvas x:Name="ScheduleTimelineCanvas" ClipToBounds="True"/>
+                    </Border>
+                    <ListBox x:Name="ScheduleRulesList" Grid.Row="4" Background="#111" BorderThickness="0" Foreground="#e0e0e0" FontSize="11"/>
                 </Grid></Border>
                 <Border Grid.Row="6" Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid>
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
@@ -1317,6 +1320,7 @@ $appProfileRemoveBtn = $window.FindName("AppProfileRemoveBtn"); $appProfileRules
 $scheduleEnabledCheckbox = $window.FindName("ScheduleEnabledCheckbox"); $scheduleStatusText = $window.FindName("ScheduleStatusText")
 $scheduleTimeBox = $window.FindName("ScheduleTimeBox"); $scheduleProfileCombo = $window.FindName("ScheduleProfileCombo")
 $scheduleAddBtn = $window.FindName("ScheduleAddBtn"); $scheduleRemoveBtn = $window.FindName("ScheduleRemoveBtn"); $scheduleRulesList = $window.FindName("ScheduleRulesList")
+$scheduleTimelineCanvas = $window.FindName("ScheduleTimelineCanvas")
 $idleDimEnabledCheckbox = $window.FindName("IdleDimEnabledCheckbox"); $idleDimStatusText = $window.FindName("IdleDimStatusText")
 $idleDimMinutesBox = $window.FindName("IdleDimMinutesBox"); $idleDimBrightnessBox = $window.FindName("IdleDimBrightnessBox")
 $idleDimRestoreCheckbox = $window.FindName("IdleDimRestoreCheckbox"); $idleDimSaveBtn = $window.FindName("IdleDimSaveBtn")
@@ -1831,6 +1835,82 @@ function Get-ScheduleMinutes {
     return ([int]$parts[0] * 60) + [int]$parts[1]
 }
 
+function Update-ScheduleTimeline {
+    if ($null -eq $scheduleTimelineCanvas) { return }
+    $scheduleTimelineCanvas.Children.Clear()
+    $width = [double]$scheduleTimelineCanvas.ActualWidth
+    $height = [double]$scheduleTimelineCanvas.ActualHeight
+    if ($width -lt 80) { $width = 540 }
+    if ($height -lt 40) { $height = 56 }
+    $leftPad = 10
+    $rightPad = 10
+    $plotWidth = [Math]::Max(1, $width - $leftPad - $rightPad)
+    $axisY = 26
+    $axisBrush = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString("#333333"))
+    $tickBrush = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString("#505050"))
+    $textBrush = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString("#909090"))
+    $markerBrush = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString("#3498db"))
+
+    $axis = New-Object System.Windows.Shapes.Line
+    $axis.X1 = $leftPad; $axis.X2 = $width - $rightPad; $axis.Y1 = $axisY; $axis.Y2 = $axisY
+    $axis.Stroke = $axisBrush; $axis.StrokeThickness = 1
+    $scheduleTimelineCanvas.Children.Add($axis) | Out-Null
+
+    foreach ($hour in @(0, 6, 12, 18, 24)) {
+        $x = $leftPad + (($hour * 60) / 1440.0) * $plotWidth
+        $tick = New-Object System.Windows.Shapes.Line
+        $tick.X1 = $x; $tick.X2 = $x; $tick.Y1 = $axisY - 5; $tick.Y2 = $axisY + 5
+        $tick.Stroke = $tickBrush; $tick.StrokeThickness = 1
+        $scheduleTimelineCanvas.Children.Add($tick) | Out-Null
+
+        $label = New-Object System.Windows.Controls.TextBlock
+        $label.Text = if ($hour -eq 24) { "24:00" } else { "{0:D2}:00" -f $hour }
+        $label.FontSize = 8; $label.Foreground = $textBrush
+        [System.Windows.Controls.Canvas]::SetLeft($label, [Math]::Min([Math]::Max(0, $x - 14), $width - 34))
+        [System.Windows.Controls.Canvas]::SetTop($label, $axisY + 8)
+        $scheduleTimelineCanvas.Children.Add($label) | Out-Null
+    }
+
+    $rules = @($script:ProfileSchedules | Sort-Object @{ Expression = { Get-ScheduleMinutes -TimeText $_.Time } })
+    if ($rules.Count -eq 0) {
+        $empty = New-Object System.Windows.Controls.TextBlock
+        $empty.Text = "No schedule rules"
+        $empty.FontSize = 9; $empty.Foreground = $textBrush
+        [System.Windows.Controls.Canvas]::SetLeft($empty, 12)
+        [System.Windows.Controls.Canvas]::SetTop($empty, 6)
+        $scheduleTimelineCanvas.Children.Add($empty) | Out-Null
+        return
+    }
+
+    foreach ($rule in $rules) {
+        $minutes = Get-ScheduleMinutes -TimeText $rule.Time
+        if ($minutes -lt 0) { continue }
+        $x = $leftPad + ($minutes / 1440.0) * $plotWidth
+        $line = New-Object System.Windows.Shapes.Line
+        $line.X1 = $x; $line.X2 = $x; $line.Y1 = 8; $line.Y2 = $axisY + 5
+        $line.Stroke = $markerBrush; $line.StrokeThickness = 1
+        $line.Opacity = 0.75
+        $line.ToolTip = "$($rule.Time) - $($rule.Profile)"
+        $scheduleTimelineCanvas.Children.Add($line) | Out-Null
+
+        $marker = New-Object System.Windows.Shapes.Ellipse
+        $marker.Width = 8; $marker.Height = 8; $marker.Fill = $markerBrush
+        $marker.Stroke = [System.Windows.Media.Brushes]::White; $marker.StrokeThickness = 1
+        $marker.ToolTip = "$($rule.Time) - $($rule.Profile)"
+        [System.Windows.Controls.Canvas]::SetLeft($marker, $x - 4)
+        [System.Windows.Controls.Canvas]::SetTop($marker, $axisY - 4)
+        $scheduleTimelineCanvas.Children.Add($marker) | Out-Null
+
+        $timeLabel = New-Object System.Windows.Controls.TextBlock
+        $timeLabel.Text = $rule.Time
+        $timeLabel.FontSize = 8; $timeLabel.Foreground = $textBrush
+        $timeLabel.ToolTip = "$($rule.Time) - $($rule.Profile)"
+        [System.Windows.Controls.Canvas]::SetLeft($timeLabel, [Math]::Min([Math]::Max(0, $x - 18), $width - 38))
+        [System.Windows.Controls.Canvas]::SetTop($timeLabel, 4)
+        $scheduleTimelineCanvas.Children.Add($timeLabel) | Out-Null
+    }
+}
+
 function Load-ProfileSchedules {
     $script:ProfileScheduleEnabled = $false
     $script:ProfileSchedules = @()
@@ -1870,6 +1950,7 @@ function Update-ScheduleControls {
         $scheduleEnabledCheckbox.IsChecked = [bool]$script:ProfileScheduleEnabled
         $scheduleStatusText.Text = if ($script:ProfileScheduleEnabled) { "Watching" } else { "Off" }
         Update-ProfileCombo -Combo $scheduleProfileCombo
+        Update-ScheduleTimeline
     } finally {
         $script:UpdatingScheduleUI = $false
     }
@@ -2660,6 +2741,9 @@ $appProfileRemoveBtn.Add_Click({
     Update-Status "Removed app profile for $exe"
 })
 
+if ($scheduleTimelineCanvas) {
+    $scheduleTimelineCanvas.Add_SizeChanged({ Update-ScheduleTimeline })
+}
 $scheduleEnabledCheckbox.Add_Checked({
     if ($script:UpdatingScheduleUI) { return }
     $script:ProfileScheduleEnabled = $true
