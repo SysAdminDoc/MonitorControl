@@ -1,7 +1,7 @@
 # MonitorControl Pro
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v3.4.0-brightgreen" alt="Version v3.4.0">
+  <img src="https://img.shields.io/badge/Version-v3.5.0-brightgreen" alt="Version v3.5.0">
   <img src="https://img.shields.io/badge/PowerShell-5.1+-blue?logo=powershell" alt="PowerShell 5.1+">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/DDC%2FCI-Supported-green" alt="DDC/CI">
@@ -39,7 +39,7 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 
 ### Advanced Features
 - **VCP Explorer** — Query and set any VCP code for advanced users
-- **VCP Code Scanner** — Discover which DDC/CI features your monitor supports
+- **VCP Code Scanner** — Discover which DDC/CI features your monitor supports, including extended MCCS codes for gamma, OSD controls, indicators, auxiliary power, and display modes
 - **DDC/CI Capabilities Viewer** — View raw capabilities string from monitor
 - **Software Gamma Control** — Independent RGB gamma curves via Windows API
 - **Factory Reset** — Reset monitor to factory defaults (colors only or full reset)
@@ -140,9 +140,18 @@ The VCP Explorer tab allows you to query and set any DDC/CI VCP code. Common cod
 | `0x1A` | Blue Gain | 0-100 | Blue channel gain |
 | `0x60` | Input Source | varies | Active input selection |
 | `0x62` | Volume | 0-100 | Speaker volume (if available) |
+| `0x72` | Gamma | varies | Hardware gamma control when exposed by the monitor |
 | `0x87` | Sharpness | 0-100 | Image sharpness |
 | `0x8D` | Audio Mute | 1/2 | Mute speakers |
+| `0xC0` | Display Usage Time | read-only | Panel usage counter |
+| `0xC6` | Application Enable Key | varies | Vendor/application enable key |
+| `0xCA` | OSD/Button Control | varies | Monitor OSD and button behavior |
+| `0xCC` | OSD Language | varies | Monitor on-screen display language |
+| `0xCD` | Status Indicators / LED | varies | Status indicator and power LED behavior when supported |
 | `0xD6` | Power Mode | 1-5 | Power state control |
+| `0xD7` | Aux Power Output | varies | Auxiliary power output control when supported |
+| `0xDC` | Display Mode | varies | Preset picture/display modes |
+| `0xDF` | VCP Version | read-only | Monitor VCP/MCCS version |
 | `0x04` | Factory Reset | 1 | Reset all settings |
 | `0x08` | Color Reset | 1 | Reset color settings only |
 
