@@ -1,7 +1,7 @@
 # MonitorControl Pro
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v3.5.0-brightgreen" alt="Version v3.5.0">
+  <img src="https://img.shields.io/badge/Version-v3.6.0-brightgreen" alt="Version v3.6.0">
   <img src="https://img.shields.io/badge/PowerShell-5.1+-blue?logo=powershell" alt="PowerShell 5.1+">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/DDC%2FCI-Supported-green" alt="DDC/CI">
@@ -17,6 +17,7 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 - **RGB Gain Control** — Fine-tune red, green, and blue channels independently
 - **Color Temperature Presets** — Quick access to Warm (5000K), 6500K (D65), Cool (9300K), and sRGB
 - **Sharpness Control** — Adjust display sharpness if supported
+- **Dynamic Contrast** — Switch display mode between standard (`0x00`) and dynamic contrast (`0xF0`) through VCP `0xDC` on monitors that expose it
 
 ### Monitor Management
 - **Visual Monitor Layout** — Click-to-select interface matching Windows Display Settings
@@ -172,6 +173,12 @@ The VCP Explorer tab allows you to query and set any DDC/CI VCP code. Common cod
 | `0x01` | On |
 | `0x02` | Standby |
 | `0x04` | Off |
+
+### Display Mode Values
+| Value | Mode |
+|-------|------|
+| `0x00` | Standard / default |
+| `0xF0` | Dynamic Contrast |
 
 ## Profiles
 
