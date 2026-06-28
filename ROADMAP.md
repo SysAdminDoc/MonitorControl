@@ -5,7 +5,6 @@ PowerShell/WPF utility for DDC/CI monitor control â€” brightness, contrast,
 ## Planned Features
 
 ### GPU Monitoring
-- Intel Arc / iGPU monitoring via IGCL
 - CPU temperature via LibreHardwareMonitor/OpenHardwareMonitor lib
 - Per-GPU FPS overlay (PresentMon integration)
 
