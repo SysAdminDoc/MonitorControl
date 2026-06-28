@@ -1,7 +1,7 @@
 # MonitorControl Pro
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v3.8.0-brightgreen" alt="Version v3.8.0">
+  <img src="https://img.shields.io/badge/Version-v3.9.0-brightgreen" alt="Version v3.9.0">
   <img src="https://img.shields.io/badge/PowerShell-5.1+-blue?logo=powershell" alt="PowerShell 5.1+">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/DDC%2FCI-Supported-green" alt="DDC/CI">
@@ -51,7 +51,7 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 - Real-time temperature, utilization, and clock speed
 - Memory usage and fan speed
 - Power draw monitoring
-- Digital vibrance slider (placeholder for NVAPI integration)
+- Digital vibrance slider using NVAPI DVC where supported
 
 ## Requirements
 
@@ -314,7 +314,6 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 ### Areas for Improvement
 - [ ] Multi-monitor profile linking
 - [ ] AMD GPU monitoring support
-- [ ] NVAPI integration for digital vibrance
 - [ ] WMI fallback for laptop displays
 
 ## License
