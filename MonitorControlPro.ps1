@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.11.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro v3.12.0 - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.11.0 - Enhanced with CPU temperature monitoring
+    Version: 3.12.0 - Enhanced with PresentMon FPS overlay
 #>
 
 param([switch]$StartMinimized, [string]$LoadProfile)
@@ -408,6 +408,10 @@ $script:HasCpuTempMonitor = $false
 $script:NvidiaSmiPath = $null
 $script:HardwareMonitorComputer = $null
 $script:HardwareMonitorKind = $null
+$script:PresentMonPath = $null
+$script:FpsOverlayWindow = $null
+$script:FpsOverlayText = $null
+$script:FpsOverlayTimer = $null
 $script:GpuTimer = $null
 $script:AutoModeTimer = $null
 $script:ProfilesPath = "$env:APPDATA\MonitorControlPro"
@@ -665,7 +669,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.11.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
+        Title="MonitorControl Pro v3.12.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
         Background="#0a0a0a" WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
     <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
@@ -799,7 +803,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
             <TextBlock Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
-            <TextBlock Text="v3.11.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
+            <TextBlock Text="v3.12.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal">
             <CheckBox x:Name="ApplyAllCheckbox" Content="All Monitors" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -925,7 +929,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
         </TabItem>
         <TabItem x:Name="GpuTab" Header="GPU">
             <Border Background="#151515" CornerRadius="0,5,5,5" Padding="10"><Grid>
-                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Border Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                     <StackPanel><TextBlock x:Name="GpuNameText" Text="GPU" FontSize="12" Foreground="#76b900" FontWeight="SemiBold"/>
                         <TextBlock x:Name="GpuStatsText" Text="-- C | -- MHz | -- W" FontSize="8" Foreground="#707070" Margin="0,2,0,0"/>
@@ -957,6 +961,13 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
                         <Slider x:Name="GammaSlider" Grid.Row="2" Value="100" Minimum="50" Maximum="150" Tag="#9b59b6" Style="{StaticResource Sld}"/>
                     </Grid></Border>
                 </Grid>
+                <Border Grid.Row="6" Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <StackPanel><TextBlock Text="FPS Overlay" FontSize="10" Foreground="#909090"/>
+                        <TextBlock x:Name="FpsOverlayStatusText" Text="PresentMon idle" FontSize="8" Foreground="#707070" Margin="0,2,0,0"/></StackPanel>
+                    <Button x:Name="FpsOverlayStartBtn" Grid.Column="2" Content="Start" Style="{StaticResource GreenBtn}" Padding="10,4" FontSize="9"/>
+                    <Button x:Name="FpsOverlayStopBtn" Grid.Column="4" Content="Stop" Style="{StaticResource Btn}" Padding="10,4" FontSize="9"/>
+                </Grid></Border>
             </Grid></Border>
         </TabItem>
         <TabItem Header="VCP">
@@ -1120,6 +1131,7 @@ $memUsageText = $window.FindName("MemUsageText"); $memUtilBar = $window.FindName
 $fanSpeedText = $window.FindName("FanSpeedText"); $fanSpeedBar = $window.FindName("FanSpeedBar")
 $powerDrawText = $window.FindName("PowerDrawText"); $powerDrawBar = $window.FindName("PowerDrawBar")
 $vibranceSlider = $window.FindName("VibranceSlider"); $vibranceValue = $window.FindName("VibranceValue")
+$fpsOverlayStatusText = $window.FindName("FpsOverlayStatusText"); $fpsOverlayStartBtn = $window.FindName("FpsOverlayStartBtn"); $fpsOverlayStopBtn = $window.FindName("FpsOverlayStopBtn")
 $gammaSlider = $window.FindName("GammaSlider"); $gammaValue = $window.FindName("GammaValue")
 $vcpCodeBox = $window.FindName("VCPCodeBox"); $vcpPresetCombo = $window.FindName("VCPPresetCombo"); $vcpQueryBtn = $window.FindName("VCPQueryBtn")
 $vcpResultBox = $window.FindName("VCPResultBox"); $vcpSetValueBox = $window.FindName("VCPSetValueBox"); $vcpSetBtn = $window.FindName("VCPSetBtn"); $vcpScanBtn = $window.FindName("VCPScanBtn")
@@ -1843,6 +1855,103 @@ function Show-IdentifyOverlays {
     }
 }
 
+function Initialize-PresentMon {
+    if ($script:PresentMonPath -and (Test-Path $script:PresentMonPath)) { return $true }
+    $command = Get-Command PresentMon.exe, PresentMon64.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($command) { $script:PresentMonPath = $command.Source; return $true }
+    $candidatePaths = @(
+        (Join-Path $PSScriptRoot "PresentMon.exe"),
+        (Join-Path $PSScriptRoot "PresentMon64.exe"),
+        "${env:ProgramFiles}\PresentMon\PresentMon.exe",
+        "${env:ProgramFiles}\Intel\PresentMon\PresentMon.exe",
+        "${env:ProgramFiles(x86)}\PresentMon\PresentMon.exe",
+        "${env:ProgramFiles(x86)}\Intel\PresentMon\PresentMon.exe"
+    )
+    foreach ($path in $candidatePaths) {
+        if ($path -and (Test-Path $path)) { $script:PresentMonPath = $path; return $true }
+    }
+    return $false
+}
+
+function Get-PresentMonFpsSnapshot {
+    if (-not (Initialize-PresentMon)) { return @{ Success = $false; Text = "FPS --"; Status = "PresentMon.exe not found" } }
+    try {
+        $output = & $script:PresentMonPath --output_stdout --no_console_stats --timed 1 --terminate_after_timed --stop_existing_session 2>$null
+        $csvLines = @($output) | Where-Object { $_ -and $_.Contains(",") }
+        if ($csvLines.Count -lt 2) { return @{ Success = $false; Text = "FPS --"; Status = "No PresentMon samples" } }
+        $rows = $csvLines | ConvertFrom-Csv
+        if (-not $rows -or $rows.Count -eq 0) { return @{ Success = $false; Text = "FPS --"; Status = "PresentMon CSV parse failed" } }
+        $headers = @($rows[0].PSObject.Properties.Name)
+        $msColumn = $headers | Where-Object { $_ -match "MsBetweenPresents|MsBetweenDisplayChange|MsUntilDisplayed|msBetweenPresents" } | Select-Object -First 1
+        if (-not $msColumn) { return @{ Success = $false; Text = "FPS --"; Status = "PresentMon frame-time column missing" } }
+        $appColumn = $headers | Where-Object { $_ -match "Application|ProcessName|Process" } | Select-Object -First 1
+        $frameTimes = @()
+        foreach ($row in $rows) {
+            $value = $row.$msColumn
+            $parsed = 0.0
+            if ([double]::TryParse([string]$value, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$parsed) -and $parsed -gt 0) {
+                $frameTimes += $parsed
+            }
+        }
+        if ($frameTimes.Count -eq 0) { return @{ Success = $false; Text = "FPS --"; Status = "No active PresentMon frames" } }
+        $avgMs = ($frameTimes | Measure-Object -Average).Average
+        $fps = [math]::Round(1000 / $avgMs, 1)
+        $appName = "Active app"
+        if ($appColumn) {
+            $topApp = $rows | Where-Object { $_.$appColumn } | Group-Object -Property $appColumn | Sort-Object Count -Descending | Select-Object -First 1
+            if ($topApp) { $appName = [string]$topApp.Name }
+        }
+        return @{ Success = $true; Text = "$fps FPS`n$appName"; Status = "$fps FPS - $appName" }
+    } catch {
+        return @{ Success = $false; Text = "FPS --"; Status = "PresentMon error: $_" }
+    }
+}
+
+function Update-FpsOverlay {
+    $snapshot = Get-PresentMonFpsSnapshot
+    if ($script:FpsOverlayText) { $script:FpsOverlayText.Text = $snapshot.Text }
+    $fpsOverlayStatusText.Text = $snapshot.Status
+    Update-Status $snapshot.Status
+}
+
+function Show-FpsOverlay {
+    if (-not (Initialize-PresentMon)) {
+        $fpsOverlayStatusText.Text = "PresentMon.exe not found"
+        Update-Status "PresentMon.exe not found"
+        return
+    }
+    if (-not $script:FpsOverlayWindow) {
+        $overlay = New-Object System.Windows.Window
+        $overlay.WindowStyle = "None"; $overlay.AllowsTransparency = $true; $overlay.Background = [System.Windows.Media.Brushes]::Transparent
+        $overlay.Topmost = $true; $overlay.ShowInTaskbar = $false; $overlay.ResizeMode = "NoResize"; $overlay.Width = 190; $overlay.Height = 74
+        $workArea = [System.Windows.SystemParameters]::WorkArea
+        $overlay.Left = $workArea.Right - 210; $overlay.Top = $workArea.Top + 20
+        $border = New-Object System.Windows.Controls.Border
+        $border.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(230, 10, 10, 10))
+        $border.BorderBrush = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb(118, 185, 0))
+        $border.BorderThickness = New-Object System.Windows.Thickness(1); $border.CornerRadius = New-Object System.Windows.CornerRadius(6); $border.Padding = New-Object System.Windows.Thickness(12, 8, 12, 8)
+        $text = New-Object System.Windows.Controls.TextBlock
+        $text.Text = "FPS --"; $text.Foreground = [System.Windows.Media.Brushes]::White; $text.FontFamily = "Segoe UI"; $text.FontSize = 14; $text.FontWeight = "SemiBold"
+        $border.Child = $text; $overlay.Content = $border
+        $script:FpsOverlayWindow = $overlay; $script:FpsOverlayText = $text
+    }
+    $script:FpsOverlayWindow.Show()
+    if (-not $script:FpsOverlayTimer) {
+        $script:FpsOverlayTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:FpsOverlayTimer.Interval = [TimeSpan]::FromSeconds(3)
+        $script:FpsOverlayTimer.Add_Tick({ Update-FpsOverlay })
+    }
+    $script:FpsOverlayTimer.Start()
+    Update-FpsOverlay
+}
+
+function Hide-FpsOverlay {
+    if ($script:FpsOverlayTimer) { $script:FpsOverlayTimer.Stop() }
+    if ($script:FpsOverlayWindow) { $script:FpsOverlayWindow.Hide() }
+    $fpsOverlayStatusText.Text = "PresentMon idle"
+    Update-Status "FPS overlay stopped"
+}
+
 # Populate VCP preset combo
 foreach ($code in ($script:VCPCodeDescriptions.Keys | Sort-Object)) { $item = New-Object System.Windows.Controls.ComboBoxItem; $item.Content = "0x{0:X2} - {1}" -f $code, $script:VCPCodeDescriptions[$code]; $item.Tag = $code; $vcpPresetCombo.Items.Add($item) | Out-Null }
 $vcpPresetCombo.SelectedIndex = 0
@@ -2061,6 +2170,8 @@ $idleDimSaveBtn.Add_Click({
 
 $displaySettingsBtn.Add_Click({ Start-Process "ms-settings:display" }); $colorMgmtBtn.Add_Click({ Start-Process "colorcpl.exe" })
 $gpuControlPanelBtn.Add_Click({ if ($script:HasNvidia) { Start-Process "nvidia-settings" -ErrorAction SilentlyContinue } else { Start-Process "ms-settings:display" } })
+$fpsOverlayStartBtn.Add_Click({ Show-FpsOverlay })
+$fpsOverlayStopBtn.Add_Click({ Hide-FpsOverlay })
 $vibranceSlider.Add_ValueChanged({
     if ($script:UpdatingUI) { return }
     $level = [int]$vibranceSlider.Value
@@ -2111,7 +2222,8 @@ $window.Add_StateChanged({
     if ($window.WindowState -eq [System.Windows.WindowState]::Minimized) { Hide-MainWindowToTray }
 })
 
-$window.Add_Closed({ if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }; if ($script:ProfileScheduleTimer) { $script:ProfileScheduleTimer.Stop() }; if ($script:IdleDimTimer) { $script:IdleDimTimer.Stop() }
+$window.Add_Closed({ if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }; if ($script:ProfileScheduleTimer) { $script:ProfileScheduleTimer.Stop() }; if ($script:IdleDimTimer) { $script:IdleDimTimer.Stop() }; if ($script:FpsOverlayTimer) { $script:FpsOverlayTimer.Stop() }
+    if ($script:FpsOverlayWindow) { try { $script:FpsOverlayWindow.Close() } catch {} }
     if ($script:HardwareMonitorComputer) { try { $script:HardwareMonitorComputer.Close() } catch {} }
     Dispose-TrayMode
     foreach ($mon in $script:PhysicalMonitors) { if ($mon.Handle -ne [IntPtr]::Zero) { [MonitorAPI]::DestroyPhysicalMonitor($mon.Handle) | Out-Null } }
