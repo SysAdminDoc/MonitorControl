@@ -5,7 +5,6 @@ PowerShell/WPF utility for DDC/CI monitor control â€” brightness, contrast,
 ## Planned Features
 
 ### Laptop Support
-- WMI fallback (`WmiMonitorBrightnessMethods`) for integrated laptop displays
 - Ambient light sensor polling (`ILightSensor`) for auto-brightness
 - Battery-aware profile: dim on battery, bright on AC
 

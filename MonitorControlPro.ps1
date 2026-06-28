@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.12.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro v3.13.0 - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.12.0 - Enhanced with PresentMon FPS overlay
+    Version: 3.13.0 - Enhanced with WMI laptop brightness fallback
 #>
 
 param([switch]$StartMinimized, [string]$LoadProfile)
@@ -421,6 +421,7 @@ $script:IdleDimSettingsPath = Join-Path $script:ProfilesPath "idle-dim.json"
 $script:UpdatingUI = $false
 $script:ApplyToAll = $false
 $script:AutoModeEnabled = $false
+$script:WmiBrightnessAvailable = $false
 $script:AppProfileEnabled = $false
 $script:AppProfileRules = @()
 $script:AppProfileTimer = $null
@@ -512,9 +513,11 @@ function Get-Monitors {
         }
     }
     if ($script:PhysicalMonitors.Count -eq 0) {
+        $fallbackName = if ($script:WmiBrightnessAvailable) { "Integrated Laptop Display" } else { "No DDC/CI Monitor" }
+        $fallbackDevice = if ($script:WmiBrightnessAvailable) { "WMI" } else { "" }
         $script:PhysicalMonitors += [PSCustomObject]@{
-            Handle = [IntPtr]::Zero; HMonitor = [IntPtr]::Zero; Name = "No DDC/CI Monitor"; Index = 1
-            DeviceName = ""; Width = 1920; Height = 1080; RefreshRate = 60; IsPrimary = $true
+            Handle = [IntPtr]::Zero; HMonitor = [IntPtr]::Zero; Name = $fallbackName; Index = 1
+            DeviceName = $fallbackDevice; Width = 1920; Height = 1080; RefreshRate = 60; IsPrimary = $true
             Left = 0; Top = 0; Right = 1920; Bottom = 1080; Capabilities = ""
         }
     }
@@ -538,9 +541,11 @@ function Set-VCPValueWithSync {
         foreach ($mon in $script:PhysicalMonitors) {
             if ($mon.Handle -ne [IntPtr]::Zero) { Set-VCPValue -Handle $mon.Handle -VCPCode $VCPCode -Value $Value | Out-Null; Start-Sleep -Milliseconds 50 }
         }
+        if ($VCPCode -eq [MonitorAPI]::VCP_BRIGHTNESS -and $script:WmiBrightnessAvailable) { Set-WmiBrightness -Value $Value | Out-Null }
     } else {
         $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
         if ($mon.Handle -ne [IntPtr]::Zero) { Set-VCPValue -Handle $mon.Handle -VCPCode $VCPCode -Value $Value | Out-Null }
+        elseif ($VCPCode -eq [MonitorAPI]::VCP_BRIGHTNESS -and $script:WmiBrightnessAvailable) { Set-WmiBrightness -Value $Value | Out-Null }
     }
 }
 
@@ -573,8 +578,43 @@ function Apply-TimeBasedSettings {
     foreach ($mon in $script:PhysicalMonitors) {
         if ($mon.Handle -ne [IntPtr]::Zero) { Set-VCPValue -Handle $mon.Handle -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value $settings.Brightness | Out-Null; Start-Sleep -Milliseconds 50 }
     }
+    if ($script:WmiBrightnessAvailable) { Set-WmiBrightness -Value $settings.Brightness | Out-Null }
     Set-GammaRamp -Gamma 1.0 -RedMult $settings.GammaRed -GreenMult $settings.GammaGreen -BlueMult $settings.GammaBlue
     return $settings
+}
+
+function Initialize-WmiBrightness {
+    try {
+        $script:WmiBrightnessAvailable = @(
+            Get-CimInstance -Namespace root/WMI -ClassName WmiMonitorBrightness -ErrorAction Stop
+        ).Count -gt 0
+    } catch {
+        $script:WmiBrightnessAvailable = $false
+    }
+}
+
+function Get-WmiBrightness {
+    try {
+        $level = Get-CimInstance -Namespace root/WMI -ClassName WmiMonitorBrightness -ErrorAction Stop | Select-Object -First 1
+        if ($level -and $null -ne $level.CurrentBrightness) { return [int]$level.CurrentBrightness }
+    } catch {}
+    return $null
+}
+
+function Set-WmiBrightness {
+    param([int]$Value)
+    if (-not $script:WmiBrightnessAvailable) { return $false }
+    $brightness = [Math]::Max(0, [Math]::Min(100, $Value))
+    try {
+        $methods = Get-CimInstance -Namespace root/WMI -ClassName WmiMonitorBrightnessMethods -ErrorAction Stop
+        foreach ($method in $methods) {
+            Invoke-CimMethod -InputObject $method -MethodName WmiSetBrightness -Arguments @{ Timeout = 1; Brightness = $brightness } -ErrorAction Stop | Out-Null
+        }
+        return $true
+    } catch {
+        Update-Status "WMI brightness failed: $_"
+        return $false
+    }
 }
 
 function Initialize-GPU {
@@ -669,7 +709,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.12.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
+        Title="MonitorControl Pro v3.13.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
         Background="#0a0a0a" WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
     <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
@@ -803,7 +843,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
             <TextBlock Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
-            <TextBlock Text="v3.12.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
+            <TextBlock Text="v3.13.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal">
             <CheckBox x:Name="ApplyAllCheckbox" Content="All Monitors" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -1206,6 +1246,15 @@ function Load-MonitorSettings {
     $script:UpdatingUI = $true
     $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]; $h = $mon.Handle
     Update-Status "Reading from $($mon.Name)..."
+    if ($h -eq [IntPtr]::Zero -and $script:WmiBrightnessAvailable) {
+        $wmiBrightness = Get-WmiBrightness
+        if ($null -ne $wmiBrightness) {
+            $brightnessSlider.Maximum = 100; $brightnessSlider.Value = $wmiBrightness; $brightnessValue.Text = $wmiBrightness
+            $capabilitiesBox.Text = "Integrated display brightness via WMI"
+            $script:UpdatingUI = $false; Update-Status "$($mon.Name) via WMI"; Update-TrayPopupState; Update-TrayIconText
+            return
+        }
+    }
     $b = Get-VCPValue -Handle $h -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS); if ($b.Success) { $brightnessSlider.Maximum = $b.Maximum; $brightnessSlider.Value = $b.Current; $brightnessValue.Text = $b.Current }
     $c = Get-VCPValue -Handle $h -VCPCode ([MonitorAPI]::VCP_CONTRAST); if ($c.Success) { $contrastSlider.Maximum = $c.Maximum; $contrastSlider.Value = $c.Current; $contrastValue.Text = $c.Current }
     $r = Get-VCPValue -Handle $h -VCPCode ([MonitorAPI]::VCP_RED_GAIN); if ($r.Success) { $redSlider.Maximum = $r.Maximum; $redSlider.Value = $r.Current; $redValue.Text = $r.Current }
@@ -2206,7 +2255,7 @@ function Update-GpuStats {
 }
 
 # Initialize
-Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList
+Initialize-WmiBrightness; Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList
 Load-AppProfileRules; Update-AppProfileControls; Start-AppProfileWatcher
 Load-ProfileSchedules; Update-ScheduleControls; Start-ProfileScheduleWatcher
 Load-IdleDimSettings; Update-IdleDimControls; Start-IdleDimWatcher
