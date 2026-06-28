@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.8.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro v3.9.0 - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.8.0 - Enhanced with PiP/PbP controls
+    Version: 3.9.0 - Enhanced with NVAPI digital vibrance control
 #>
 
 param([switch]$StartMinimized, [string]$LoadProfile)
@@ -129,6 +129,74 @@ public class MonitorAPI
     public static List<IntPtr> MonitorHandles = new List<IntPtr>();
     public static bool MonitorEnumCallback(IntPtr hMonitor, IntPtr hdcMonitor, ref RECT lprcMonitor, IntPtr dwData) { MonitorHandles.Add(hMonitor); return true; }
     public static List<IntPtr> GetAllMonitorHandles() { MonitorHandles.Clear(); EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, MonitorEnumCallback, IntPtr.Zero); return MonitorHandles; }
+}
+
+public class NvApiInterop
+{
+    private const int NVAPI_OK = 0;
+    private const uint NVAPI_INITIALIZE_ID = 0x0150E828;
+    private const uint NVAPI_SET_DVC_LEVEL_ID = 0x172409B4;
+
+    [DllImport("nvapi64.dll", EntryPoint = "nvapi_QueryInterface", CallingConvention = CallingConvention.Cdecl)]
+    private static extern IntPtr QueryInterface(uint functionId);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int NvApiInitializeDelegate();
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int NvApiSetDvcLevelDelegate(IntPtr displayHandle, uint outputId, int level);
+
+    private static T GetDelegate<T>(uint functionId) where T : class
+    {
+        IntPtr ptr = QueryInterface(functionId);
+        if (ptr == IntPtr.Zero) { return null; }
+        return Marshal.GetDelegateForFunctionPointer(ptr, typeof(T)) as T;
+    }
+
+    public static bool SetDigitalVibrance(int level, out string message)
+    {
+        if (level < 0) { level = 0; }
+        if (level > 100) { level = 100; }
+        try
+        {
+            NvApiInitializeDelegate initialize = GetDelegate<NvApiInitializeDelegate>(NVAPI_INITIALIZE_ID);
+            NvApiSetDvcLevelDelegate setDvcLevel = GetDelegate<NvApiSetDvcLevelDelegate>(NVAPI_SET_DVC_LEVEL_ID);
+            if (initialize == null || setDvcLevel == null)
+            {
+                message = "NVAPI digital vibrance entry point unavailable";
+                return false;
+            }
+            int status = initialize();
+            if (status != NVAPI_OK)
+            {
+                message = "NVAPI init failed: " + status;
+                return false;
+            }
+            status = setDvcLevel(IntPtr.Zero, 0, level);
+            if (status != NVAPI_OK)
+            {
+                message = "NVAPI digital vibrance failed: " + status;
+                return false;
+            }
+            message = "Digital vibrance set to " + level + "%";
+            return true;
+        }
+        catch (DllNotFoundException)
+        {
+            message = "nvapi64.dll not found";
+            return false;
+        }
+        catch (EntryPointNotFoundException)
+        {
+            message = "nvapi_QueryInterface not found";
+            return false;
+        }
+        catch (Exception ex)
+        {
+            message = "NVAPI digital vibrance error: " + ex.Message;
+            return false;
+        }
+    }
 }
 "@
 
@@ -333,7 +401,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.8.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
+        Title="MonitorControl Pro v3.9.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
         Background="#0a0a0a" WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
     <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
@@ -467,7 +535,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
             <TextBlock Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
-            <TextBlock Text="v3.8.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
+            <TextBlock Text="v3.9.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal">
             <CheckBox x:Name="ApplyAllCheckbox" Content="All Monitors" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -1727,6 +1795,14 @@ $idleDimSaveBtn.Add_Click({
 
 $displaySettingsBtn.Add_Click({ Start-Process "ms-settings:display" }); $colorMgmtBtn.Add_Click({ Start-Process "colorcpl.exe" })
 $gpuControlPanelBtn.Add_Click({ if ($script:HasNvidia) { Start-Process "nvidia-settings" -ErrorAction SilentlyContinue } else { Start-Process "ms-settings:display" } })
+$vibranceSlider.Add_ValueChanged({
+    if ($script:UpdatingUI) { return }
+    $level = [int]$vibranceSlider.Value
+    $vibranceValue.Text = $level.ToString()
+    $message = ""
+    [NvApiInterop]::SetDigitalVibrance($level, [ref]$message) | Out-Null
+    Update-Status $message
+})
 $resetGammaBtn.Add_Click({ Set-GammaRamp -Gamma 1.0; $script:UpdatingUI = $true; $gammaSlider.Value = 100; $gammaValue.Text = "1.00"; $gammaRedSlider.Value = 100; $gammaRedValue.Text = "1.00"; $gammaGreenSlider.Value = 100; $gammaGreenValue.Text = "1.00"; $gammaBlueSlider.Value = 100; $gammaBlueValue.Text = "1.00"; $script:UpdatingUI = $false; Update-Status "Gamma Reset" })
 $gammaSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $g = $gammaSlider.Value / 100; $gammaValue.Text = $g.ToString("F2"); Set-GammaRamp -Gamma $g -RedMult ($gammaRedSlider.Value/100) -GreenMult ($gammaGreenSlider.Value/100) -BlueMult ($gammaBlueSlider.Value/100) })
 $gammaRedSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $gammaRedValue.Text = ($gammaRedSlider.Value / 100).ToString("F2"); Set-GammaRamp -Gamma ($gammaSlider.Value/100) -RedMult ($gammaRedSlider.Value/100) -GreenMult ($gammaGreenSlider.Value/100) -BlueMult ($gammaBlueSlider.Value/100) })

@@ -4,9 +4,7 @@ PowerShell/WPF utility for DDC/CI monitor control â€” brightness, contrast,
 
 ## Planned Features
 
-### Display Controls
 ### GPU Monitoring
-- NVAPI integration for Digital Vibrance (stop being a placeholder)
 - AMD ADL SDK for Radeon temperature/clock/fan
 - Intel Arc / iGPU monitoring via IGCL
 - CPU temperature via LibreHardwareMonitor/OpenHardwareMonitor lib
