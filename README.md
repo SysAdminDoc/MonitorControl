@@ -1,7 +1,7 @@
 # MonitorControl Pro
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v3.6.0-brightgreen" alt="Version v3.6.0">
+  <img src="https://img.shields.io/badge/Version-v3.7.0-brightgreen" alt="Version v3.7.0">
   <img src="https://img.shields.io/badge/PowerShell-5.1+-blue?logo=powershell" alt="PowerShell 5.1+">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/DDC%2FCI-Supported-green" alt="DDC/CI">
@@ -18,6 +18,7 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 - **Color Temperature Presets** — Quick access to Warm (5000K), 6500K (D65), Cool (9300K), and sRGB
 - **Sharpness Control** — Adjust display sharpness if supported
 - **Dynamic Contrast** — Switch display mode between standard (`0x00`) and dynamic contrast (`0xF0`) through VCP `0xDC` on monitors that expose it
+- **Picture Mode Presets** — Apply Web/Productivity (`0x01`), Cinema/Movie (`0x03`), or Game (`0x05`) display modes through VCP `0xDC`
 
 ### Monitor Management
 - **Visual Monitor Layout** — Click-to-select interface matching Windows Display Settings
@@ -178,6 +179,9 @@ The VCP Explorer tab allows you to query and set any DDC/CI VCP code. Common cod
 | Value | Mode |
 |-------|------|
 | `0x00` | Standard / default |
+| `0x01` | Productivity / Web |
+| `0x03` | Movie / Cinema |
+| `0x05` | Games |
 | `0xF0` | Dynamic Contrast |
 
 ## Profiles
