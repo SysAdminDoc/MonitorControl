@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.9.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro v3.10.0 - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.9.0 - Enhanced with NVAPI digital vibrance control
+    Version: 3.10.0 - Enhanced with AMD ADL monitoring
 #>
 
 param([switch]$StartMinimized, [string]$LoadProfile)
@@ -198,6 +198,204 @@ public class NvApiInterop
         }
     }
 }
+
+public class AmdAdlInterop
+{
+    private const int ADL_OK = 0;
+    private const int ADL_FAN_SPEED_TYPE_PERCENT = 1;
+    private static bool initialized = false;
+    private static ADL_MAIN_MALLOC_CALLBACK mallocCallback = Alloc;
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate IntPtr ADL_MAIN_MALLOC_CALLBACK(int size);
+
+    [DllImport("atiadlxx.dll", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ADL_Main_Control_Create(ADL_MAIN_MALLOC_CALLBACK callback, int enumConnectedAdapters);
+
+    [DllImport("atiadlxx.dll", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ADL_Adapter_NumberOfAdapters_Get(ref int numAdapters);
+
+    [DllImport("atiadlxx.dll", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ADL_Adapter_AdapterInfo_Get(IntPtr adapterInfo, int inputSize);
+
+    [DllImport("atiadlxx.dll", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ADL_Overdrive5_Temperature_Get(int adapterIndex, int thermalControllerIndex, ref ADLTemperature temperature);
+
+    [DllImport("atiadlxx.dll", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ADL_Overdrive5_CurrentActivity_Get(int adapterIndex, ref ADLPMActivity activity);
+
+    [DllImport("atiadlxx.dll", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ADL_Overdrive5_FanSpeed_Get(int adapterIndex, int thermalControllerIndex, ref ADLFanSpeedValue fanSpeed);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
+    private struct ADLAdapterInfo
+    {
+        public int Size;
+        public int AdapterIndex;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string UDID;
+        public int BusNumber;
+        public int DeviceNumber;
+        public int FunctionNumber;
+        public int VendorID;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string AdapterName;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string DisplayName;
+        public int Present;
+        public int Exist;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string DriverPath;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string DriverPathExt;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string PNPString;
+        public int OSDisplayIndex;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ADLTemperature
+    {
+        public int Size;
+        public int Temperature;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ADLPMActivity
+    {
+        public int Size;
+        public int EngineClock;
+        public int MemoryClock;
+        public int Vddc;
+        public int ActivityPercent;
+        public int CurrentPerformanceLevel;
+        public int CurrentBusSpeed;
+        public int CurrentBusLanes;
+        public int MaximumBusLanes;
+        public int Reserved;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ADLFanSpeedValue
+    {
+        public int Size;
+        public int SpeedType;
+        public int FanSpeed;
+        public int Flags;
+    }
+
+    private static IntPtr Alloc(int size)
+    {
+        return Marshal.AllocHGlobal(size);
+    }
+
+    private static bool EnsureInitialized(out string message)
+    {
+        if (initialized)
+        {
+            message = "";
+            return true;
+        }
+        int status = ADL_Main_Control_Create(mallocCallback, 1);
+        if (status != ADL_OK)
+        {
+            message = "ADL init failed: " + status;
+            return false;
+        }
+        initialized = true;
+        message = "";
+        return true;
+    }
+
+    public static bool TryGetStats(out string name, out int tempC, out int utilization, out int engineClockMhz, out int memoryClockMhz, out int fanPercent, out string message)
+    {
+        name = "AMD Radeon";
+        tempC = 0;
+        utilization = 0;
+        engineClockMhz = 0;
+        memoryClockMhz = 0;
+        fanPercent = 0;
+        try
+        {
+            if (!EnsureInitialized(out message)) { return false; }
+            int adapterCount = 0;
+            int status = ADL_Adapter_NumberOfAdapters_Get(ref adapterCount);
+            if (status != ADL_OK || adapterCount <= 0)
+            {
+                message = "No ADL adapters";
+                return false;
+            }
+            int adapterSize = Marshal.SizeOf(typeof(ADLAdapterInfo));
+            IntPtr buffer = Marshal.AllocHGlobal(adapterSize * adapterCount);
+            int adapterIndex = -1;
+            try
+            {
+                status = ADL_Adapter_AdapterInfo_Get(buffer, adapterSize * adapterCount);
+                if (status != ADL_OK)
+                {
+                    message = "ADL adapter query failed: " + status;
+                    return false;
+                }
+                for (int i = 0; i < adapterCount; i++)
+                {
+                    IntPtr itemPtr = new IntPtr(buffer.ToInt64() + (adapterSize * i));
+                    ADLAdapterInfo info = (ADLAdapterInfo)Marshal.PtrToStructure(itemPtr, typeof(ADLAdapterInfo));
+                    if (info.VendorID == 1002 || (info.AdapterName != null && info.AdapterName.ToUpperInvariant().Contains("RADEON")))
+                    {
+                        adapterIndex = info.AdapterIndex;
+                        if (!String.IsNullOrWhiteSpace(info.AdapterName)) { name = info.AdapterName; }
+                        break;
+                    }
+                }
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+            if (adapterIndex < 0)
+            {
+                message = "No AMD ADL adapter";
+                return false;
+            }
+            bool hasMetric = false;
+            ADLTemperature temp = new ADLTemperature();
+            temp.Size = Marshal.SizeOf(typeof(ADLTemperature));
+            if (ADL_Overdrive5_Temperature_Get(adapterIndex, 0, ref temp) == ADL_OK)
+            {
+                tempC = temp.Temperature / 1000;
+                hasMetric = true;
+            }
+            ADLPMActivity activity = new ADLPMActivity();
+            activity.Size = Marshal.SizeOf(typeof(ADLPMActivity));
+            if (ADL_Overdrive5_CurrentActivity_Get(adapterIndex, ref activity) == ADL_OK)
+            {
+                utilization = activity.ActivityPercent;
+                engineClockMhz = activity.EngineClock / 100;
+                memoryClockMhz = activity.MemoryClock / 100;
+                hasMetric = true;
+            }
+            ADLFanSpeedValue fan = new ADLFanSpeedValue();
+            fan.Size = Marshal.SizeOf(typeof(ADLFanSpeedValue));
+            fan.SpeedType = ADL_FAN_SPEED_TYPE_PERCENT;
+            if (ADL_Overdrive5_FanSpeed_Get(adapterIndex, 0, ref fan) == ADL_OK)
+            {
+                fanPercent = fan.FanSpeed;
+                hasMetric = true;
+            }
+            message = hasMetric ? "" : "ADL metrics unavailable";
+            return hasMetric;
+        }
+        catch (DllNotFoundException)
+        {
+            message = "atiadlxx.dll not found";
+            return false;
+        }
+        catch (EntryPointNotFoundException ex)
+        {
+            message = "ADL entry point missing: " + ex.Message;
+            return false;
+        }
+        catch (Exception ex)
+        {
+            message = "ADL error: " + ex.Message;
+            return false;
+        }
+    }
+}
 "@
 
 try { Add-Type -TypeDefinition $nativeCode -ErrorAction SilentlyContinue } catch {}
@@ -205,6 +403,7 @@ try { Add-Type -TypeDefinition $nativeCode -ErrorAction SilentlyContinue } catch
 $script:PhysicalMonitors = @()
 $script:CurrentMonitorIndex = 0
 $script:HasNvidia = $false
+$script:HasAmd = $false
 $script:NvidiaSmiPath = $null
 $script:GpuTimer = $null
 $script:AutoModeTimer = $null
@@ -378,6 +577,9 @@ function Initialize-GPU {
             $script:HasNvidia = $true
             @("${env:ProgramFiles}\NVIDIA Corporation\NVSMI\nvidia-smi.exe", "${env:SystemRoot}\System32\nvidia-smi.exe") | ForEach-Object { if (Test-Path $_) { $script:NvidiaSmiPath = $_; return } }
         }
+        if ($gpu.Name -match "AMD|Radeon") {
+            $script:HasAmd = $true
+        }
     }
 }
 
@@ -397,11 +599,22 @@ function Get-NvidiaStats {
     return $null
 }
 
+function Get-AmdStats {
+    $name = ""; $temp = 0; $util = 0; $engineClock = 0; $memoryClock = 0; $fan = 0; $message = ""
+    if ([AmdAdlInterop]::TryGetStats([ref]$name, [ref]$temp, [ref]$util, [ref]$engineClock, [ref]$memoryClock, [ref]$fan, [ref]$message)) {
+        return @{
+            Name = $name; Temp = $temp; Util = $util; MemUsed = 0; MemTotal = 0; Fan = $fan
+            Power = 0; PowerLimit = 0; Clock = $engineClock; MemoryClock = $memoryClock; Message = ""
+        }
+    }
+    return @{ Name = "AMD Radeon"; Temp = 0; Util = 0; MemUsed = 0; MemTotal = 0; Fan = 0; Power = 0; PowerLimit = 0; Clock = 0; MemoryClock = 0; Message = $message }
+}
+
 if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path $script:ProfilesPath -Force | Out-Null }
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.9.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
+        Title="MonitorControl Pro v3.10.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
         Background="#0a0a0a" WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
     <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
@@ -535,7 +748,7 @@ if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path 
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
             <TextBlock Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
-            <TextBlock Text="v3.9.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
+            <TextBlock Text="v3.10.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal">
             <CheckBox x:Name="ApplyAllCheckbox" Content="All Monitors" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -1810,13 +2023,16 @@ $gammaGreenSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $gammaG
 $gammaBlueSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $gammaBlueValue.Text = ($gammaBlueSlider.Value / 100).ToString("F2"); Set-GammaRamp -Gamma ($gammaSlider.Value/100) -RedMult ($gammaRedSlider.Value/100) -GreenMult ($gammaGreenSlider.Value/100) -BlueMult ($gammaBlueSlider.Value/100) })
 
 function Update-GpuStats {
-    if (-not $script:HasNvidia) { return }; $stats = Get-NvidiaStats
+    if (-not ($script:HasNvidia -or $script:HasAmd)) { return }
+    $stats = if ($script:HasNvidia) { Get-NvidiaStats } else { $null }
+    if (-not $stats -and $script:HasAmd) { $stats = Get-AmdStats }
     if ($stats) {
         $gpuNameText.Text = $stats.Name; $gpuTempText.Text = $stats.Temp.ToString(); $gpuStatsText.Text = "$($stats.Temp) C | $($stats.Clock) MHz | $($stats.Power) W"
         $gpuUtilText.Text = "$($stats.Util)%"; $gpuUtilBar.Value = $stats.Util; $memUsageText.Text = "$($stats.MemUsed) / $($stats.MemTotal) GB"
         $memUtilBar.Value = if ($stats.MemTotal -gt 0) { ($stats.MemUsed / $stats.MemTotal) * 100 } else { 0 }
         $fanSpeedText.Text = "$($stats.Fan)%"; $fanSpeedBar.Value = $stats.Fan; $powerDrawText.Text = "$($stats.Power) / $($stats.PowerLimit) W"
         $powerDrawBar.Value = if ($stats.PowerLimit -gt 0) { ($stats.Power / $stats.PowerLimit) * 100 } else { 0 }
+        if ($stats.Message) { Update-Status $stats.Message }
     }
 }
 
@@ -1825,7 +2041,7 @@ Get-Monitors; Initialize-GPU; Draw-MonitorLayout; Load-MonitorSettings; Update-P
 Load-AppProfileRules; Update-AppProfileControls; Start-AppProfileWatcher
 Load-ProfileSchedules; Update-ScheduleControls; Start-ProfileScheduleWatcher
 Load-IdleDimSettings; Update-IdleDimControls; Start-IdleDimWatcher
-if (-not $script:HasNvidia) { $gpuTab.Visibility = "Collapsed" } else {
+if (-not ($script:HasNvidia -or $script:HasAmd)) { $gpuTab.Visibility = "Collapsed" } else {
     $script:GpuTimer = New-Object System.Windows.Threading.DispatcherTimer; $script:GpuTimer.Interval = [TimeSpan]::FromSeconds(2)
     $script:GpuTimer.Add_Tick({ Update-GpuStats }); $script:GpuTimer.Start(); Update-GpuStats
 }
