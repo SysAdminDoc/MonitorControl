@@ -1,7 +1,7 @@
 # MonitorControl Pro
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v3.9.0-brightgreen" alt="Version v3.9.0">
+  <img src="https://img.shields.io/badge/Version-v3.10.0-brightgreen" alt="Version v3.10.0">
   <img src="https://img.shields.io/badge/PowerShell-5.1+-blue?logo=powershell" alt="PowerShell 5.1+">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/DDC%2FCI-Supported-green" alt="DDC/CI">
@@ -47,18 +47,19 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 - **Software Gamma Control** — Independent RGB gamma curves via Windows API
 - **Factory Reset** — Reset monitor to factory defaults (colors only or full reset)
 
-### GPU Monitoring (NVIDIA)
+### GPU Monitoring (NVIDIA / AMD)
 - Real-time temperature, utilization, and clock speed
 - Memory usage and fan speed
 - Power draw monitoring
 - Digital vibrance slider using NVAPI DVC where supported
+- AMD Radeon temperature, utilization, engine/memory clocks, and fan percent via ADL where supported by the installed driver
 
 ## Requirements
 
 - **Windows 10/11**
 - **PowerShell 5.1+** (included with Windows)
 - **DDC/CI Compatible Monitor** — Most modern monitors support this; ensure it's enabled in your monitor's OSD settings
-- **NVIDIA GPU** (optional) — For GPU monitoring tab
+- **NVIDIA or AMD GPU** (optional) — For GPU monitoring tab
 
 ## Installation
 
@@ -313,7 +314,6 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ### Areas for Improvement
 - [ ] Multi-monitor profile linking
-- [ ] AMD GPU monitoring support
 - [ ] WMI fallback for laptop displays
 
 ## License
