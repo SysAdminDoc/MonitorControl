@@ -1,7 +1,7 @@
 # MonitorControl Pro
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v3.31.0-brightgreen" alt="Version v3.31.0">
+  <img src="https://img.shields.io/badge/Version-v3.32.0-brightgreen" alt="Version v3.32.0">
   <img src="https://img.shields.io/badge/PowerShell-5.1+-blue?logo=powershell" alt="PowerShell 5.1+">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/DDC%2FCI-Supported-green" alt="DDC/CI">
@@ -54,6 +54,7 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 - **Portable Release ZIP** — Local release builds package the script, icon, README, LICENSE, signature status, and SHA256 checksums
 - **Nonblocking Advanced Writes** — VCP Explorer Set, color reset, and factory reset actions use queued DDC writes with deferred refresh instead of UI-thread sleeps
 - **Async Capabilities Reads** — Monitor `vcp(...)` capabilities load from a background worker after enumeration, keeping refresh responsive
+- **DDC Compatibility Report** — Builds a copyable diagnostics report with monitor identities, capability status, common VCP probe results, OS/GPU driver data, and recent DDC errors
 - **Async VCP Reads** — VCP Explorer query and scan operations run in a background worker with live scan progress
 - **Async Monitor Refresh** — Monitor brightness, contrast, color gain, volume, and sharpness reads refresh from a background worker
 - **Coalesced DDC Writes** — Slider, profile, preset, and all-monitor writes queue on a background worker so rapid UI changes do not block the WPF thread
@@ -318,6 +319,7 @@ Use **Sync Folder** to point profile storage at a OneDrive or Dropbox folder. Th
 - Some monitors have a delay (~50ms per command)
 - Certain VCP codes may not be supported by your specific monitor
 - Use the VCP Scanner to discover which features your monitor actually supports
+- Open **System** and build the **DDC Compatibility Report** before troubleshooting docks, adapters, GPU drivers, KVMs, or firmware quirks
 - Failed DDC/CI reads and writes are retried automatically and surfaced in the status bar; open **VCP Explorer** to copy the latest diagnostic summary with monitor name, VCP code, attempted value, Win32 error, and retry count
 
 ### Laptop Display Not Working

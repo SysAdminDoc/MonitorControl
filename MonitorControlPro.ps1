@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.31.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro v3.32.0 - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.31.0 - Enhanced with async capabilities reads
+    Version: 3.32.0 - Added copyable DDC compatibility reports
 #>
 
 param([switch]$StartMinimized, [string]$LoadProfile)
@@ -709,6 +709,15 @@ $script:CapabilitiesWorkerOutput = $null
 $script:CapabilitiesWorkerAsyncResult = $null
 $script:CapabilitiesWorkerTimer = $null
 $script:CapabilitiesWorkerLastOutputCount = 0
+$script:DdcReportWorker = $null
+$script:DdcReportWorkerInput = $null
+$script:DdcReportWorkerOutput = $null
+$script:DdcReportWorkerAsyncResult = $null
+$script:DdcReportWorkerTimer = $null
+$script:DdcReportWorkerLastOutputCount = 0
+$script:DdcReportTargets = @()
+$script:DdcReportLastText = ""
+$script:DdcReportOutputPath = ""
 $script:DdcReadRetryCount = [MonitorAPI]::VcpReadRetryCount
 $script:DdcWriteRetryCount = [MonitorAPI]::VcpWriteRetryCount
 $script:DdcScanRetryCount = 0
@@ -747,7 +756,7 @@ $script:UpdatingMonitorLabelUI = $false
 $script:UiCulture = "en-US"
 $script:UiStrings = @{
     "App.Title" = "MonitorControl Pro"
-    "App.Subtitle" = "v3.31.0 - Click monitor to select"
+    "App.Subtitle" = "v3.32.0 - Click monitor to select"
     "Tab.Display" = "Display"
     "Tab.Monitor" = "Monitor"
     "Tab.GPU" = "GPU"
@@ -775,6 +784,8 @@ $script:UiStrings = @{
     "Action.Stop" = "Stop"
     "Action.SyncFolder" = "Sync Folder"
     "Action.UseLocal" = "Use Local"
+    "Action.BuildReport" = "Build"
+    "Action.Copy" = "Copy"
     "A11y.MonitorCanvas" = "Monitor layout selector"
     "A11y.SelectedMonitor" = "Selected monitor details"
     "A11y.MonitorLabel" = "Custom monitor label"
@@ -795,6 +806,7 @@ $script:UiStrings = @{
     "A11y.VcpSetValue" = "VCP set value"
     "A11y.VcpResults" = "VCP results"
     "A11y.Capabilities" = "Monitor capabilities"
+    "A11y.DdcReport" = "DDC compatibility report"
     "A11y.Status" = "Status"
     "A11y.AppProfileExe" = "Application executable"
     "A11y.AppProfileProfile" = "Application profile"
@@ -1359,7 +1371,7 @@ function Set-TabOrder {
 
 function Initialize-LocalizationAndAccessibility {
     if ($window) {
-        $window.Title = "$(Get-UiString -Key 'App.Title') v3.31.0"
+        $window.Title = "$(Get-UiString -Key 'App.Title') v3.32.0"
         [System.Windows.Automation.AutomationProperties]::SetName($window, "$(Get-UiString -Key 'App.Title') main window")
     }
     Set-LocalizedText -Control $appTitleText -Key "App.Title" -Property "Text"
@@ -1396,6 +1408,8 @@ function Initialize-LocalizationAndAccessibility {
     Set-LocalizedText -Control $batteryProfileSaveBtn -Key "Action.Save"
     Set-LocalizedText -Control $fpsOverlayStartBtn -Key "Action.Start"
     Set-LocalizedText -Control $fpsOverlayStopBtn -Key "Action.Stop"
+    Set-LocalizedText -Control $ddcReportGenerateBtn -Key "Action.BuildReport"
+    Set-LocalizedText -Control $ddcReportCopyBtn -Key "Action.Copy"
 
     Set-AccessibleName -Control $monitorCanvas -Key "A11y.MonitorCanvas"
     Set-AccessibleName -Control $selectedMonitorName -Key "A11y.SelectedMonitor"
@@ -1417,6 +1431,7 @@ function Initialize-LocalizationAndAccessibility {
     Set-AccessibleName -Control $vcpSetValueBox -Key "A11y.VcpSetValue"
     Set-AccessibleName -Control $vcpResultBox -Key "A11y.VcpResults"
     Set-AccessibleName -Control $capabilitiesBox -Key "A11y.Capabilities"
+    Set-AccessibleName -Control $ddcReportBox -Key "A11y.DdcReport"
     Set-AccessibleName -Control $statusText -Key "A11y.Status"
     Set-AccessibleName -Control $appProfileExeBox -Key "A11y.AppProfileExe"
     Set-AccessibleName -Control $appProfileProfileCombo -Key "A11y.AppProfileProfile"
@@ -1440,7 +1455,8 @@ function Initialize-LocalizationAndAccessibility {
         $scheduleEnabledCheckbox,$scheduleTimeBox,$scheduleProfileCombo,$scheduleAddBtn,$scheduleRemoveBtn,$scheduleRulesList,
         $idleDimEnabledCheckbox,$idleDimMinutesBox,$idleDimBrightnessBox,$idleDimRestoreCheckbox,$idleDimSaveBtn,
         $batteryProfileEnabledCheckbox,$batteryBrightnessBox,$acBrightnessBox,$batteryProfileSaveBtn,
-        $displaySettingsBtn,$colorMgmtBtn,$gpuControlPanelBtn,$gammaRedSlider,$gammaGreenSlider,$gammaBlueSlider,$resetGammaBtn,$capabilitiesBox
+        $displaySettingsBtn,$colorMgmtBtn,$gpuControlPanelBtn,$gammaRedSlider,$gammaGreenSlider,$gammaBlueSlider,$resetGammaBtn,$capabilitiesBox,
+        $ddcReportGenerateBtn,$ddcReportCopyBtn,$ddcReportBox
     )
 }
 
@@ -1592,6 +1608,7 @@ function Get-Monitors {
     Stop-MonitorSettingsWorker -Cancel
     Stop-VcpWorker -Cancel
     Stop-CapabilitiesWorker -Cancel
+    Stop-DdcReportWorker -Cancel
     Wait-DdcWriteQueueIdle -TimeoutMs 1000 | Out-Null
     Clear-PhysicalMonitorHandles -ClearList
     $monitorHandles = [MonitorAPI]::GetAllMonitorHandles()
@@ -1899,6 +1916,324 @@ function Start-VcpReadWorker {
     $vcpScanBtn.IsEnabled = $false
     $vcpResultBox.Text = if ($Mode -eq "Scan") { "Scanning VCP codes 0/$($Codes.Count)..." } else { "Reading VCP..." }
     $script:VcpWorkerTimer.Start()
+}
+
+function Get-DdcReportProbeCodes {
+    return @(
+        [int][MonitorAPI]::VCP_BRIGHTNESS,
+        [int][MonitorAPI]::VCP_CONTRAST,
+        [int][MonitorAPI]::VCP_COLOR_PRESET,
+        [int][MonitorAPI]::VCP_RED_GAIN,
+        [int][MonitorAPI]::VCP_GREEN_GAIN,
+        [int][MonitorAPI]::VCP_BLUE_GAIN,
+        [int][MonitorAPI]::VCP_INPUT_SOURCE,
+        [int][MonitorAPI]::VCP_VOLUME,
+        [int][MonitorAPI]::VCP_MUTE,
+        [int][MonitorAPI]::VCP_SHARPNESS,
+        [int][MonitorAPI]::VCP_DISPLAY_USAGE_TIME,
+        [int][MonitorAPI]::VCP_POWER_MODE,
+        [int][MonitorAPI]::VCP_DISPLAY_MODE,
+        [int][MonitorAPI]::VCP_VERSION
+    )
+}
+
+function Format-DdcReportCodeList {
+    param([object[]]$Codes)
+    $items = @($Codes | ForEach-Object { [int]$_ } | Sort-Object -Unique | ForEach-Object { "0x{0:X2}" -f $_ })
+    if ($items.Count -eq 0) { return "None parsed" }
+    return ($items -join ", ")
+}
+
+function Get-DdcReportTargets {
+    $allProbeCodes = @(Get-DdcReportProbeCodes)
+    $targets = @()
+    foreach ($mon in @($script:PhysicalMonitors)) {
+        if ($null -eq $mon) { continue }
+        $supportedCodes = @()
+        if ([bool]$mon.CapabilitiesKnown -and $mon.SupportedVcpCodes) {
+            $supportedCodes = @($mon.SupportedVcpCodes.Keys | ForEach-Object { [int]$_ } | Sort-Object -Unique)
+        }
+        $probeCodes = @($allProbeCodes)
+        $skippedCodes = @()
+        if ($supportedCodes.Count -gt 0) {
+            $probeCodes = @($allProbeCodes | Where-Object { $supportedCodes -contains $_ })
+            $skippedCodes = @($allProbeCodes | Where-Object { $supportedCodes -notcontains $_ })
+        }
+        $capabilityStatus = if ([bool]$mon.CapabilitiesPending) {
+            "Pending"
+        } elseif ([bool]$mon.CapabilitiesKnown) {
+            "Known"
+        } elseif (-not [string]::IsNullOrWhiteSpace([string]$mon.Capabilities)) {
+            "Raw available; parser found no VCP map"
+        } else {
+            "Unavailable"
+        }
+        $targets += [PSCustomObject]@{
+            Index = [int]$mon.Index
+            Label = [string](Get-MonitorDisplayLabel -Monitor $mon)
+            Name = [string]$mon.Name
+            DeviceName = [string]$mon.DeviceName
+            DevicePath = [string]$mon.DevicePath
+            HardwareId = [string]$mon.HardwareId
+            IdentityKey = [string]$mon.IdentityKey
+            IdentitySource = [string]$mon.IdentitySource
+            Manufacturer = [string]$mon.Manufacturer
+            EdidModel = [string]$mon.EdidModel
+            EdidSerial = [string]$mon.EdidSerial
+            EdidName = [string]$mon.EdidName
+            Resolution = "{0}x{1}@{2}Hz" -f [int]$mon.Width, [int]$mon.Height, [int]$mon.RefreshRate
+            Primary = [bool]$mon.IsPrimary
+            CapabilityStatus = $capabilityStatus
+            CapabilitiesLength = if ($mon.Capabilities) { [int]$mon.Capabilities.Length } else { 0 }
+            SupportedCodes = [object[]]$supportedCodes
+            ProbeCodes = [object[]]$probeCodes
+            SkippedProbeCodes = [object[]]$skippedCodes
+            Handle = $mon.Handle
+            HandleValue = [int64]$mon.Handle.ToInt64()
+        }
+    }
+    return $targets
+}
+
+function Get-DdcReportSystemInfo {
+    $osText = [Environment]::OSVersion.VersionString
+    try {
+        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+        if ($os) { $osText = "{0} {1} (build {2})" -f $os.Caption, $os.Version, $os.BuildNumber }
+    } catch {}
+    $gpuLines = @()
+    try {
+        $gpus = @(Get-CimInstance -ClassName Win32_VideoController -ErrorAction Stop)
+        foreach ($gpu in $gpus) {
+            $name = if ($gpu.Name) { [string]$gpu.Name } else { "Unknown GPU" }
+            $driver = if ($gpu.DriverVersion) { [string]$gpu.DriverVersion } else { "unknown driver" }
+            $gpuLines += "$name | driver $driver"
+        }
+    } catch {}
+    if ($gpuLines.Count -eq 0) { $gpuLines = @("No GPU driver data available") }
+    return [PSCustomObject]@{
+        OS = $osText
+        PowerShell = $PSVersionTable.PSVersion.ToString()
+        GPUs = [object[]]$gpuLines
+    }
+}
+
+function Get-DdcReportRecentErrors {
+    return @($script:DdcRecentErrors | Sort-Object -Property Timestamp -Descending | Select-Object -First 8)
+}
+
+function Format-DdcReportProbeLine {
+    param($Result)
+    if ([bool]$Result.Skipped) { return "  - skipped: $($Result.Message)" }
+    $code = [int]$Result.Code
+    $desc = Get-VcpDescription -Code $code
+    if ([bool]$Result.Success) {
+        return "  - 0x{0:X2} {1}: OK current={2} max={3} type={4}" -f $code, $desc, [uint32]$Result.Current, [uint32]$Result.Maximum, [uint32]$Result.Type
+    }
+    return "  - 0x{0:X2} {1}: failed Win32={2} retries={3}" -f $code, $desc, [int]$Result.LastError, [int]$Result.RetryCount
+}
+
+function New-DdcCompatibilityReport {
+    param([object[]]$Targets, [object[]]$ProbeResults, [object[]]$RecentErrors)
+    $system = Get-DdcReportSystemInfo
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine("MonitorControl Pro DDC Compatibility Report")
+    [void]$sb.AppendLine("Generated: $((Get-Date).ToString("yyyy-MM-dd HH:mm:ss zzz"))")
+    [void]$sb.AppendLine("App version: 3.32.0")
+    [void]$sb.AppendLine("OS: $($system.OS)")
+    [void]$sb.AppendLine("PowerShell: $($system.PowerShell)")
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("GPU drivers:")
+    foreach ($gpu in @($system.GPUs)) { [void]$sb.AppendLine("- $gpu") }
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("Monitors:")
+    foreach ($target in @($Targets | Sort-Object -Property Index)) {
+        [void]$sb.AppendLine("")
+        [void]$sb.AppendLine("Monitor $($target.Index): $($target.Label)")
+        [void]$sb.AppendLine("  Friendly name: $($target.Name)")
+        [void]$sb.AppendLine("  Display device: $($target.DeviceName)")
+        [void]$sb.AppendLine("  Resolution: $($target.Resolution)")
+        [void]$sb.AppendLine("  Primary: $($target.Primary)")
+        [void]$sb.AppendLine("  Identity: $($target.IdentityKey) ($($target.IdentitySource))")
+        if (-not [string]::IsNullOrWhiteSpace([string]$target.HardwareId)) { [void]$sb.AppendLine("  Hardware ID: $($target.HardwareId)") }
+        if (-not [string]::IsNullOrWhiteSpace([string]$target.DevicePath)) { [void]$sb.AppendLine("  Device path: $($target.DevicePath)") }
+        $edidParts = @()
+        if ($target.Manufacturer) { $edidParts += "manufacturer=$($target.Manufacturer)" }
+        if ($target.EdidModel) { $edidParts += "model=$($target.EdidModel)" }
+        if ($target.EdidSerial) { $edidParts += "serial=$($target.EdidSerial)" }
+        if ($target.EdidName) { $edidParts += "name=$($target.EdidName)" }
+        if ($edidParts.Count -gt 0) { [void]$sb.AppendLine("  EDID: $($edidParts -join "; ")") }
+        [void]$sb.AppendLine("  Capabilities: $($target.CapabilityStatus), length=$($target.CapabilitiesLength), parsed codes=$(@($target.SupportedCodes).Count)")
+        [void]$sb.AppendLine("  Parsed VCP list: $(Format-DdcReportCodeList -Codes $target.SupportedCodes)")
+        if (@($target.SkippedProbeCodes).Count -gt 0) {
+            [void]$sb.AppendLine("  Common probes skipped by capabilities: $(Format-DdcReportCodeList -Codes $target.SkippedProbeCodes)")
+        }
+        [void]$sb.AppendLine("  Tested VCP results:")
+        $monitorResults = @($ProbeResults | Where-Object { [int]$_.TargetIndex -eq [int]$target.Index } | Sort-Object -Property ProbeIndex)
+        if ([int64]$target.HandleValue -eq 0) {
+            [void]$sb.AppendLine("  - no DDC/CI handle; probes skipped")
+        } elseif ($monitorResults.Count -eq 0) {
+            [void]$sb.AppendLine("  - no common probe codes available")
+        } else {
+            foreach ($result in $monitorResults) { [void]$sb.AppendLine((Format-DdcReportProbeLine -Result $result)) }
+        }
+    }
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("Recent DDC errors:")
+    if (@($RecentErrors).Count -eq 0) {
+        [void]$sb.AppendLine("- None recorded in this session")
+    } else {
+        foreach ($entry in @($RecentErrors)) {
+            [void]$sb.AppendLine("- $($entry.Timestamp.ToString("yyyy-MM-dd HH:mm:ss")) | $($entry.Operation) | monitor=$($entry.Monitor) | VCP=0x$("{0:X2}" -f [int]$entry.Code) | Win32=$($entry.LastError) | attempts=$($entry.Attempts)")
+        }
+    }
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("Privacy: local script, profile, and report file paths are omitted.")
+    return $sb.ToString().TrimEnd()
+}
+
+function Save-DdcCompatibilityReport {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return "" }
+    $dir = Join-Path $script:DefaultProfilesPath "diagnostics"
+    try {
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $leaf = "ddc-compatibility-report-$((Get-Date).ToString("yyyyMMdd-HHmmss")).txt"
+        $path = Join-Path $dir $leaf
+        $encoding = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($path, ($Text + [Environment]::NewLine), $encoding)
+        return $path
+    } catch {
+        return ""
+    }
+}
+
+function Copy-DdcCompatibilityReport {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
+    try {
+        [System.Windows.Clipboard]::SetText($Text)
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Stop-DdcReportWorker {
+    param([switch]$Cancel)
+    if ($script:DdcReportWorkerTimer) { $script:DdcReportWorkerTimer.Stop() }
+    if ($script:DdcReportWorker) {
+        if ($Cancel -and $script:DdcReportWorkerAsyncResult -and -not $script:DdcReportWorkerAsyncResult.IsCompleted) {
+            try { $script:DdcReportWorker.Stop() } catch {}
+        }
+        try { $script:DdcReportWorker.Dispose() } catch {}
+    }
+    if ($script:DdcReportWorkerInput) { try { $script:DdcReportWorkerInput.Dispose() } catch {} }
+    if ($script:DdcReportWorkerOutput) { try { $script:DdcReportWorkerOutput.Dispose() } catch {} }
+    $script:DdcReportWorker = $null
+    $script:DdcReportWorkerInput = $null
+    $script:DdcReportWorkerOutput = $null
+    $script:DdcReportWorkerAsyncResult = $null
+    $script:DdcReportWorkerLastOutputCount = 0
+    $script:DdcReportTargets = @()
+    if ($ddcReportGenerateBtn) { $ddcReportGenerateBtn.IsEnabled = $true }
+    if ($ddcReportCopyBtn) { $ddcReportCopyBtn.IsEnabled = $true }
+}
+
+function Update-DdcReportWorkerOutput {
+    if (-not $script:DdcReportWorker -or -not $script:DdcReportWorkerOutput -or -not $script:DdcReportWorkerAsyncResult) { return }
+    $probeResults = @($script:DdcReportWorkerOutput | Where-Object { $_.Kind -eq "Probe" })
+    $count = $probeResults.Count
+    $completed = [bool]$script:DdcReportWorkerAsyncResult.IsCompleted
+    if ($count -ne $script:DdcReportWorkerLastOutputCount -and -not $completed) {
+        $script:DdcReportWorkerLastOutputCount = $count
+        $total = 0
+        foreach ($target in @($script:DdcReportTargets)) { $total += @($target.ProbeCodes).Count }
+        $ddcReportBox.Text = "Generating DDC compatibility report... $count/$total probes"
+        Update-Status "Generating DDC report... $count/$total"
+    }
+    if (-not $completed) { return }
+    try { $script:DdcReportWorker.EndInvoke($script:DdcReportWorkerAsyncResult) } catch { Update-Status "DDC report failed: $($_.Exception.Message)" }
+    $report = New-DdcCompatibilityReport -Targets $script:DdcReportTargets -ProbeResults $probeResults -RecentErrors (Get-DdcReportRecentErrors)
+    $script:DdcReportLastText = $report
+    $ddcReportBox.Text = $report
+    $copied = Copy-DdcCompatibilityReport -Text $report
+    $path = Save-DdcCompatibilityReport -Text $report
+    $script:DdcReportOutputPath = $path
+    $leaf = if ($path) { Split-Path -Path $path -Leaf } else { "" }
+    if ($copied -and $leaf) {
+        Update-Status "DDC report copied and saved as $leaf"
+    } elseif ($copied) {
+        Update-Status "DDC report copied; save failed"
+    } elseif ($leaf) {
+        Update-Status "DDC report saved as $leaf; clipboard unavailable"
+    } else {
+        Update-Status "DDC report ready; clipboard and save failed"
+    }
+    Stop-DdcReportWorker
+}
+
+function Start-DdcReportWorker {
+    Stop-DdcReportWorker -Cancel
+    Stop-VcpWorker -Cancel
+    Stop-MonitorSettingsWorker -Cancel
+    Drain-DdcWriteResults
+    $targets = @(Get-DdcReportTargets)
+    if ($targets.Count -eq 0) {
+        $ddcReportBox.Text = "No monitors enumerated."
+        Update-Status "No monitors to report"
+        return
+    }
+    $script:DdcReportTargets = $targets
+    $total = 0
+    foreach ($target in @($targets)) { $total += @($target.ProbeCodes).Count }
+    $ddcReportBox.Text = "Generating DDC compatibility report... 0/$total probes"
+    if ($ddcReportGenerateBtn) { $ddcReportGenerateBtn.IsEnabled = $false }
+    if ($ddcReportCopyBtn) { $ddcReportCopyBtn.IsEnabled = $false }
+    $workerScript = {
+        param([object[]]$Targets, [int]$ReadRetries)
+        foreach ($target in $Targets) {
+            if ([int64]$target.HandleValue -eq 0) { continue }
+            $codes = @($target.ProbeCodes)
+            $probeIndex = 0
+            foreach ($code in $codes) {
+                $probeIndex++
+                $vct = [uint32]0
+                $current = [uint32]0
+                $maximum = [uint32]0
+                $lastError = [int]0
+                $attempts = [int]0
+                $ok = [MonitorAPI]::ReadVCPWithRetry($target.Handle, [byte]$code, $ReadRetries, [ref]$vct, [ref]$current, [ref]$maximum, [ref]$lastError, [ref]$attempts)
+                [PSCustomObject]@{
+                    Kind = "Probe"
+                    TargetIndex = [int]$target.Index
+                    ProbeIndex = [int]$probeIndex
+                    Code = [int]$code
+                    Success = [bool]$ok
+                    Current = [uint32]$current
+                    Maximum = [uint32]$maximum
+                    Type = [uint32]$vct
+                    LastError = [int]$lastError
+                    Attempts = [int]$attempts
+                    RetryCount = [Math]::Max(0, $attempts - 1)
+                }
+            }
+        }
+    }
+    $script:DdcReportWorkerInput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
+    $script:DdcReportWorkerInput.Complete()
+    $script:DdcReportWorkerOutput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
+    $script:DdcReportWorker = [PowerShell]::Create()
+    $script:DdcReportWorker.AddScript($workerScript.ToString()).AddArgument($targets).AddArgument($script:DdcScanRetryCount) | Out-Null
+    $script:DdcReportWorkerAsyncResult = $script:DdcReportWorker.BeginInvoke($script:DdcReportWorkerInput, $script:DdcReportWorkerOutput)
+    $script:DdcReportWorkerLastOutputCount = 0
+    if (-not $script:DdcReportWorkerTimer) {
+        $script:DdcReportWorkerTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:DdcReportWorkerTimer.Interval = [TimeSpan]::FromMilliseconds(150)
+        $script:DdcReportWorkerTimer.Add_Tick({ Update-DdcReportWorkerOutput })
+    }
+    Update-Status "Generating DDC report... 0/$total"
+    $script:DdcReportWorkerTimer.Start()
 }
 
 function Stop-MonitorSettingsWorker {
@@ -2271,7 +2606,7 @@ try {
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.31.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
+        Title="MonitorControl Pro v3.32.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
         Background="#0a0a0a" WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
     <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
@@ -2405,7 +2740,7 @@ try {
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
             <TextBlock x:Name="AppTitleText" Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
-            <TextBlock x:Name="AppSubtitleText" Text="v3.31.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
+            <TextBlock x:Name="AppSubtitleText" Text="v3.32.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal">
             <CheckBox x:Name="ApplyAllCheckbox" Content="All Monitors" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -2696,8 +3031,8 @@ try {
             </Grid></Border>
         </TabItem>
         <TabItem x:Name="SystemTab" Header="System">
-            <Border Background="#151515" CornerRadius="0,5,5,5" Padding="10"><Grid>
-                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+            <Border Background="#151515" CornerRadius="0,5,5,5" Padding="10"><ScrollViewer VerticalScrollBarVisibility="Auto"><Grid>
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Border Background="#1a1a1a" CornerRadius="5" Padding="10"><StackPanel><TextBlock Text="Quick Links" FontSize="10" Foreground="#909090" Margin="0,0,0,5"/>
                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                         <Button x:Name="DisplaySettingsBtn" Content="Display" Style="{StaticResource Btn}" Padding="5,4" FontSize="9"/>
@@ -2719,7 +3054,16 @@ try {
                 <Border Grid.Row="4" Background="#1a1a1a" CornerRadius="5" Padding="10"><StackPanel><TextBlock Text="Monitor Capabilities" FontSize="10" Foreground="#909090" Margin="0,0,0,4"/>
                     <TextBox x:Name="CapabilitiesBox" IsReadOnly="True" TextWrapping="Wrap" Height="60" VerticalScrollBarVisibility="Auto" Background="#111" FontFamily="Consolas" FontSize="8"/>
                 </StackPanel></Border>
-            </Grid></Border>
+                <Border Grid.Row="6" Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                        <TextBlock Text="DDC Compatibility Report" FontSize="10" Foreground="#909090" VerticalAlignment="Center"/>
+                        <Button x:Name="DdcReportGenerateBtn" Grid.Column="2" Content="Build" Style="{StaticResource GreenBtn}" Padding="10,4" FontSize="9"/>
+                        <Button x:Name="DdcReportCopyBtn" Grid.Column="4" Content="Copy" Style="{StaticResource Btn}" Padding="10,4" FontSize="9"/>
+                    </Grid>
+                    <TextBox x:Name="DdcReportBox" Grid.Row="2" IsReadOnly="True" TextWrapping="Wrap" Height="170" VerticalScrollBarVisibility="Auto" Background="#111" FontFamily="Consolas" FontSize="8" AcceptsReturn="True"/>
+                </Grid></Border>
+            </Grid></ScrollViewer></Border>
         </TabItem>
     </TabControl>
     <Border Grid.Row="5" Margin="0,6,0,0"><Grid>
@@ -2801,7 +3145,9 @@ $resetGammaBtn = $window.FindName("ResetGammaBtn")
 $gammaRedSlider = $window.FindName("GammaRedSlider"); $gammaRedValue = $window.FindName("GammaRedValue")
 $gammaGreenSlider = $window.FindName("GammaGreenSlider"); $gammaGreenValue = $window.FindName("GammaGreenValue")
 $gammaBlueSlider = $window.FindName("GammaBlueSlider"); $gammaBlueValue = $window.FindName("GammaBlueValue")
-$capabilitiesBox = $window.FindName("CapabilitiesBox"); $statusText = $window.FindName("StatusText"); $autoModeText = $window.FindName("AutoModeText")
+$capabilitiesBox = $window.FindName("CapabilitiesBox"); $ddcReportBox = $window.FindName("DdcReportBox")
+$ddcReportGenerateBtn = $window.FindName("DdcReportGenerateBtn"); $ddcReportCopyBtn = $window.FindName("DdcReportCopyBtn")
+$statusText = $window.FindName("StatusText"); $autoModeText = $window.FindName("AutoModeText")
 
 function Update-Status { param([string]$Message); $statusText.Text = $Message }
 if ($script:PendingStatusMessage) { Update-Status $script:PendingStatusMessage; $script:PendingStatusMessage = "" }
@@ -3137,7 +3483,7 @@ function Export-ProfileBundle {
 
         $manifest = [PSCustomObject]@{
             BundleSchemaVersion = $script:ProfileBundleSchemaVersion
-            AppVersion = "3.31.0"
+            AppVersion = "3.32.0"
             ProfileSchemaVersion = $script:ProfileSchemaVersion
             ExportedAt = (Get-Date).ToString("o")
             ProfileCount = $exportedProfiles.Count
@@ -4520,6 +4866,11 @@ $batteryProfileSaveBtn.Add_Click({
 
 $displaySettingsBtn.Add_Click({ Start-Process "ms-settings:display" }); $colorMgmtBtn.Add_Click({ Start-Process "colorcpl.exe" })
 $gpuControlPanelBtn.Add_Click({ if ($script:HasNvidia) { Start-Process "nvidia-settings" -ErrorAction SilentlyContinue } else { Start-Process "ms-settings:display" } })
+$ddcReportGenerateBtn.Add_Click({ Start-DdcReportWorker })
+$ddcReportCopyBtn.Add_Click({
+    $text = if ($script:DdcReportLastText) { $script:DdcReportLastText } else { $ddcReportBox.Text }
+    if (Copy-DdcCompatibilityReport -Text $text) { Update-Status "DDC report copied" } else { Update-Status "No DDC report to copy" }
+})
 $fpsOverlayStartBtn.Add_Click({ Show-FpsOverlay })
 $fpsOverlayStopBtn.Add_Click({ Hide-FpsOverlay })
 $vibranceSlider.Add_ValueChanged({
@@ -4574,7 +4925,7 @@ $window.Add_StateChanged({
     if ($window.WindowState -eq [System.Windows.WindowState]::Minimized) { Hide-MainWindowToTray }
 })
 
-$window.Add_Closed({ if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AmbientLightTimer) { $script:AmbientLightTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }; if ($script:ProfileScheduleTimer) { $script:ProfileScheduleTimer.Stop() }; if ($script:IdleDimTimer) { $script:IdleDimTimer.Stop() }; if ($script:BatteryProfileTimer) { $script:BatteryProfileTimer.Stop() }; if ($script:FpsOverlayTimer) { $script:FpsOverlayTimer.Stop() }; if ($script:DdcWriteResultTimer) { $script:DdcWriteResultTimer.Stop() }; foreach ($timer in @($script:DeferredRefreshTimers)) { try { $timer.Stop() } catch {} }; $script:DeferredRefreshTimers = @(); Stop-VcpWorker -Cancel; Stop-MonitorSettingsWorker -Cancel; Stop-CapabilitiesWorker -Cancel
+$window.Add_Closed({ if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AmbientLightTimer) { $script:AmbientLightTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }; if ($script:ProfileScheduleTimer) { $script:ProfileScheduleTimer.Stop() }; if ($script:IdleDimTimer) { $script:IdleDimTimer.Stop() }; if ($script:BatteryProfileTimer) { $script:BatteryProfileTimer.Stop() }; if ($script:FpsOverlayTimer) { $script:FpsOverlayTimer.Stop() }; if ($script:DdcWriteResultTimer) { $script:DdcWriteResultTimer.Stop() }; foreach ($timer in @($script:DeferredRefreshTimers)) { try { $timer.Stop() } catch {} }; $script:DeferredRefreshTimers = @(); Stop-VcpWorker -Cancel; Stop-MonitorSettingsWorker -Cancel; Stop-CapabilitiesWorker -Cancel; Stop-DdcReportWorker -Cancel
     if ($script:FpsOverlayWindow) { try { $script:FpsOverlayWindow.Close() } catch {} }
     if ($script:HardwareMonitorComputer) { try { $script:HardwareMonitorComputer.Close() } catch {} }
     Dispose-TrayMode

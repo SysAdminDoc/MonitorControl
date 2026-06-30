@@ -50,13 +50,6 @@ PowerShell/WPF utility for DDC/CI monitor control â€” brightness, contrast,
 ## Research-Driven Additions
 
 ### P2
-- [ ] P2 - Add a copyable DDC compatibility report
-  Why: DDC failures are often cable, dock, driver, GPU, or monitor-firmware issues; users need a concise report before troubleshooting.
-  Evidence: ControlMyMonitor documents driver/cable/KVM error cases and a January 2026 AMD DDC/CI regression; Twinkle Tray documents dock/VGA/DVI/DDC behavior caveats.
-  Touches: monitor enumeration, capabilities read, VCP read/write probes, README troubleshooting.
-  Acceptance: A Diagnostics action exports monitor identities, capabilities length/status, tested VCP results, driver/GPU names, OS version, and recent DDC errors with no private user paths.
-  Complexity: M
-
 - [ ] P2 - Add optional local automation bridge with network-off default
   Why: Existing roadmap mentions MQTT/Home Assistant and local protocol control, but the safe foundation is a disabled-by-default localhost bridge with explicit API key and command allowlist.
   Evidence: ddc-ci-control-bridge provides MCP/MQTT patterns; Home Assistant MQTT Light defines brightness/state integration conventions.
