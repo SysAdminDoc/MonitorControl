@@ -1,7 +1,7 @@
 # MonitorControl Pro
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v3.19.0-brightgreen" alt="Version v3.19.0">
+  <img src="https://img.shields.io/badge/Version-v3.20.0-brightgreen" alt="Version v3.20.0">
   <img src="https://img.shields.io/badge/PowerShell-5.1+-blue?logo=powershell" alt="PowerShell 5.1+">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/DDC%2FCI-Supported-green" alt="DDC/CI">
@@ -46,6 +46,7 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 ### Advanced Features
 - **VCP Explorer** — Query and set any VCP code for advanced users
 - **VCP Code Scanner** — Discover which DDC/CI features your monitor supports, including extended MCCS codes for gamma, OSD controls, indicators, auxiliary power, and display modes
+- **Coalesced DDC Writes** — Slider, profile, preset, and all-monitor writes queue on a background worker so rapid UI changes do not block the WPF thread
 - **DDC/CI Capabilities Viewer** — View raw capabilities string from monitor
 - **Software Gamma Control** — Independent RGB gamma curves via Windows API
 - **Factory Reset** — Reset monitor to factory defaults (colors only or full reset)
