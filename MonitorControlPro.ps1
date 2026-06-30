@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.20.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro v3.21.0 - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.20.0 - Enhanced with coalesced background DDC writes
+    Version: 3.21.0 - Enhanced with async VCP explorer reads
 #>
 
 param([switch]$StartMinimized, [string]$LoadProfile)
@@ -470,6 +470,13 @@ $script:FpsOverlayText = $null
 $script:FpsOverlayTimer = $null
 $script:GpuTimer = $null
 $script:AutoModeTimer = $null
+$script:VcpWorker = $null
+$script:VcpWorkerInput = $null
+$script:VcpWorkerOutput = $null
+$script:VcpWorkerAsyncResult = $null
+$script:VcpWorkerTimer = $null
+$script:VcpWorkerMode = ""
+$script:VcpWorkerLastOutputCount = 0
 $script:DefaultProfilesPath = "$env:APPDATA\MonitorControlPro"
 $script:ProfileStorageSettingsPath = Join-Path $script:DefaultProfilesPath "profile-storage.json"
 $script:ProfilesPath = $script:DefaultProfilesPath
@@ -645,6 +652,123 @@ function Set-VCPValueWithSync {
     }
     if ($queued -gt 0) { return $true }
     return ($VCPCode -eq [MonitorAPI]::VCP_BRIGHTNESS -and $script:WmiBrightnessAvailable)
+}
+
+function Get-VcpDescription {
+    param([int]$Code)
+    if ($script:VCPCodeDescriptions.ContainsKey($Code)) { return $script:VCPCodeDescriptions[$Code] }
+    return "Unknown"
+}
+
+function Format-VcpResultLine {
+    param($Result)
+    $code = [int]$Result.Code
+    $desc = Get-VcpDescription -Code $code
+    if ([bool]$Result.Success) {
+        return "0x{0:X2} {1,-24} = {2} (max:{3})" -f $code, $desc, [uint32]$Result.Current, [uint32]$Result.Maximum
+    }
+    return "0x{0:X2} {1,-24} read failed" -f $code, $desc
+}
+
+function Stop-VcpWorker {
+    param([switch]$Cancel)
+    if ($script:VcpWorkerTimer) { $script:VcpWorkerTimer.Stop() }
+    if ($script:VcpWorker) {
+        if ($Cancel -and $script:VcpWorkerAsyncResult -and -not $script:VcpWorkerAsyncResult.IsCompleted) {
+            try { $script:VcpWorker.Stop() } catch {}
+        }
+        try { $script:VcpWorker.Dispose() } catch {}
+    }
+    if ($script:VcpWorkerInput) { try { $script:VcpWorkerInput.Dispose() } catch {} }
+    if ($script:VcpWorkerOutput) { try { $script:VcpWorkerOutput.Dispose() } catch {} }
+    $script:VcpWorker = $null
+    $script:VcpWorkerInput = $null
+    $script:VcpWorkerOutput = $null
+    $script:VcpWorkerAsyncResult = $null
+    $script:VcpWorkerMode = ""
+    $script:VcpWorkerLastOutputCount = 0
+    if ($vcpQueryBtn) { $vcpQueryBtn.IsEnabled = $true }
+    if ($vcpScanBtn) { $vcpScanBtn.IsEnabled = $true }
+}
+
+function Update-VcpWorkerOutput {
+    if (-not $script:VcpWorker -or -not $script:VcpWorkerOutput -or -not $script:VcpWorkerAsyncResult) { return }
+    $count = $script:VcpWorkerOutput.Count
+    $completed = [bool]$script:VcpWorkerAsyncResult.IsCompleted
+    if ($count -ne $script:VcpWorkerLastOutputCount -or $completed) {
+        $script:VcpWorkerLastOutputCount = $count
+        $items = @($script:VcpWorkerOutput)
+        if ($script:VcpWorkerMode -eq "Query") {
+            if ($items.Count -gt 0) {
+                $result = $items[-1]
+                $code = [int]$result.Code
+                $desc = Get-VcpDescription -Code $code
+                if ([bool]$result.Success) {
+                    $vcpResultBox.Text = "VCP 0x$("{0:X2}" -f $code) ($desc)`nCurrent: $($result.Current)`nMaximum: $($result.Maximum)"
+                } else {
+                    $vcpResultBox.Text = "Failed to read VCP 0x$("{0:X2}" -f $code) ($desc)"
+                }
+            } else {
+                $vcpResultBox.Text = "Reading VCP..."
+            }
+        } else {
+            $last = if ($items.Count -gt 0) { $items[-1] } else { $null }
+            $done = if ($last) { [int]$last.Index } else { 0 }
+            $total = if ($last) { [int]$last.Count } else { 0 }
+            $found = @($items | Where-Object { [bool]$_.Success } | ForEach-Object { Format-VcpResultLine -Result $_ })
+            $header = if ($completed) { "Supported VCP Codes:" } else { "Scanning VCP codes $done/$total..." }
+            $body = if ($found.Count -gt 0) { $found -join "`n" } elseif ($completed) { "None found" } else { "" }
+            $vcpResultBox.Text = "$header`n$body"
+        }
+    }
+    if ($completed) {
+        try { $script:VcpWorker.EndInvoke($script:VcpWorkerAsyncResult) } catch { Update-Status "VCP read failed: $($_.Exception.Message)" }
+        if ($script:VcpWorkerMode -eq "Scan") { Update-Status "VCP scan complete" }
+        Stop-VcpWorker
+    }
+}
+
+function Start-VcpReadWorker {
+    param([IntPtr]$Handle, [int[]]$Codes, [string]$Mode)
+    Stop-VcpWorker -Cancel
+    if ($Handle -eq [IntPtr]::Zero -or $Codes.Count -eq 0) { return }
+    $workerScript = {
+        param([IntPtr]$Handle, [int[]]$Codes)
+        $index = 0
+        foreach ($code in $Codes) {
+            $index++
+            $vct = [uint32]0
+            $current = [uint32]0
+            $maximum = [uint32]0
+            $ok = [MonitorAPI]::GetVCPFeatureAndVCPFeatureReply($Handle, [byte]$code, [ref]$vct, [ref]$current, [ref]$maximum)
+            [PSCustomObject]@{
+                Code = [int]$code
+                Success = [bool]$ok
+                Current = [uint32]$current
+                Maximum = [uint32]$maximum
+                Type = [uint32]$vct
+                Index = [int]$index
+                Count = [int]$Codes.Count
+            }
+        }
+    }
+    $script:VcpWorkerMode = $Mode
+    $script:VcpWorkerInput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
+    $script:VcpWorkerInput.Complete()
+    $script:VcpWorkerOutput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
+    $script:VcpWorker = [PowerShell]::Create()
+    $script:VcpWorker.AddScript($workerScript.ToString()).AddArgument($Handle).AddArgument($Codes) | Out-Null
+    $script:VcpWorkerAsyncResult = $script:VcpWorker.BeginInvoke($script:VcpWorkerInput, $script:VcpWorkerOutput)
+    $script:VcpWorkerLastOutputCount = 0
+    if (-not $script:VcpWorkerTimer) {
+        $script:VcpWorkerTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:VcpWorkerTimer.Interval = [TimeSpan]::FromMilliseconds(150)
+        $script:VcpWorkerTimer.Add_Tick({ Update-VcpWorkerOutput })
+    }
+    $vcpQueryBtn.IsEnabled = $false
+    $vcpScanBtn.IsEnabled = $false
+    $vcpResultBox.Text = if ($Mode -eq "Scan") { "Scanning VCP codes 0/$($Codes.Count)..." } else { "Reading VCP..." }
+    $script:VcpWorkerTimer.Start()
 }
 
 function Set-GammaRamp {
@@ -885,7 +1009,7 @@ try {
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.20.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
+        Title="MonitorControl Pro v3.21.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
         Background="#0a0a0a" WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
     <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
@@ -1019,7 +1143,7 @@ try {
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
             <TextBlock Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
-            <TextBlock Text="v3.20.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
+            <TextBlock Text="v3.21.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal">
             <CheckBox x:Name="ApplyAllCheckbox" Content="All Monitors" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -2677,9 +2801,7 @@ $vcpQueryBtn.Add_Click({
     $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]; if ($mon.Handle -eq [IntPtr]::Zero) { $vcpResultBox.Text = "No DDC/CI"; return }
     try {
         $codeText = $vcpCodeBox.Text.Trim(); $code = if ($codeText -match '^0x') { [Convert]::ToInt32($codeText, 16) } else { [int]$codeText }
-        $result = Get-VCPValue -Handle $mon.Handle -VCPCode ([byte]$code)
-        if ($result.Success) { $desc = if ($script:VCPCodeDescriptions.ContainsKey($code)) { $script:VCPCodeDescriptions[$code] } else { "Unknown" }; $vcpResultBox.Text = "VCP 0x$("{0:X2}" -f $code) ($desc)`nCurrent: $($result.Current)`nMaximum: $($result.Maximum)" }
-        else { $vcpResultBox.Text = "Failed to read VCP 0x$("{0:X2}" -f $code)" }
+        Start-VcpReadWorker -Handle $mon.Handle -Codes @($code) -Mode "Query"
     } catch { $vcpResultBox.Text = "Error: $_" }
 })
 $vcpSetBtn.Add_Click({
@@ -2690,12 +2812,7 @@ $vcpSetBtn.Add_Click({
 })
 $vcpScanBtn.Add_Click({
     $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]; if ($mon.Handle -eq [IntPtr]::Zero) { $vcpResultBox.Text = "No DDC/CI"; return }
-    $vcpResultBox.Text = "Scanning...`n"; [System.Windows.Forms.Application]::DoEvents()
-    $found = @(); foreach ($code in ($script:VCPCodeDescriptions.Keys | Sort-Object)) {
-        $r = Get-VCPValue -Handle $mon.Handle -VCPCode ([byte]$code)
-        if ($r.Success) { $desc = if ($script:VCPCodeDescriptions.ContainsKey($code)) { $script:VCPCodeDescriptions[$code] } else { "Unknown" }; $found += "0x{0:X2} {1,-20} = {2} (max:{3})" -f $code, $desc, $r.Current, $r.Maximum }
-    }
-    $vcpResultBox.Text = "Supported VCP Codes:`n" + ($found -join "`n")
+    Start-VcpReadWorker -Handle $mon.Handle -Codes @($script:VCPCodeDescriptions.Keys | Sort-Object) -Mode "Scan"
 })
 
 $saveProfileBtn.Add_Click({
@@ -2950,7 +3067,7 @@ $window.Add_StateChanged({
     if ($window.WindowState -eq [System.Windows.WindowState]::Minimized) { Hide-MainWindowToTray }
 })
 
-$window.Add_Closed({ if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AmbientLightTimer) { $script:AmbientLightTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }; if ($script:ProfileScheduleTimer) { $script:ProfileScheduleTimer.Stop() }; if ($script:IdleDimTimer) { $script:IdleDimTimer.Stop() }; if ($script:BatteryProfileTimer) { $script:BatteryProfileTimer.Stop() }; if ($script:FpsOverlayTimer) { $script:FpsOverlayTimer.Stop() }
+$window.Add_Closed({ if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AmbientLightTimer) { $script:AmbientLightTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }; if ($script:ProfileScheduleTimer) { $script:ProfileScheduleTimer.Stop() }; if ($script:IdleDimTimer) { $script:IdleDimTimer.Stop() }; if ($script:BatteryProfileTimer) { $script:BatteryProfileTimer.Stop() }; if ($script:FpsOverlayTimer) { $script:FpsOverlayTimer.Stop() }; Stop-VcpWorker -Cancel
     if ($script:FpsOverlayWindow) { try { $script:FpsOverlayWindow.Close() } catch {} }
     if ($script:HardwareMonitorComputer) { try { $script:HardwareMonitorComputer.Close() } catch {} }
     Dispose-TrayMode
