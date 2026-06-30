@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.28.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro v3.29.0 - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.28.0 - Enhanced with accessibility names and localization scaffold
+    Version: 3.29.0 - Enhanced with portable release packaging
 #>
 
 param([switch]$StartMinimized, [string]$LoadProfile)
@@ -741,7 +741,7 @@ $script:UpdatingMonitorLabelUI = $false
 $script:UiCulture = "en-US"
 $script:UiStrings = @{
     "App.Title" = "MonitorControl Pro"
-    "App.Subtitle" = "v3.28.0 - Click monitor to select"
+    "App.Subtitle" = "v3.29.0 - Click monitor to select"
     "Tab.Display" = "Display"
     "Tab.Monitor" = "Monitor"
     "Tab.GPU" = "GPU"
@@ -1352,7 +1352,7 @@ function Set-TabOrder {
 
 function Initialize-LocalizationAndAccessibility {
     if ($window) {
-        $window.Title = "$(Get-UiString -Key 'App.Title') v3.28.0"
+        $window.Title = "$(Get-UiString -Key 'App.Title') v3.29.0"
         [System.Windows.Automation.AutomationProperties]::SetName($window, "$(Get-UiString -Key 'App.Title') main window")
     }
     Set-LocalizedText -Control $appTitleText -Key "App.Title" -Property "Text"
@@ -2154,7 +2154,7 @@ try {
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.28.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
+        Title="MonitorControl Pro v3.29.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
         Background="#0a0a0a" WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
     <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
@@ -2288,7 +2288,7 @@ try {
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
             <TextBlock x:Name="AppTitleText" Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
-            <TextBlock x:Name="AppSubtitleText" Text="v3.28.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
+            <TextBlock x:Name="AppSubtitleText" Text="v3.29.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal">
             <CheckBox x:Name="ApplyAllCheckbox" Content="All Monitors" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -3002,7 +3002,7 @@ function Export-ProfileBundle {
 
         $manifest = [PSCustomObject]@{
             BundleSchemaVersion = $script:ProfileBundleSchemaVersion
-            AppVersion = "3.28.0"
+            AppVersion = "3.29.0"
             ProfileSchemaVersion = $script:ProfileSchemaVersion
             ExportedAt = (Get-Date).ToString("o")
             ProfileCount = $exportedProfiles.Count
