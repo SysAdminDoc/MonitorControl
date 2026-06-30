@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.23.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro v3.24.0 - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.23.0 - Enhanced with DDC/CI diagnostics and retry reporting
+    Version: 3.24.0 - Enhanced with monitor handle lifecycle cleanup
 #>
 
 param([switch]$StartMinimized, [string]$LoadProfile)
@@ -252,6 +252,11 @@ public class MonitorAPI
     public static int GetPendingVCPWriteCount()
     {
         lock (VcpWriteQueueLock) { return QueuedVcpWrites.Count; }
+    }
+
+    public static bool IsVCPWriteWorkerActive()
+    {
+        lock (VcpWriteQueueLock) { return VcpWriteWorkerActive; }
     }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -678,8 +683,37 @@ $script:VCPCodeDescriptions = @{
     0xE8 = "Secondary Input Source"; 0xE9 = "PiP/PbP Mode"
 }
 
+function Wait-DdcWriteQueueIdle {
+    param([int]$TimeoutMs = 1000)
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        Drain-DdcWriteResults
+        if (-not [MonitorAPI]::IsVCPWriteWorkerActive() -and [MonitorAPI]::GetPendingVCPWriteCount() -eq 0) { return $true }
+        Start-Sleep -Milliseconds 50
+    }
+    return $false
+}
+
+function Clear-PhysicalMonitorHandles {
+    param([switch]$ClearList)
+    $seen = @{}
+    foreach ($mon in @($script:PhysicalMonitors)) {
+        if ($null -eq $mon -or $mon.Handle -eq [IntPtr]::Zero) { continue }
+        $key = $mon.Handle.ToInt64()
+        if (-not $seen.ContainsKey($key)) {
+            try { [MonitorAPI]::DestroyPhysicalMonitor($mon.Handle) | Out-Null } catch {}
+            $seen[$key] = $true
+        }
+        try { $mon.Handle = [IntPtr]::Zero } catch {}
+    }
+    if ($ClearList) { $script:PhysicalMonitors = @() }
+}
+
 function Get-Monitors {
-    $script:PhysicalMonitors = @()
+    Stop-MonitorSettingsWorker -Cancel
+    Stop-VcpWorker -Cancel
+    Wait-DdcWriteQueueIdle -TimeoutMs 1000 | Out-Null
+    Clear-PhysicalMonitorHandles -ClearList
     $monitorHandles = [MonitorAPI]::GetAllMonitorHandles()
     $monitorIndex = 1
     $displayDevices = @{}
@@ -1349,7 +1383,7 @@ try {
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.23.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
+        Title="MonitorControl Pro v3.24.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
         Background="#0a0a0a" WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
     <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
@@ -1483,7 +1517,7 @@ try {
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
             <TextBlock Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
-            <TextBlock Text="v3.23.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
+            <TextBlock Text="v3.24.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal">
             <CheckBox x:Name="ApplyAllCheckbox" Content="All Monitors" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -2058,7 +2092,7 @@ function Export-ProfileBundle {
 
         $manifest = [PSCustomObject]@{
             BundleSchemaVersion = $script:ProfileBundleSchemaVersion
-            AppVersion = "3.23.0"
+            AppVersion = "3.24.0"
             ProfileSchemaVersion = $script:ProfileSchemaVersion
             ExportedAt = (Get-Date).ToString("o")
             ProfileCount = $exportedProfiles.Count
@@ -3416,7 +3450,8 @@ $window.Add_Closed({ if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($scr
     if ($script:FpsOverlayWindow) { try { $script:FpsOverlayWindow.Close() } catch {} }
     if ($script:HardwareMonitorComputer) { try { $script:HardwareMonitorComputer.Close() } catch {} }
     Dispose-TrayMode
-    foreach ($mon in $script:PhysicalMonitors) { if ($mon.Handle -ne [IntPtr]::Zero) { [MonitorAPI]::DestroyPhysicalMonitor($mon.Handle) | Out-Null } }
+    Wait-DdcWriteQueueIdle -TimeoutMs 1000 | Out-Null
+    Clear-PhysicalMonitorHandles -ClearList
 })
 
 if ($StartMinimized) {

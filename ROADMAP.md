@@ -58,13 +58,6 @@ PowerShell/WPF utility for DDC/CI monitor control â€” brightness, contrast,
   Progress: v3.20.0 adds coalesced background writes for slider, profile, preset, and all-monitor set paths; v3.21.0 moves VCP Explorer query/scan reads to a background worker with timer-based progress; v3.22.0 moves monitor setting refresh reads to a background worker; v3.23.0 routes time-based writes through the queued path and surfaces DDC retry diagnostics for read/write failures.
   Complexity: M
 
-- [ ] P0 - Fix monitor-handle lifecycle on refresh
-  Why: Handles are destroyed only when the window closes, but Refresh re-enumerates physical monitors and replaces the array, so repeated refreshes can leak handles until exit.
-  Evidence: `MonitorControlPro.ps1:841`, `MonitorControlPro.ps1:1715`; Microsoft requires closing handles returned by `GetPhysicalMonitorsFromHMONITOR`.
-  Touches: `Get-Monitors`, `Refresh-Monitors`, close handler.
-  Acceptance: Refresh destroys old non-zero handles before replacing them, close remains idempotent, and repeated refreshes do not grow physical-monitor handle count.
-  Complexity: S
-
 - [ ] P0 - Harden profile and automation JSON storage
   Why: Profiles and rule files are written directly with user-derived names and no atomic rename, schema marker, backup, or corrupt-file quarantine.
   Evidence: `MonitorControlPro.ps1:1543`, `MonitorControlPro.ps1:892`, `MonitorControlPro.ps1:1036`, `MonitorControlPro.ps1:1111`; existing roadmap already calls for schema migration.
