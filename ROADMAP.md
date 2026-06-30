@@ -58,13 +58,6 @@ PowerShell/WPF utility for DDC/CI monitor control â€” brightness, contrast,
   Progress: v3.20.0 adds coalesced background writes for slider, profile, preset, and all-monitor set paths; v3.21.0 moves VCP Explorer query/scan reads to a background worker with timer-based progress; v3.22.0 moves monitor setting refresh reads to a background worker; v3.23.0 routes time-based writes through the queued path and surfaces DDC retry diagnostics for read/write failures.
   Complexity: M
 
-- [ ] P0 - Harden profile and automation JSON storage
-  Why: Profiles and rule files are written directly with user-derived names and no atomic rename, schema marker, backup, or corrupt-file quarantine.
-  Evidence: `MonitorControlPro.ps1:1543`, `MonitorControlPro.ps1:892`, `MonitorControlPro.ps1:1036`, `MonitorControlPro.ps1:1111`; existing roadmap already calls for schema migration.
-  Touches: profile save/load/delete, app profile rules, schedules, idle dim settings, shared JSON helper.
-  Acceptance: Invalid profile filenames are rejected, writes use temp-file plus replace, latest valid backup is retained, corrupt JSON is quarantined with a status message, and v1 schema loads migrate cleanly.
-  Complexity: M
-
 ### P1
 - [ ] P1 - Parse capabilities into per-monitor supported controls
   Why: The app stores the raw capabilities string but still enables fixed controls and scans a preset table, which can send unsupported or write-only VCP codes.
