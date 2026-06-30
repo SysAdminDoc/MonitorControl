@@ -1,7 +1,7 @@
 # MonitorControl Pro
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v3.27.0-brightgreen" alt="Version v3.27.0">
+  <img src="https://img.shields.io/badge/Version-v3.28.0-brightgreen" alt="Version v3.28.0">
   <img src="https://img.shields.io/badge/PowerShell-5.1+-blue?logo=powershell" alt="PowerShell 5.1+">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/DDC%2FCI-Supported-green" alt="DDC/CI">
@@ -50,6 +50,7 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 - **VCP Code Scanner** — Discover which DDC/CI features your monitor supports, including extended MCCS codes for gamma, OSD controls, indicators, auxiliary power, and display modes
 - **Capabilities-Aware Controls** — Parses monitor `vcp(...)` capabilities, disables controls that are known unsupported, and can scan either reported capabilities or the full probe table
 - **Stable Monitor Identity** — Stores EDID/device-path backed monitor identities, supports custom display labels, and targets saved profiles by identity after reordering
+- **Accessibility & Localization Baseline** — Applies English UI string keys, explicit automation names, and stable tab order for screen-reader friendly control surfaces
 - **Async VCP Reads** — VCP Explorer query and scan operations run in a background worker with live scan progress
 - **Async Monitor Refresh** — Monitor brightness, contrast, color gain, volume, and sharpness reads refresh from a background worker
 - **Coalesced DDC Writes** — Slider, profile, preset, and all-monitor writes queue on a background worker so rapid UI changes do not block the WPF thread
