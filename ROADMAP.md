@@ -55,14 +55,7 @@ PowerShell/WPF utility for DDC/CI monitor control â€” brightness, contrast,
   Evidence: `MonitorControlPro.ps1:1483`, `MonitorControlPro.ps1:1533`; Microsoft documents roughly 40 ms for VCP reads and 50 ms for VCP writes.
   Touches: `MonitorControlPro.ps1` hardware wrappers, slider handlers, VCP scan, profile/app/schedule/idle apply paths.
   Acceptance: Rapid slider dragging remains responsive, writes are coalesced per monitor/code, VCP scan shows progress without `DoEvents`, and failed writes surface in status/log.
-  Progress: v3.20.0 adds coalesced background writes for slider, profile, preset, and all-monitor set paths; v3.21.0 moves VCP Explorer query/scan reads to a background worker with timer-based progress; v3.22.0 moves monitor setting refresh reads to a background worker.
-  Complexity: M
-
-- [ ] P0 - Capture DDC/CI last-error diagnostics and retry policy
-  Why: Current get/set wrappers return only Boolean success and most callers drop failures, leaving users with no way to distinguish unsupported VCP codes from driver/cable/dock faults.
-  Evidence: `MonitorControlPro.ps1:244`, `MonitorControlPro.ps1:251`; ControlMyMonitor v1.30/v1.40 surfaces DDC error codes and supports retry when VCP reads randomly fail.
-  Touches: `Get-VCPValue`, `Set-VCPValue`, `Set-VCPValueWithSync`, status bar, VCP Explorer, README troubleshooting.
-  Acceptance: Every failed read/write includes code, monitor identity, VCP code, attempted value, Win32 error, retry count, and a copyable diagnostic summary.
+  Progress: v3.20.0 adds coalesced background writes for slider, profile, preset, and all-monitor set paths; v3.21.0 moves VCP Explorer query/scan reads to a background worker with timer-based progress; v3.22.0 moves monitor setting refresh reads to a background worker; v3.23.0 routes time-based writes through the queued path and surfaces DDC retry diagnostics for read/write failures.
   Complexity: M
 
 - [ ] P0 - Fix monitor-handle lifecycle on refresh
