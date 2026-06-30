@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.29.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro v3.30.0 - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.29.0 - Enhanced with portable release packaging
+    Version: 3.30.0 - Enhanced with nonblocking advanced DDC writes
 #>
 
 param([switch]$StartMinimized, [string]$LoadProfile)
@@ -741,7 +741,7 @@ $script:UpdatingMonitorLabelUI = $false
 $script:UiCulture = "en-US"
 $script:UiStrings = @{
     "App.Title" = "MonitorControl Pro"
-    "App.Subtitle" = "v3.29.0 - Click monitor to select"
+    "App.Subtitle" = "v3.30.0 - Click monitor to select"
     "Tab.Display" = "Display"
     "Tab.Monitor" = "Monitor"
     "Tab.GPU" = "GPU"
@@ -846,6 +846,7 @@ $script:TrayHasShownMinimizeTip = $false
 $script:TraySuppressWindowStateEvent = $false
 $script:IsQuitting = $false
 $script:ProfileCycleIndex = -1
+$script:DeferredRefreshTimers = @()
 
 $script:VCPCodeDescriptions = @{
     0x04 = "Factory Reset"; 0x08 = "Reset Color"; 0x10 = "Brightness"; 0x12 = "Contrast"
@@ -1352,7 +1353,7 @@ function Set-TabOrder {
 
 function Initialize-LocalizationAndAccessibility {
     if ($window) {
-        $window.Title = "$(Get-UiString -Key 'App.Title') v3.29.0"
+        $window.Title = "$(Get-UiString -Key 'App.Title') v3.30.0"
         [System.Windows.Automation.AutomationProperties]::SetName($window, "$(Get-UiString -Key 'App.Title') main window")
     }
     Set-LocalizedText -Control $appTitleText -Key "App.Title" -Property "Text"
@@ -2154,7 +2155,7 @@ try {
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.29.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
+        Title="MonitorControl Pro v3.30.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
         Background="#0a0a0a" WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
     <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
@@ -2288,7 +2289,7 @@ try {
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
             <TextBlock x:Name="AppTitleText" Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
-            <TextBlock x:Name="AppSubtitleText" Text="v3.29.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
+            <TextBlock x:Name="AppSubtitleText" Text="v3.30.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal">
             <CheckBox x:Name="ApplyAllCheckbox" Content="All Monitors" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -2790,6 +2791,24 @@ function Refresh-Monitors {
     Load-MonitorSettings
     Update-ProfilesList
 }
+
+function Invoke-DelayedMonitorSettingsRefresh {
+    param([int]$DelayMs = 750, [int]$MonitorIndex = $script:CurrentMonitorIndex)
+    $timer = New-Object System.Windows.Threading.DispatcherTimer
+    $timer.Interval = [TimeSpan]::FromMilliseconds([Math]::Max(100, $DelayMs))
+    $targetIndex = $MonitorIndex
+    $timer.Add_Tick({
+        param($sender, $args)
+        $sender.Stop()
+        $script:DeferredRefreshTimers = @($script:DeferredRefreshTimers | Where-Object { $_ -ne $sender })
+        if ($targetIndex -eq $script:CurrentMonitorIndex -and $script:PhysicalMonitors.Count -gt $targetIndex) {
+            Load-MonitorSettings
+        }
+    })
+    $script:DeferredRefreshTimers += $timer
+    $timer.Start()
+}
+
 function Get-UserProfileFiles {
     if (-not (Test-Path -LiteralPath $script:ProfilesPath)) { return @() }
     return @(Get-ChildItem -Path $script:ProfilesPath -Filter "*.json" -File |
@@ -3002,7 +3021,7 @@ function Export-ProfileBundle {
 
         $manifest = [PSCustomObject]@{
             BundleSchemaVersion = $script:ProfileBundleSchemaVersion
-            AppVersion = "3.29.0"
+            AppVersion = "3.30.0"
             ProfileSchemaVersion = $script:ProfileSchemaVersion
             ExportedAt = (Get-Date).ToString("o")
             ProfileCount = $exportedProfiles.Count
@@ -4138,8 +4157,18 @@ $pbpModeBtn.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_PIP_MOD
 $pipSecondaryDpBtn.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_PIP_SECONDARY_SOURCE) -Value ([MonitorAPI]::PIP_SECONDARY_DISPLAYPORT); Update-Status "PiP/PbP secondary: DisplayPort" })
 $pipSecondaryHdmi1Btn.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_PIP_SECONDARY_SOURCE) -Value ([MonitorAPI]::PIP_SECONDARY_HDMI1); Update-Status "PiP/PbP secondary: HDMI 1" })
 $pipSecondaryHdmi2Btn.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_PIP_SECONDARY_SOURCE) -Value ([MonitorAPI]::PIP_SECONDARY_HDMI2); Update-Status "PiP/PbP secondary: HDMI 2" })
-$resetColorBtn.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_RESTORE_FACTORY_COLOR) -Value 1; Start-Sleep -Milliseconds 500; Load-MonitorSettings; Update-Status "Colors Reset" })
-$factoryResetBtn.Add_Click({ if ([System.Windows.MessageBox]::Show("Reset ALL settings?", "Factory Reset", "YesNo", "Warning") -eq "Yes") { Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_RESTORE_FACTORY_DEFAULTS) -Value 1; Start-Sleep -Milliseconds 1000; Load-MonitorSettings; Update-Status "Factory Reset Done" } })
+$resetColorBtn.Add_Click({
+    if (Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_RESTORE_FACTORY_COLOR) -Value 1) {
+        Invoke-DelayedMonitorSettingsRefresh -DelayMs 700
+        Update-Status "Color reset queued"
+    }
+})
+$factoryResetBtn.Add_Click({
+    if (Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_RESTORE_FACTORY_DEFAULTS) -Value 1) {
+        Invoke-DelayedMonitorSettingsRefresh -DelayMs 1500
+        Update-Status "Factory reset queued"
+    }
+})
 $allMonitorsStandbyBtn.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_POWER_MODE) -Value ([MonitorAPI]::POWER_STANDBY) -Force | Out-Null; Update-Status "All Standby queued" })
 
 $vcpPresetCombo.Add_SelectionChanged({ if ($vcpPresetCombo.SelectedItem -ne $null) { $vcpCodeBox.Text = "0x{0:X2}" -f $vcpPresetCombo.SelectedItem.Tag } })
@@ -4154,7 +4183,8 @@ $vcpSetBtn.Add_Click({
     $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]; if ($mon.Handle -eq [IntPtr]::Zero) { return }
     try { $codeText = $vcpCodeBox.Text.Trim(); $code = if ($codeText -match '^0x') { [Convert]::ToInt32($codeText, 16) } else { [int]$codeText }; $value = [uint32]$vcpSetValueBox.Text
         if (-not (Test-MonitorSupportsVcp -Monitor $mon -Code $code)) { Update-Status "VCP 0x$("{0:X2}" -f $code) is not in capabilities"; return }
-        if (Set-VCPValue -Handle $mon.Handle -VCPCode ([byte]$code) -Value $value -MonitorName $mon.Name) { Update-Status "Set VCP 0x$("{0:X2}" -f $code) = $value"; $vcpQueryBtn.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) }
+        if (Set-VCPValueWithSync -VCPCode ([byte]$code) -Value $value) { Update-Status "Queued VCP 0x$("{0:X2}" -f $code) = $value" }
+        else { Update-Status "No DDC/CI write target" }
     } catch { Update-Status "Error: $_" }
 })
 $vcpScanBtn.Add_Click({
@@ -4428,7 +4458,7 @@ $window.Add_StateChanged({
     if ($window.WindowState -eq [System.Windows.WindowState]::Minimized) { Hide-MainWindowToTray }
 })
 
-$window.Add_Closed({ if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AmbientLightTimer) { $script:AmbientLightTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }; if ($script:ProfileScheduleTimer) { $script:ProfileScheduleTimer.Stop() }; if ($script:IdleDimTimer) { $script:IdleDimTimer.Stop() }; if ($script:BatteryProfileTimer) { $script:BatteryProfileTimer.Stop() }; if ($script:FpsOverlayTimer) { $script:FpsOverlayTimer.Stop() }; if ($script:DdcWriteResultTimer) { $script:DdcWriteResultTimer.Stop() }; Stop-VcpWorker -Cancel; Stop-MonitorSettingsWorker -Cancel
+$window.Add_Closed({ if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AmbientLightTimer) { $script:AmbientLightTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }; if ($script:ProfileScheduleTimer) { $script:ProfileScheduleTimer.Stop() }; if ($script:IdleDimTimer) { $script:IdleDimTimer.Stop() }; if ($script:BatteryProfileTimer) { $script:BatteryProfileTimer.Stop() }; if ($script:FpsOverlayTimer) { $script:FpsOverlayTimer.Stop() }; if ($script:DdcWriteResultTimer) { $script:DdcWriteResultTimer.Stop() }; foreach ($timer in @($script:DeferredRefreshTimers)) { try { $timer.Stop() } catch {} }; $script:DeferredRefreshTimers = @(); Stop-VcpWorker -Cancel; Stop-MonitorSettingsWorker -Cancel
     if ($script:FpsOverlayWindow) { try { $script:FpsOverlayWindow.Close() } catch {} }
     if ($script:HardwareMonitorComputer) { try { $script:HardwareMonitorComputer.Close() } catch {} }
     Dispose-TrayMode
