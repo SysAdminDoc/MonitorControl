@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.25.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro v3.26.0 - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.25.0 - Enhanced with hardened JSON storage
+    Version: 3.26.0 - Enhanced with capabilities-based control support
 #>
 
 param([switch]$StartMinimized, [string]$LoadProfile)
@@ -790,6 +790,181 @@ $script:VCPCodeDescriptions = @{
     0xE8 = "Secondary Input Source"; 0xE9 = "PiP/PbP Mode"
 }
 
+function Get-CapabilitiesSection {
+    param([string]$Capabilities, [string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Capabilities) -or [string]::IsNullOrWhiteSpace($Name)) { return "" }
+    $match = [regex]::Match($Capabilities, "(?i)\b$([regex]::Escape($Name))\s*\(")
+    if (-not $match.Success) { return "" }
+    $start = $match.Index + $match.Length
+    $depth = 1
+    for ($i = $start; $i -lt $Capabilities.Length; $i++) {
+        $ch = $Capabilities[$i]
+        if ($ch -eq '(') { $depth++ }
+        elseif ($ch -eq ')') {
+            $depth--
+            if ($depth -eq 0) { return $Capabilities.Substring($start, $i - $start) }
+        }
+    }
+    return ""
+}
+
+function Get-HexTokens {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return @() }
+    return @([regex]::Matches($Text, '(?i)\b(?:0x)?[0-9a-f]{1,2}\b') | ForEach-Object {
+        $token = $_.Value
+        if ($token.StartsWith("0x", [StringComparison]::OrdinalIgnoreCase)) { $token = $token.Substring(2) }
+        [Convert]::ToInt32($token, 16)
+    })
+}
+
+function ConvertFrom-MonitorCapabilities {
+    param([string]$Capabilities)
+    $map = @{}
+    $section = Get-CapabilitiesSection -Capabilities $Capabilities -Name "vcp"
+    if ([string]::IsNullOrWhiteSpace($section)) {
+        return [PSCustomObject]@{ Known = $false; Codes = $map; Count = 0 }
+    }
+    $i = 0
+    while ($i -lt $section.Length) {
+        while ($i -lt $section.Length -and [char]::IsWhiteSpace($section[$i])) { $i++ }
+        if ($i -ge $section.Length) { break }
+        $start = $i
+        while ($i -lt $section.Length -and $section[$i] -match '[0-9A-Fa-fxX]') { $i++ }
+        if ($i -eq $start) { $i++; continue }
+        $token = $section.Substring($start, $i - $start)
+        if ($token.StartsWith("0x", [StringComparison]::OrdinalIgnoreCase)) { $token = $token.Substring(2) }
+        if ($token -notmatch '^[0-9A-Fa-f]{1,2}$') { continue }
+        $code = [Convert]::ToInt32($token, 16)
+        while ($i -lt $section.Length -and [char]::IsWhiteSpace($section[$i])) { $i++ }
+        $values = @()
+        if ($i -lt $section.Length -and $section[$i] -eq '(') {
+            $i++
+            $valueStart = $i
+            $depth = 1
+            while ($i -lt $section.Length -and $depth -gt 0) {
+                if ($section[$i] -eq '(') { $depth++ }
+                elseif ($section[$i] -eq ')') { $depth-- }
+                if ($depth -gt 0) { $i++ }
+            }
+            $valueText = $section.Substring($valueStart, [Math]::Max(0, $i - $valueStart))
+            $values = Get-HexTokens -Text $valueText
+            if ($i -lt $section.Length -and $section[$i] -eq ')') { $i++ }
+        }
+        $map[$code] = @($values)
+    }
+    return [PSCustomObject]@{ Known = $true; Codes = $map; Count = $map.Count }
+}
+
+function Test-MonitorSupportsVcp {
+    param($Monitor, [int]$Code)
+    if ($null -eq $Monitor -or -not [bool]$Monitor.CapabilitiesKnown) { return $true }
+    return $Monitor.SupportedVcpCodes.ContainsKey($Code)
+}
+
+function Test-MonitorSupportsVcpValue {
+    param($Monitor, [int]$Code, [int]$Value)
+    if (-not (Test-MonitorSupportsVcp -Monitor $Monitor -Code $Code)) { return $false }
+    if ($null -eq $Monitor -or -not [bool]$Monitor.CapabilitiesKnown) { return $true }
+    $values = @($Monitor.SupportedVcpCodes[$Code])
+    if ($values.Count -eq 0) { return $true }
+    return $values -contains $Value
+}
+
+function Set-ControlVcpSupport {
+    param($Control, $Monitor, [int]$Code, $Value = $null)
+    if ($null -eq $Control) { return }
+    $supported = if ($null -eq $Value) {
+        Test-MonitorSupportsVcp -Monitor $Monitor -Code $Code
+    } else {
+        Test-MonitorSupportsVcpValue -Monitor $Monitor -Code $Code -Value ([int]$Value)
+    }
+    $Control.IsEnabled = [bool]$supported
+    $desc = Get-VcpDescription -Code $Code
+    $Control.ToolTip = if ($supported) { $null } else { "VCP 0x$("{0:X2}" -f $Code) ($desc) is not reported in this monitor's capabilities." }
+}
+
+function Update-VcpPresetItems {
+    param($Monitor)
+    if ($null -eq $vcpPresetCombo) { return }
+    $selectedCode = if ($vcpPresetCombo.SelectedItem) { [int]$vcpPresetCombo.SelectedItem.Tag } else { $null }
+    if ($null -eq $selectedCode -and $vcpCodeBox -and -not [string]::IsNullOrWhiteSpace($vcpCodeBox.Text)) {
+        try {
+            $codeText = $vcpCodeBox.Text.Trim()
+            $selectedCode = if ($codeText -match '^0x') { [Convert]::ToInt32($codeText, 16) } else { [int]$codeText }
+        } catch {}
+    }
+    if ($null -eq $selectedCode) { $selectedCode = [int][MonitorAPI]::VCP_BRIGHTNESS }
+    $vcpPresetCombo.Items.Clear()
+    foreach ($code in ($script:VCPCodeDescriptions.Keys | Sort-Object)) {
+        $item = New-Object System.Windows.Controls.ComboBoxItem
+        $supported = Test-MonitorSupportsVcp -Monitor $Monitor -Code $code
+        $suffix = if ($supported) { "" } else { " (not in caps)" }
+        $item.Content = "0x{0:X2} - {1}{2}" -f $code, $script:VCPCodeDescriptions[$code], $suffix
+        $item.Tag = $code
+        $item.IsEnabled = [bool]$supported
+        if (-not $supported) { $item.ToolTip = "Not reported in this monitor's capabilities." }
+        $vcpPresetCombo.Items.Add($item) | Out-Null
+        if ($null -ne $selectedCode -and $selectedCode -eq [int]$code -and $supported) { $vcpPresetCombo.SelectedItem = $item }
+    }
+    if ($null -eq $vcpPresetCombo.SelectedItem -and $vcpPresetCombo.Items.Count -gt 0) {
+        $brightnessItem = @($vcpPresetCombo.Items | Where-Object { $_.IsEnabled -and [int]$_.Tag -eq [int][MonitorAPI]::VCP_BRIGHTNESS } | Select-Object -First 1)
+        $firstEnabled = @($vcpPresetCombo.Items | Where-Object { $_.IsEnabled } | Select-Object -First 1)
+        if ($brightnessItem.Count -gt 0) { $vcpPresetCombo.SelectedItem = $brightnessItem[0] }
+        elseif ($firstEnabled.Count -gt 0) { $vcpPresetCombo.SelectedItem = $firstEnabled[0] }
+        else { $vcpPresetCombo.SelectedIndex = 0 }
+    }
+}
+
+function Update-CapabilityControls {
+    param($Monitor)
+    Set-ControlVcpSupport -Control $brightnessSlider -Monitor $Monitor -Code ([MonitorAPI]::VCP_BRIGHTNESS)
+    Set-ControlVcpSupport -Control $contrastSlider -Monitor $Monitor -Code ([MonitorAPI]::VCP_CONTRAST)
+    Set-ControlVcpSupport -Control $redSlider -Monitor $Monitor -Code ([MonitorAPI]::VCP_RED_GAIN)
+    Set-ControlVcpSupport -Control $greenSlider -Monitor $Monitor -Code ([MonitorAPI]::VCP_GREEN_GAIN)
+    Set-ControlVcpSupport -Control $blueSlider -Monitor $Monitor -Code ([MonitorAPI]::VCP_BLUE_GAIN)
+    Set-ControlVcpSupport -Control $volumeSlider -Monitor $Monitor -Code ([MonitorAPI]::VCP_VOLUME)
+    Set-ControlVcpSupport -Control $muteCheckbox -Monitor $Monitor -Code ([MonitorAPI]::VCP_MUTE)
+    Set-ControlVcpSupport -Control $sharpnessSlider -Monitor $Monitor -Code ([MonitorAPI]::VCP_SHARPNESS)
+    Set-ControlVcpSupport -Control $inputSourceCombo -Monitor $Monitor -Code ([MonitorAPI]::VCP_INPUT_SOURCE)
+    Set-ControlVcpSupport -Control $powerOffBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_POWER_MODE) -Value ([MonitorAPI]::POWER_OFF)
+    Set-ControlVcpSupport -Control $powerStandbyBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_POWER_MODE) -Value ([MonitorAPI]::POWER_STANDBY)
+    Set-ControlVcpSupport -Control $powerOnBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_POWER_MODE) -Value ([MonitorAPI]::POWER_ON)
+    Set-ControlVcpSupport -Control $resetColorBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_RESTORE_FACTORY_COLOR) -Value 1
+    Set-ControlVcpSupport -Control $factoryResetBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_RESTORE_FACTORY_DEFAULTS) -Value 1
+    Set-ControlVcpSupport -Control $allMonitorsStandbyBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_POWER_MODE) -Value ([MonitorAPI]::POWER_STANDBY)
+    Set-ControlVcpSupport -Control $colorTempWarm -Monitor $Monitor -Code ([MonitorAPI]::VCP_COLOR_PRESET) -Value ([MonitorAPI]::COLOR_PRESET_5000K)
+    Set-ControlVcpSupport -Control $colorTemp6500 -Monitor $Monitor -Code ([MonitorAPI]::VCP_COLOR_PRESET) -Value ([MonitorAPI]::COLOR_PRESET_6500K)
+    Set-ControlVcpSupport -Control $colorTempCool -Monitor $Monitor -Code ([MonitorAPI]::VCP_COLOR_PRESET) -Value ([MonitorAPI]::COLOR_PRESET_9300K)
+    Set-ControlVcpSupport -Control $colorTempSRGB -Monitor $Monitor -Code ([MonitorAPI]::VCP_COLOR_PRESET) -Value ([MonitorAPI]::COLOR_PRESET_SRGB)
+    Set-ControlVcpSupport -Control $dynamicContrastOff -Monitor $Monitor -Code ([MonitorAPI]::VCP_DISPLAY_MODE) -Value ([MonitorAPI]::DISPLAY_MODE_STANDARD)
+    Set-ControlVcpSupport -Control $dynamicContrastOn -Monitor $Monitor -Code ([MonitorAPI]::VCP_DISPLAY_MODE) -Value ([MonitorAPI]::DISPLAY_MODE_DYNAMIC_CONTRAST)
+    Set-ControlVcpSupport -Control $pictureModeWeb -Monitor $Monitor -Code ([MonitorAPI]::VCP_DISPLAY_MODE) -Value ([MonitorAPI]::DISPLAY_MODE_PRODUCTIVITY)
+    Set-ControlVcpSupport -Control $pictureModeCinema -Monitor $Monitor -Code ([MonitorAPI]::VCP_DISPLAY_MODE) -Value ([MonitorAPI]::DISPLAY_MODE_MOVIE)
+    Set-ControlVcpSupport -Control $pictureModeGame -Monitor $Monitor -Code ([MonitorAPI]::VCP_DISPLAY_MODE) -Value ([MonitorAPI]::DISPLAY_MODE_GAMES)
+    Set-ControlVcpSupport -Control $pipPbpOffBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_PIP_MODE) -Value ([MonitorAPI]::PIP_MODE_OFF)
+    Set-ControlVcpSupport -Control $pipModeBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_PIP_MODE) -Value ([MonitorAPI]::PIP_MODE_UPPER_RIGHT)
+    Set-ControlVcpSupport -Control $pbpModeBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_PIP_MODE) -Value ([MonitorAPI]::PIP_MODE_PBP_SPLIT)
+    Set-ControlVcpSupport -Control $pipSecondaryDpBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_PIP_SECONDARY_SOURCE) -Value ([MonitorAPI]::PIP_SECONDARY_DISPLAYPORT)
+    Set-ControlVcpSupport -Control $pipSecondaryHdmi1Btn -Monitor $Monitor -Code ([MonitorAPI]::VCP_PIP_SECONDARY_SOURCE) -Value ([MonitorAPI]::PIP_SECONDARY_HDMI1)
+    Set-ControlVcpSupport -Control $pipSecondaryHdmi2Btn -Monitor $Monitor -Code ([MonitorAPI]::VCP_PIP_SECONDARY_SOURCE) -Value ([MonitorAPI]::PIP_SECONDARY_HDMI2)
+    $brightnessSupported = Test-MonitorSupportsVcp -Monitor $Monitor -Code ([MonitorAPI]::VCP_BRIGHTNESS)
+    foreach ($control in @($presetDay, $presetNight, $presetAutoMode, $presetAmbientMode, $presetReset)) {
+        if ($control) {
+            $control.IsEnabled = [bool]$brightnessSupported
+            $control.ToolTip = if ($brightnessSupported) { $null } else { "Brightness VCP 0x10 is not reported in this monitor's capabilities." }
+        }
+    }
+    foreach ($item in @($inputSourceCombo.Items)) {
+        if ($null -ne $item.Tag) {
+            $supported = Test-MonitorSupportsVcpValue -Monitor $Monitor -Code ([MonitorAPI]::VCP_INPUT_SOURCE) -Value ([int]$item.Tag)
+            $item.IsEnabled = [bool]$supported
+            $item.ToolTip = if ($supported) { $null } else { "Input value 0x$("{0:X2}" -f [int]$item.Tag) is not reported in capabilities." }
+        }
+    }
+    Update-VcpPresetItems -Monitor $Monitor
+}
+
 function Wait-DdcWriteQueueIdle {
     param([int]$TimeoutMs = 1000)
     $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
@@ -854,12 +1029,14 @@ function Get-Monitors {
                                 if ([MonitorAPI]::CapabilitiesRequestAndCapabilitiesReply($pm.hPhysicalMonitor, $capStr, $capLen)) { $capabilities = $capStr.ToString() }
                             }
                         } catch {}
+                        $capabilityInfo = ConvertFrom-MonitorCapabilities -Capabilities $capabilities
                         $script:PhysicalMonitors += [PSCustomObject]@{
                             Handle = $pm.hPhysicalMonitor; HMonitor = $hMonitor; Name = $name; Index = $monitorIndex
                             DeviceName = $monInfo.DeviceName; Width = $devMode.dmPelsWidth; Height = $devMode.dmPelsHeight
                             RefreshRate = $devMode.dmDisplayFrequency; IsPrimary = ($monInfo.Flags -band [MonitorAPI]::MONITORINFOF_PRIMARY) -ne 0
                             Left = $monInfo.Monitor.Left; Top = $monInfo.Monitor.Top; Right = $monInfo.Monitor.Right
                             Bottom = $monInfo.Monitor.Bottom; Capabilities = $capabilities
+                            CapabilitiesKnown = [bool]$capabilityInfo.Known; SupportedVcpCodes = $capabilityInfo.Codes
                         }
                         $monitorIndex++
                     }
@@ -874,6 +1051,7 @@ function Get-Monitors {
             Handle = [IntPtr]::Zero; HMonitor = [IntPtr]::Zero; Name = $fallbackName; Index = 1
             DeviceName = $fallbackDevice; Width = 1920; Height = 1080; RefreshRate = 60; IsPrimary = $true
             Left = 0; Top = 0; Right = 1920; Bottom = 1080; Capabilities = ""
+            CapabilitiesKnown = $false; SupportedVcpCodes = @{}
         }
     }
 }
@@ -1490,7 +1668,7 @@ try {
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.25.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
+        Title="MonitorControl Pro v3.26.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
         Background="#0a0a0a" WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
     <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
@@ -1624,7 +1802,7 @@ try {
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
             <TextBlock Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
-            <TextBlock Text="v3.25.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
+            <TextBlock Text="v3.26.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal">
             <CheckBox x:Name="ApplyAllCheckbox" Content="All Monitors" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -1798,7 +1976,7 @@ try {
                 <Border Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid>
                     <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="6"/><ColumnDefinition Width="60"/><ColumnDefinition Width="6"/><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                     <TextBlock Text="VCP Code:" FontSize="10" Foreground="#909090" VerticalAlignment="Center"/>
-                    <TextBox x:Name="VCPCodeBox" Grid.Column="2" Text="10" VerticalAlignment="Center"/>
+                    <TextBox x:Name="VCPCodeBox" Grid.Column="2" Text="0x10" VerticalAlignment="Center"/>
                     <ComboBox x:Name="VCPPresetCombo" Grid.Column="4"/>
                     <Button x:Name="VCPQueryBtn" Grid.Column="6" Content="Query" Style="{StaticResource AccBtn}" Padding="10,4"/>
                 </Grid></Border>
@@ -1807,11 +1985,12 @@ try {
                     <TextBox x:Name="VCPResultBox" Grid.Row="2" IsReadOnly="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Background="#111" FontFamily="Consolas" FontSize="10" AcceptsReturn="True"/>
                 </Grid></Border>
                 <Border Grid.Row="4" Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid>
-                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="6"/><ColumnDefinition Width="70"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="6"/><ColumnDefinition Width="70"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                     <TextBlock Text="Set Value:" FontSize="10" Foreground="#909090" VerticalAlignment="Center"/>
                     <TextBox x:Name="VCPSetValueBox" Grid.Column="2" Text="50" VerticalAlignment="Center"/>
                     <Button x:Name="VCPSetBtn" Grid.Column="4" Content="Set" Style="{StaticResource GreenBtn}" Padding="10,4"/>
                     <Button x:Name="VCPScanBtn" Grid.Column="6" Content="Scan All" Style="{StaticResource Btn}" Padding="10,4"/>
+                    <CheckBox x:Name="VCPScanCapabilitiesOnlyCheckbox" Grid.Column="8" Content="Caps only" IsChecked="True" VerticalAlignment="Center"/>
                 </Grid></Border>
             </Grid></Border>
         </TabItem>
@@ -1981,6 +2160,7 @@ $fpsOverlayStatusText = $window.FindName("FpsOverlayStatusText"); $fpsOverlaySta
 $gammaSlider = $window.FindName("GammaSlider"); $gammaValue = $window.FindName("GammaValue")
 $vcpCodeBox = $window.FindName("VCPCodeBox"); $vcpPresetCombo = $window.FindName("VCPPresetCombo"); $vcpQueryBtn = $window.FindName("VCPQueryBtn")
 $vcpResultBox = $window.FindName("VCPResultBox"); $vcpSetValueBox = $window.FindName("VCPSetValueBox"); $vcpSetBtn = $window.FindName("VCPSetBtn"); $vcpScanBtn = $window.FindName("VCPScanBtn")
+$vcpScanCapabilitiesOnlyCheckbox = $window.FindName("VCPScanCapabilitiesOnlyCheckbox")
 $profileNameBox = $window.FindName("ProfileNameBox"); $profilesList = $window.FindName("ProfilesList")
 $saveProfileBtn = $window.FindName("SaveProfileBtn"); $loadProfileBtn = $window.FindName("LoadProfileBtn"); $deleteProfileBtn = $window.FindName("DeleteProfileBtn")
 $exportProfilesBtn = $window.FindName("ExportProfilesBtn"); $importProfilesBtn = $window.FindName("ImportProfilesBtn")
@@ -2065,10 +2245,14 @@ function Load-MonitorSettings {
         @(@{N="HDMI 1";V=0x11},@{N="HDMI 2";V=0x12},@{N="DisplayPort 1";V=0x0F},@{N="DisplayPort 2";V=0x10},@{N="USB-C";V=0x13},@{N="DVI";V=0x03},@{N="VGA";V=0x01}) | ForEach-Object {
             $item = New-Object System.Windows.Controls.ComboBoxItem; $item.Content = $_.N; $item.Tag = $_.V; $inputSourceCombo.Items.Add($item) | Out-Null
         }
-        $capabilitiesBox.Text = if ($mon.Capabilities) { $mon.Capabilities } else { "DDC/CI capabilities not available" }
+        $capabilityPrefix = if ([bool]$mon.CapabilitiesKnown) { "Parsed VCP codes: $($mon.SupportedVcpCodes.Count)" } else { "Parsed VCP codes: unknown" }
+        $capabilitiesBox.Text = if ($mon.Capabilities) { "$capabilityPrefix`n`n$($mon.Capabilities)" } else { "DDC/CI capabilities not available" }
+        Update-CapabilityControls -Monitor $mon
         if ($h -eq [IntPtr]::Zero -and $script:WmiBrightnessAvailable) {
             $wmiBrightness = Get-WmiBrightness
             if ($null -ne $wmiBrightness) {
+                foreach ($control in @($contrastSlider,$redSlider,$greenSlider,$blueSlider,$volumeSlider,$muteCheckbox,$sharpnessSlider,$inputSourceCombo,$powerOffBtn,$powerStandbyBtn,$powerOnBtn,$resetColorBtn,$factoryResetBtn,$allMonitorsStandbyBtn,$colorTempWarm,$colorTemp6500,$colorTempCool,$colorTempSRGB,$dynamicContrastOff,$dynamicContrastOn,$pictureModeWeb,$pictureModeCinema,$pictureModeGame,$pipPbpOffBtn,$pipModeBtn,$pbpModeBtn,$pipSecondaryDpBtn,$pipSecondaryHdmi1Btn,$pipSecondaryHdmi2Btn)) { if ($control) { $control.IsEnabled = $false } }
+                foreach ($control in @($brightnessSlider,$presetDay,$presetNight,$presetAutoMode,$presetAmbientMode,$presetReset)) { if ($control) { $control.IsEnabled = $true; $control.ToolTip = "Integrated display brightness via WMI" } }
                 $brightnessSlider.Maximum = 100; $brightnessSlider.Value = $wmiBrightness; $brightnessValue.Text = $wmiBrightness
                 $capabilitiesBox.Text = "Integrated display brightness via WMI"
                 Update-Status "$($mon.Name) via WMI"; Update-TrayPopupState; Update-TrayIconText
@@ -2223,7 +2407,7 @@ function Export-ProfileBundle {
 
         $manifest = [PSCustomObject]@{
             BundleSchemaVersion = $script:ProfileBundleSchemaVersion
-            AppVersion = "3.25.0"
+            AppVersion = "3.26.0"
             ProfileSchemaVersion = $script:ProfileSchemaVersion
             ExportedAt = (Get-Date).ToString("o")
             ProfileCount = $exportedProfiles.Count
@@ -3250,9 +3434,7 @@ function Hide-FpsOverlay {
     Update-Status "FPS overlay stopped"
 }
 
-# Populate VCP preset combo
-foreach ($code in ($script:VCPCodeDescriptions.Keys | Sort-Object)) { $item = New-Object System.Windows.Controls.ComboBoxItem; $item.Content = "0x{0:X2} - {1}" -f $code, $script:VCPCodeDescriptions[$code]; $item.Tag = $code; $vcpPresetCombo.Items.Add($item) | Out-Null }
-$vcpPresetCombo.SelectedIndex = 0
+Update-VcpPresetItems -Monitor $null
 
 # Event handlers
 $applyAllCheckbox.Add_Checked({ Set-ApplyToAllMode -Enabled $true }); $applyAllCheckbox.Add_Unchecked({ Set-ApplyToAllMode -Enabled $false })
@@ -3322,12 +3504,24 @@ $vcpQueryBtn.Add_Click({
 $vcpSetBtn.Add_Click({
     $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]; if ($mon.Handle -eq [IntPtr]::Zero) { return }
     try { $codeText = $vcpCodeBox.Text.Trim(); $code = if ($codeText -match '^0x') { [Convert]::ToInt32($codeText, 16) } else { [int]$codeText }; $value = [uint32]$vcpSetValueBox.Text
+        if (-not (Test-MonitorSupportsVcp -Monitor $mon -Code $code)) { Update-Status "VCP 0x$("{0:X2}" -f $code) is not in capabilities"; return }
         if (Set-VCPValue -Handle $mon.Handle -VCPCode ([byte]$code) -Value $value -MonitorName $mon.Name) { Update-Status "Set VCP 0x$("{0:X2}" -f $code) = $value"; $vcpQueryBtn.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) }
     } catch { Update-Status "Error: $_" }
 })
 $vcpScanBtn.Add_Click({
     $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]; if ($mon.Handle -eq [IntPtr]::Zero) { $vcpResultBox.Text = "No DDC/CI"; return }
-    Start-VcpReadWorker -Handle $mon.Handle -Codes @($script:VCPCodeDescriptions.Keys | Sort-Object) -Mode "Scan" -MonitorName $mon.Name -ReadRetries $script:DdcScanRetryCount
+    $capabilitiesOnly = [bool]$vcpScanCapabilitiesOnlyCheckbox.IsChecked
+    if ($capabilitiesOnly) {
+        if (-not [bool]$mon.CapabilitiesKnown -or $mon.SupportedVcpCodes.Count -eq 0) {
+            $vcpResultBox.Text = "Capabilities VCP list is not available for $($mon.Name). Clear Caps only to probe the full table."
+            Update-Status "Capabilities VCP list unavailable"
+            return
+        }
+        $codes = @($mon.SupportedVcpCodes.Keys | Sort-Object)
+    } else {
+        $codes = @($script:VCPCodeDescriptions.Keys | Sort-Object)
+    }
+    Start-VcpReadWorker -Handle $mon.Handle -Codes $codes -Mode "Scan" -MonitorName $mon.Name -ReadRetries $script:DdcScanRetryCount
 })
 
 $saveProfileBtn.Add_Click({
