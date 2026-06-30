@@ -59,13 +59,6 @@ PowerShell/WPF utility for DDC/CI monitor control â€” brightness, contrast,
   Complexity: M
 
 ### P1
-- [ ] P1 - Parse capabilities into per-monitor supported controls
-  Why: The app stores the raw capabilities string but still enables fixed controls and scans a preset table, which can send unsupported or write-only VCP codes.
-  Evidence: `MonitorControlPro.ps1:217`, `MonitorControlPro.ps1:837`, `MonitorControlPro.ps1:1536`; ddcutil and BetterDisplay both center DDC behavior around capabilities/auto-configuration.
-  Touches: monitor model object, VCP Explorer, main control enablement, input/power/color preset UI.
-  Acceptance: Supported VCP codes and possible values are parsed from capabilities where available, unsupported controls are disabled or marked unknown, and VCP scan can switch between capabilities-only and full-probe modes.
-  Complexity: L
-
 - [ ] P1 - Add stable monitor identity and user labels
   Why: Profiles and automation currently depend on current monitor order, which can change after docking, GPU driver resets, sleep, or cable movement.
   Evidence: `MonitorControlPro.ps1:224`, `MonitorControlPro.ps1:776`; ControlMyMonitor exposes monitor strings/short IDs, BetterDisplay exposes EDID details, and Monitorian supports user-renamed monitor labels.
