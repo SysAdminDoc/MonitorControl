@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.24.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro v3.25.0 - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.24.0 - Enhanced with monitor handle lifecycle cleanup
+    Version: 3.25.0 - Enhanced with hardened JSON storage
 #>
 
 param([switch]$StartMinimized, [string]$LoadProfile)
@@ -566,8 +566,115 @@ public class AmdAdlInterop
 
 try { Add-Type -TypeDefinition $nativeCode -ErrorAction SilentlyContinue } catch {}
 
+function Set-DeferredStatus {
+    param([string]$Message)
+    if ([string]::IsNullOrWhiteSpace($Message)) { return }
+    try {
+        if ($statusText) { Update-Status $Message; return }
+    } catch {}
+    $script:PendingStatusMessage = $Message
+}
+
+function Test-JsonFileValid {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    try {
+        Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json | Out-Null
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Move-CorruptJsonFile {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return "" }
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $dir = [System.IO.Path]::GetDirectoryName($fullPath)
+    $leaf = [System.IO.Path]::GetFileName($fullPath)
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $target = Join-Path $dir "$leaf.corrupt-$stamp"
+    $suffix = 0
+    while (Test-Path -LiteralPath $target) {
+        $suffix++
+        $target = Join-Path $dir "$leaf.corrupt-$stamp-$suffix"
+    }
+    try {
+        Move-Item -LiteralPath $fullPath -Destination $target -Force
+        return $target
+    } catch {
+        return ""
+    }
+}
+
+function Read-JsonFileSafely {
+    param([string]$Path, [string]$Label = "JSON")
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    try {
+        return (Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json)
+    } catch {
+        $quarantinePath = Move-CorruptJsonFile -Path $Path
+        $backupPath = "$Path.bak"
+        $leaf = if ($quarantinePath) { Split-Path -Path $quarantinePath -Leaf } else { "quarantine failed" }
+        if (Test-Path -LiteralPath $backupPath) {
+            try {
+                $backup = Get-Content -LiteralPath $backupPath -Raw | ConvertFrom-Json
+                Set-DeferredStatus "$Label JSON corrupt; quarantined to $leaf and loaded backup"
+                return $backup
+            } catch {}
+        }
+        Set-DeferredStatus "$Label JSON corrupt; quarantined to $leaf"
+        return $null
+    }
+}
+
+function Write-JsonFileSafely {
+    param([string]$Path, $Data, [int]$Depth = 4)
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $dir = [System.IO.Path]::GetDirectoryName($fullPath)
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $leaf = [System.IO.Path]::GetFileName($fullPath)
+    $tempPath = Join-Path $dir ".$leaf.$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+        $json = $Data | ConvertTo-Json -Depth $Depth
+        $encoding = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($tempPath, ($json + [Environment]::NewLine), $encoding)
+        $backupPath = "$fullPath.bak"
+        if (Test-Path -LiteralPath $fullPath) {
+            if (Test-JsonFileValid -Path $fullPath) {
+                [System.IO.File]::Replace($tempPath, $fullPath, $backupPath)
+            } else {
+                Move-CorruptJsonFile -Path $fullPath | Out-Null
+                [System.IO.File]::Move($tempPath, $fullPath)
+            }
+        } else {
+            [System.IO.File]::Move($tempPath, $fullPath)
+        }
+        return $true
+    } catch {
+        if (Test-Path -LiteralPath $tempPath) { Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue }
+        Set-DeferredStatus "JSON write failed: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Get-SafeProfileName {
+    param([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return "" }
+    $trimmed = $Name.Trim()
+    if ([System.IO.Path]::GetFileName($trimmed) -ne $trimmed) { return "" }
+    $safeName = [System.IO.Path]::GetFileNameWithoutExtension($trimmed)
+    if ([string]::IsNullOrWhiteSpace($safeName)) { return "" }
+    if ($safeName.TrimEnd(" ", ".") -ne $safeName) { return "" }
+    if ($safeName -eq "." -or $safeName -eq "..") { return "" }
+    if ($safeName.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) { return "" }
+    if ($script:ProfileMetadataFiles -and $script:ProfileMetadataFiles -contains "$safeName.json") { return "" }
+    return $safeName
+}
+
 $script:PhysicalMonitors = @()
 $script:CurrentMonitorIndex = 0
+$script:PendingStatusMessage = ""
 $script:HasNvidia = $false
 $script:HasAmd = $false
 $script:HasCpuTempMonitor = $false
@@ -606,10 +713,10 @@ $script:DefaultProfilesPath = "$env:APPDATA\MonitorControlPro"
 $script:ProfileStorageSettingsPath = Join-Path $script:DefaultProfilesPath "profile-storage.json"
 $script:ProfilesPath = $script:DefaultProfilesPath
 $script:ProfileStorageMode = "Local"
-if (-not (Test-Path $script:DefaultProfilesPath)) { New-Item -ItemType Directory -Path $script:DefaultProfilesPath -Force | Out-Null }
-if (Test-Path $script:ProfileStorageSettingsPath) {
+if (-not (Test-Path -LiteralPath $script:DefaultProfilesPath)) { New-Item -ItemType Directory -Path $script:DefaultProfilesPath -Force | Out-Null }
+if (Test-Path -LiteralPath $script:ProfileStorageSettingsPath) {
     try {
-        $profileStorage = Get-Content -Path $script:ProfileStorageSettingsPath -Raw | ConvertFrom-Json
+        $profileStorage = Read-JsonFileSafely -Path $script:ProfileStorageSettingsPath -Label "Profile storage"
         $configuredPath = [string]$profileStorage.ProfilePath
         if (-not [string]::IsNullOrWhiteSpace($configuredPath)) {
             $script:ProfilesPath = [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($configuredPath))
@@ -1369,7 +1476,7 @@ function Get-CpuTemperature {
 }
 
 try {
-    if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path $script:ProfilesPath -Force | Out-Null }
+    if (-not (Test-Path -LiteralPath $script:ProfilesPath)) { New-Item -ItemType Directory -Path $script:ProfilesPath -Force | Out-Null }
 } catch {
     $script:ProfilesPath = $script:DefaultProfilesPath
     $script:ProfileStorageMode = "Local"
@@ -1378,12 +1485,12 @@ try {
     $script:IdleDimSettingsPath = Join-Path $script:ProfilesPath "idle-dim.json"
     $script:BatteryProfileSettingsPath = Join-Path $script:ProfilesPath "battery-profile.json"
     $script:ProfileExportsPath = Join-Path $script:ProfilesPath "exports"
-    if (-not (Test-Path $script:ProfilesPath)) { New-Item -ItemType Directory -Path $script:ProfilesPath -Force | Out-Null }
+    if (-not (Test-Path -LiteralPath $script:ProfilesPath)) { New-Item -ItemType Directory -Path $script:ProfilesPath -Force | Out-Null }
 }
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.24.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
+        Title="MonitorControl Pro v3.25.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
         Background="#0a0a0a" WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
     <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
@@ -1517,7 +1624,7 @@ try {
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
             <TextBlock Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
-            <TextBlock Text="v3.24.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
+            <TextBlock Text="v3.25.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal">
             <CheckBox x:Name="ApplyAllCheckbox" Content="All Monitors" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -1899,6 +2006,7 @@ $gammaBlueSlider = $window.FindName("GammaBlueSlider"); $gammaBlueValue = $windo
 $capabilitiesBox = $window.FindName("CapabilitiesBox"); $statusText = $window.FindName("StatusText"); $autoModeText = $window.FindName("AutoModeText")
 
 function Update-Status { param([string]$Message); $statusText.Text = $Message }
+if ($script:PendingStatusMessage) { Update-Status $script:PendingStatusMessage; $script:PendingStatusMessage = "" }
 Start-DdcWriteResultTimer
 
 function Draw-MonitorLayout {
@@ -1981,7 +2089,7 @@ function Load-MonitorSettings {
 
 function Refresh-Monitors { Get-Monitors; if ($script:CurrentMonitorIndex -ge $script:PhysicalMonitors.Count) { $script:CurrentMonitorIndex = 0 }; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList }
 function Get-UserProfileFiles {
-    if (-not (Test-Path $script:ProfilesPath)) { return @() }
+    if (-not (Test-Path -LiteralPath $script:ProfilesPath)) { return @() }
     return @(Get-ChildItem -Path $script:ProfilesPath -Filter "*.json" -File |
         Where-Object { $script:ProfileMetadataFiles -notcontains $_.Name } |
         Sort-Object -Property BaseName)
@@ -2034,25 +2142,48 @@ function ConvertTo-CurrentProfileSchema {
 
 function Save-ProfileObject {
     param($Profile)
-    $safeName = [System.IO.Path]::GetFileNameWithoutExtension([string]$Profile.Name)
-    if ([string]::IsNullOrWhiteSpace($safeName)) { return $false }
+    $safeName = Get-SafeProfileName -Name ([string]$Profile.Name)
+    if ([string]::IsNullOrWhiteSpace($safeName)) {
+        Update-Status "Invalid profile name"
+        return $false
+    }
+    try { $Profile.Name = $safeName } catch {}
     $path = Join-Path $script:ProfilesPath "$safeName.json"
-    $Profile | ConvertTo-Json -Depth 4 | Set-Content -Path $path -Encoding UTF8
-    return $true
+    return (Write-JsonFileSafely -Path $path -Data $Profile -Depth 4)
 }
 
 function Read-ProfileObject {
     param([string]$Name)
-    $path = Join-Path $script:ProfilesPath "$Name.json"
-    if (-not (Test-Path $path)) { return $null }
-    $profile = Get-Content $path -Raw | ConvertFrom-Json
-    $schema = if ($profile.PSObject.Properties.Name -contains "SchemaVersion") { [int]$profile.SchemaVersion } else { 1 }
-    $converted = ConvertTo-CurrentProfileSchema -Profile $profile -FallbackName $Name
-    if ($schema -lt $script:ProfileSchemaVersion) {
-        Save-ProfileObject -Profile $converted | Out-Null
-        Update-Status "Migrated profile '$Name' to schema v$script:ProfileSchemaVersion"
+    $safeName = Get-SafeProfileName -Name $Name
+    if ([string]::IsNullOrWhiteSpace($safeName)) {
+        Update-Status "Invalid profile name"
+        return $null
     }
-    return $converted
+    $path = Join-Path $script:ProfilesPath "$safeName.json"
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    $profile = Read-JsonFileSafely -Path $path -Label "Profile '$safeName'"
+    if ($null -eq $profile) { return $null }
+    try {
+        $schema = if ($profile.PSObject.Properties.Name -contains "SchemaVersion") { [int]$profile.SchemaVersion } else { 1 }
+        $converted = ConvertTo-CurrentProfileSchema -Profile $profile -FallbackName $safeName
+        if ($schema -lt $script:ProfileSchemaVersion) {
+            Save-ProfileObject -Profile $converted | Out-Null
+            Update-Status "Migrated profile '$safeName' to schema v$script:ProfileSchemaVersion"
+        }
+        return $converted
+    } catch {
+        $quarantinePath = Move-CorruptJsonFile -Path $path
+        $leaf = if ($quarantinePath) { Split-Path -Path $quarantinePath -Leaf } else { "quarantine failed" }
+        Update-Status "Profile '$safeName' invalid; quarantined to $leaf"
+        $backupPath = "$path.bak"
+        if (Test-Path -LiteralPath $backupPath) {
+            $backupProfile = Read-JsonFileSafely -Path $backupPath -Label "Profile '$safeName' backup"
+            if ($null -ne $backupProfile) {
+                try { return (ConvertTo-CurrentProfileSchema -Profile $backupProfile -FallbackName $safeName) } catch {}
+            }
+        }
+        return $null
+    }
 }
 
 function Export-ProfileBundle {
@@ -2092,7 +2223,7 @@ function Export-ProfileBundle {
 
         $manifest = [PSCustomObject]@{
             BundleSchemaVersion = $script:ProfileBundleSchemaVersion
-            AppVersion = "3.24.0"
+            AppVersion = "3.25.0"
             ProfileSchemaVersion = $script:ProfileSchemaVersion
             ExportedAt = (Get-Date).ToString("o")
             ProfileCount = $exportedProfiles.Count
@@ -2132,12 +2263,13 @@ function Import-ProfileBundle {
 
         foreach ($entry in $entries) {
             $fallbackName = [System.IO.Path]::GetFileNameWithoutExtension($entry.Name)
-            if ([string]::IsNullOrWhiteSpace($fallbackName)) { $skipped++; continue }
+            $safeFallbackName = Get-SafeProfileName -Name $fallbackName
+            if ([string]::IsNullOrWhiteSpace($safeFallbackName)) { $skipped++; continue }
             $reader = $null
             try {
                 $reader = New-Object System.IO.StreamReader($entry.Open())
                 $rawProfile = $reader.ReadToEnd() | ConvertFrom-Json
-                $profile = ConvertTo-CurrentProfileSchema -Profile $rawProfile -FallbackName $fallbackName
+                $profile = ConvertTo-CurrentProfileSchema -Profile $rawProfile -FallbackName $safeFallbackName
                 if (Save-ProfileObject -Profile $profile) { $imported++ } else { $skipped++ }
             } catch {
                 $skipped++
@@ -2168,7 +2300,7 @@ function Set-ProfileStorageRoot {
     try {
         $expandedPath = [Environment]::ExpandEnvironmentVariables($Path)
         $fullPath = [System.IO.Path]::GetFullPath($expandedPath)
-        if (-not (Test-Path $fullPath)) { New-Item -ItemType Directory -Path $fullPath -Force | Out-Null }
+        if (-not (Test-Path -LiteralPath $fullPath)) { New-Item -ItemType Directory -Path $fullPath -Force | Out-Null }
         $script:ProfilesPath = $fullPath
         $script:ProfileStorageMode = $Mode
         $script:AppProfileRulesPath = Join-Path $script:ProfilesPath "app-profile-rules.json"
@@ -2184,13 +2316,13 @@ function Set-ProfileStorageRoot {
 }
 
 function Save-ProfileStorageSettings {
-    if (-not (Test-Path $script:DefaultProfilesPath)) { New-Item -ItemType Directory -Path $script:DefaultProfilesPath -Force | Out-Null }
+    if (-not (Test-Path -LiteralPath $script:DefaultProfilesPath)) { New-Item -ItemType Directory -Path $script:DefaultProfilesPath -Force | Out-Null }
     $payload = [PSCustomObject]@{
         Mode = $script:ProfileStorageMode
         ProfilePath = $script:ProfilesPath
         UpdatedAt = (Get-Date).ToString("o")
     }
-    $payload | ConvertTo-Json | Set-Content -Path $script:ProfileStorageSettingsPath -Encoding UTF8
+    Write-JsonFileSafely -Path $script:ProfileStorageSettingsPath -Data $payload -Depth 4 | Out-Null
 }
 
 function Reset-ProfileBackedAutomationState {
@@ -2265,9 +2397,10 @@ function Get-ForegroundProcessExe {
 function Load-AppProfileRules {
     $script:AppProfileEnabled = $false
     $script:AppProfileRules = @()
-    if (-not (Test-Path $script:AppProfileRulesPath)) { return }
+    if (-not (Test-Path -LiteralPath $script:AppProfileRulesPath)) { return }
     try {
-        $data = Get-Content -Path $script:AppProfileRulesPath -Raw | ConvertFrom-Json
+        $data = Read-JsonFileSafely -Path $script:AppProfileRulesPath -Label "App profile rules"
+        if ($null -eq $data) { return }
         $script:AppProfileEnabled = [bool]$data.Enabled
         foreach ($rule in @($data.Rules)) {
             $exe = Normalize-AppExeName -ExeName ([string]$rule.Exe)
@@ -2284,7 +2417,7 @@ function Save-AppProfileRules {
         Enabled = [bool]$script:AppProfileEnabled
         Rules = @($script:AppProfileRules)
     }
-    $payload | ConvertTo-Json -Depth 4 | Set-Content -Path $script:AppProfileRulesPath -Encoding UTF8
+    Write-JsonFileSafely -Path $script:AppProfileRulesPath -Data $payload -Depth 4 | Out-Null
 }
 
 function Update-ProfileCombo {
@@ -2484,9 +2617,10 @@ function Update-ScheduleTimeline {
 function Load-ProfileSchedules {
     $script:ProfileScheduleEnabled = $false
     $script:ProfileSchedules = @()
-    if (-not (Test-Path $script:ProfileScheduleRulesPath)) { return }
+    if (-not (Test-Path -LiteralPath $script:ProfileScheduleRulesPath)) { return }
     try {
-        $data = Get-Content -Path $script:ProfileScheduleRulesPath -Raw | ConvertFrom-Json
+        $data = Read-JsonFileSafely -Path $script:ProfileScheduleRulesPath -Label "Profile schedule"
+        if ($null -eq $data) { return }
         $script:ProfileScheduleEnabled = [bool]$data.Enabled
         foreach ($rule in @($data.Rules)) {
             $time = Normalize-ScheduleTime -TimeText ([string]$rule.Time)
@@ -2503,7 +2637,7 @@ function Save-ProfileSchedules {
         Enabled = [bool]$script:ProfileScheduleEnabled
         Rules = @($script:ProfileSchedules | Sort-Object -Property Time)
     }
-    $payload | ConvertTo-Json -Depth 4 | Set-Content -Path $script:ProfileScheduleRulesPath -Encoding UTF8
+    Write-JsonFileSafely -Path $script:ProfileScheduleRulesPath -Data $payload -Depth 4 | Out-Null
 }
 
 function Update-ScheduleControls {
@@ -2562,9 +2696,10 @@ function Start-ProfileScheduleWatcher {
 }
 
 function Load-IdleDimSettings {
-    if (-not (Test-Path $script:IdleDimSettingsPath)) { return }
+    if (-not (Test-Path -LiteralPath $script:IdleDimSettingsPath)) { return }
     try {
-        $data = Get-Content -Path $script:IdleDimSettingsPath -Raw | ConvertFrom-Json
+        $data = Read-JsonFileSafely -Path $script:IdleDimSettingsPath -Label "Idle dim settings"
+        if ($null -eq $data) { return }
         $script:IdleDimEnabled = [bool]$data.Enabled
         $script:IdleDimMinutes = [Math]::Max(1, [Math]::Min(240, [int]$data.Minutes))
         $script:IdleDimBrightness = [Math]::Max(0, [Math]::Min(100, [int]$data.Brightness))
@@ -2581,7 +2716,7 @@ function Save-IdleDimSettings {
         Brightness = [int]$script:IdleDimBrightness
         RestoreOnActivity = [bool]$script:IdleDimRestoreOnActivity
     }
-    $payload | ConvertTo-Json | Set-Content -Path $script:IdleDimSettingsPath -Encoding UTF8
+    Write-JsonFileSafely -Path $script:IdleDimSettingsPath -Data $payload -Depth 4 | Out-Null
 }
 
 function Update-IdleDimControls {
@@ -2668,9 +2803,10 @@ function Start-IdleDimWatcher {
 }
 
 function Load-BatteryProfileSettings {
-    if (-not (Test-Path $script:BatteryProfileSettingsPath)) { return }
+    if (-not (Test-Path -LiteralPath $script:BatteryProfileSettingsPath)) { return }
     try {
-        $data = Get-Content -Path $script:BatteryProfileSettingsPath -Raw | ConvertFrom-Json
+        $data = Read-JsonFileSafely -Path $script:BatteryProfileSettingsPath -Label "Battery profile settings"
+        if ($null -eq $data) { return }
         $script:BatteryProfileEnabled = [bool]$data.Enabled
         $script:BatteryBrightness = [Math]::Max(0, [Math]::Min(100, [int]$data.BatteryBrightness))
         $script:AcBrightness = [Math]::Max(0, [Math]::Min(100, [int]$data.AcBrightness))
@@ -2685,7 +2821,7 @@ function Save-BatteryProfileSettings {
         BatteryBrightness = [int]$script:BatteryBrightness
         AcBrightness = [int]$script:AcBrightness
     }
-    $payload | ConvertTo-Json | Set-Content -Path $script:BatteryProfileSettingsPath -Encoding UTF8
+    Write-JsonFileSafely -Path $script:BatteryProfileSettingsPath -Data $payload -Depth 4 | Out-Null
 }
 
 function Read-BatteryProfileSettingsFromUI {
@@ -3206,7 +3342,10 @@ $loadProfileBtn.Add_Click({
 $deleteProfileBtn.Add_Click({
     if ($profilesList.SelectedItem -ne $null -and [System.Windows.MessageBox]::Show("Delete '$($profilesList.SelectedItem)'?", "Delete", "YesNo", "Question") -eq "Yes") {
         $deletedProfile = [string]$profilesList.SelectedItem
-        Remove-Item "$script:ProfilesPath\$deletedProfile.json" -ErrorAction SilentlyContinue
+        $safeDeletedProfile = Get-SafeProfileName -Name $deletedProfile
+        if ($safeDeletedProfile) {
+            Remove-Item -LiteralPath (Join-Path $script:ProfilesPath "$safeDeletedProfile.json") -ErrorAction SilentlyContinue
+        }
         $script:AppProfileRules = @($script:AppProfileRules | Where-Object { $_.Profile -ne $deletedProfile })
         $script:ProfileSchedules = @($script:ProfileSchedules | Where-Object { $_.Profile -ne $deletedProfile })
         Save-AppProfileRules
@@ -3465,6 +3604,12 @@ if ($StartMinimized) {
         }
     })
 }
-if ($LoadProfile -and (Test-Path "$script:ProfilesPath\$LoadProfile.json")) { $profilesList.SelectedItem = $LoadProfile; $loadProfileBtn.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) }
+if ($LoadProfile) {
+    $safeLoadProfile = Get-SafeProfileName -Name $LoadProfile
+    if ($safeLoadProfile -and (Test-Path -LiteralPath (Join-Path $script:ProfilesPath "$safeLoadProfile.json"))) {
+        $profilesList.SelectedItem = $safeLoadProfile
+        $loadProfileBtn.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
+    }
+}
 
 $window.ShowDialog() | Out-Null

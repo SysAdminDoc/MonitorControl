@@ -1,7 +1,7 @@
 # MonitorControl Pro
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v3.24.0-brightgreen" alt="Version v3.24.0">
+  <img src="https://img.shields.io/badge/Version-v3.25.0-brightgreen" alt="Version v3.25.0">
   <img src="https://img.shields.io/badge/PowerShell-5.1+-blue?logo=powershell" alt="PowerShell 5.1+">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/DDC%2FCI-Supported-green" alt="DDC/CI">
@@ -42,6 +42,7 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
   - Evening (6 PM - 9 PM): 60% brightness, slightly warm
   - Night (9 PM - 7 AM): 40% brightness, warm/reduced blue light
 - **Profile System** — Save and load custom configurations
+- **Hardened Profile Storage** — Profile and automation JSON writes use atomic replacement, valid backups, corrupt-file quarantine, and filename validation
 - **Command-line Support** — Launch minimized or with a specific profile
 
 ### Advanced Features
