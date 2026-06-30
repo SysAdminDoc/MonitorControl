@@ -59,13 +59,6 @@ PowerShell/WPF utility for DDC/CI monitor control â€” brightness, contrast,
   Complexity: M
 
 ### P1
-- [ ] P1 - Ship a signed portable release artifact
-  Why: README installation is direct script download/run, while peer Windows tools ship installer/Store/Winget style artifacts; unsigned scripts create avoidable trust friction.
-  Evidence: `README.md:65`; Twinkle Tray and Monitorian document package-manager installs, and Microsoft documents `Set-AuthenticodeSignature` for signing scripts.
-  Touches: release script, README install section, LICENSE packaging, artifact output.
-  Acceptance: Local release build produces a versioned ZIP containing the PS1, icon, README, LICENSE, SHA256SUMS, and an Authenticode signature when a certificate is available.
-  Complexity: M
-
 ### P2
 - [ ] P2 - Add a copyable DDC compatibility report
   Why: DDC failures are often cable, dock, driver, GPU, or monitor-firmware issues; users need a concise report before troubleshooting.
