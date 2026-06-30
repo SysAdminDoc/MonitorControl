@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.22.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro v3.23.0 - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.22.0 - Enhanced with async monitor setting refresh
+    Version: 3.23.0 - Enhanced with DDC/CI diagnostics and retry reporting
 #>
 
 param([switch]$StartMinimized, [string]$LoadProfile)
@@ -99,23 +99,96 @@ public class MonitorAPI
         public byte Code;
         public uint Value;
         public string Key;
+        public string MonitorName;
+    }
+
+    public class VcpWriteResult {
+        public string MonitorName;
+        public string Key;
+        public byte Code;
+        public uint Value;
+        public bool Success;
+        public int LastError;
+        public int Attempts;
+        public string ErrorMessage;
+        public DateTime TimestampUtc;
     }
 
     private static readonly object VcpWriteQueueLock = new object();
     private static readonly Dictionary<string, QueuedVcpWrite> QueuedVcpWrites = new Dictionary<string, QueuedVcpWrite>();
+    private static readonly object VcpWriteResultsLock = new object();
+    private static readonly List<VcpWriteResult> VcpWriteResults = new List<VcpWriteResult>();
     private static bool VcpWriteWorkerActive = false;
+    public const int VcpReadRetryCount = 2;
+    public const int VcpWriteRetryCount = 2;
+    public const int VcpRetryDelayMilliseconds = 60;
 
-    public static void QueueVCPWrite(IntPtr hMonitor, byte bVCPCode, uint dwNewValue, string coalesceKey)
+    public static void QueueVCPWrite(IntPtr hMonitor, byte bVCPCode, uint dwNewValue, string coalesceKey, string monitorName)
     {
         if (hMonitor == IntPtr.Zero) { return; }
         string key = String.IsNullOrEmpty(coalesceKey) ? hMonitor.ToInt64().ToString("X") + ":" + bVCPCode.ToString("X2") : coalesceKey;
         lock (VcpWriteQueueLock)
         {
-            QueuedVcpWrites[key] = new QueuedVcpWrite { Handle = hMonitor, Code = bVCPCode, Value = dwNewValue, Key = key };
+            QueuedVcpWrites[key] = new QueuedVcpWrite { Handle = hMonitor, Code = bVCPCode, Value = dwNewValue, Key = key, MonitorName = monitorName };
             if (!VcpWriteWorkerActive)
             {
                 VcpWriteWorkerActive = true;
                 ThreadPool.QueueUserWorkItem(ProcessQueuedVcpWrites);
+            }
+        }
+    }
+
+    public static bool ReadVCPWithRetry(IntPtr hMonitor, byte bVCPCode, int maxRetries, out uint pvct, out uint pdwCurrentValue, out uint pdwMaximumValue, out int lastError, out int attempts)
+    {
+        pvct = 0;
+        pdwCurrentValue = 0;
+        pdwMaximumValue = 0;
+        lastError = 0;
+        attempts = 0;
+        if (maxRetries < 0) { maxRetries = 0; }
+        for (int retry = 0; retry <= maxRetries; retry++)
+        {
+            attempts = retry + 1;
+            bool ok = GetVCPFeatureAndVCPFeatureReply(hMonitor, bVCPCode, out pvct, out pdwCurrentValue, out pdwMaximumValue);
+            if (ok)
+            {
+                lastError = 0;
+                return true;
+            }
+            lastError = Marshal.GetLastWin32Error();
+            if (retry < maxRetries) { Thread.Sleep(VcpRetryDelayMilliseconds); }
+        }
+        return false;
+    }
+
+    public static bool SetVCPWithRetry(IntPtr hMonitor, byte bVCPCode, uint dwNewValue, int maxRetries, out int lastError, out int attempts)
+    {
+        lastError = 0;
+        attempts = 0;
+        if (maxRetries < 0) { maxRetries = 0; }
+        for (int retry = 0; retry <= maxRetries; retry++)
+        {
+            attempts = retry + 1;
+            bool ok = SetVCPFeature(hMonitor, bVCPCode, dwNewValue);
+            if (ok)
+            {
+                lastError = 0;
+                return true;
+            }
+            lastError = Marshal.GetLastWin32Error();
+            if (retry < maxRetries) { Thread.Sleep(VcpRetryDelayMilliseconds); }
+        }
+        return false;
+    }
+
+    private static void AddVcpWriteResult(VcpWriteResult result)
+    {
+        lock (VcpWriteResultsLock)
+        {
+            VcpWriteResults.Add(result);
+            if (VcpWriteResults.Count > 100)
+            {
+                VcpWriteResults.RemoveRange(0, VcpWriteResults.Count - 100);
             }
         }
     }
@@ -138,9 +211,41 @@ public class MonitorAPI
             }
             foreach (QueuedVcpWrite write in batch)
             {
-                try { SetVCPFeature(write.Handle, write.Code, write.Value); } catch { }
+                int lastError = 0;
+                int attempts = 0;
+                bool success = false;
+                string errorMessage = "";
+                try
+                {
+                    success = SetVCPWithRetry(write.Handle, write.Code, write.Value, VcpWriteRetryCount, out lastError, out attempts);
+                }
+                catch (Exception ex)
+                {
+                    errorMessage = ex.Message;
+                }
+                AddVcpWriteResult(new VcpWriteResult {
+                    MonitorName = write.MonitorName,
+                    Key = write.Key,
+                    Code = write.Code,
+                    Value = write.Value,
+                    Success = success,
+                    LastError = lastError,
+                    Attempts = attempts,
+                    ErrorMessage = errorMessage,
+                    TimestampUtc = DateTime.UtcNow
+                });
                 Thread.Sleep(50);
             }
+        }
+    }
+
+    public static VcpWriteResult[] DrainVCPWriteResults()
+    {
+        lock (VcpWriteResultsLock)
+        {
+            VcpWriteResult[] copy = VcpWriteResults.ToArray();
+            VcpWriteResults.Clear();
+            return copy;
         }
     }
 
@@ -476,6 +581,7 @@ $script:VcpWorkerOutput = $null
 $script:VcpWorkerAsyncResult = $null
 $script:VcpWorkerTimer = $null
 $script:VcpWorkerMode = ""
+$script:VcpWorkerMonitorName = ""
 $script:VcpWorkerLastOutputCount = 0
 $script:MonitorSettingsWorker = $null
 $script:MonitorSettingsWorkerInput = $null
@@ -485,6 +591,12 @@ $script:MonitorSettingsWorkerTimer = $null
 $script:MonitorSettingsWorkerIndex = -1
 $script:MonitorSettingsWorkerName = ""
 $script:MonitorSettingsWorkerLastOutputCount = 0
+$script:DdcReadRetryCount = [MonitorAPI]::VcpReadRetryCount
+$script:DdcWriteRetryCount = [MonitorAPI]::VcpWriteRetryCount
+$script:DdcScanRetryCount = 0
+$script:DdcRecentErrors = New-Object System.Collections.Generic.List[object]
+$script:DdcRecentErrorLimit = 20
+$script:DdcWriteResultTimer = $null
 $script:DefaultProfilesPath = "$env:APPDATA\MonitorControlPro"
 $script:ProfileStorageSettingsPath = Join-Path $script:DefaultProfilesPath "profile-storage.json"
 $script:ProfilesPath = $script:DefaultProfilesPath
@@ -625,22 +737,88 @@ function Get-Monitors {
     }
 }
 
+function Format-DdcDiagnostic {
+    param([string]$Operation, [string]$Monitor, [int]$Code, $Value, [int]$LastError, [int]$Attempts, [string]$Message)
+    $desc = Get-VcpDescription -Code $Code
+    $monitorText = if ([string]::IsNullOrWhiteSpace($Monitor)) { "Unknown monitor" } else { $Monitor }
+    $attemptedValue = if ($null -eq $Value) { "read" } else { [string]$Value }
+    $retryCount = [Math]::Max(0, $Attempts - 1)
+    $messageText = if ([string]::IsNullOrWhiteSpace($Message)) { "" } else { "`nMessage: $Message" }
+    return "DDC/CI $Operation failed`nMonitor: $monitorText`nVCP: 0x$("{0:X2}" -f $Code) ($desc)`nAttempted value: $attemptedValue`nWin32 error: $LastError`nRetries: $retryCount$messageText"
+}
+
+function Update-DdcDiagnosticsText {
+    if (-not $vcpResultBox -or $script:DdcRecentErrors.Count -eq 0) { return }
+    if ($script:VcpWorker -and $script:VcpWorkerAsyncResult -and -not $script:VcpWorkerAsyncResult.IsCompleted) { return }
+    $recent = @($script:DdcRecentErrors | Sort-Object -Property Timestamp -Descending | Select-Object -First 8)
+    $vcpResultBox.Text = "DDC/CI Diagnostics (latest first)`n`n" + (($recent | ForEach-Object { $_.Summary }) -join "`n`n")
+}
+
+function Register-DdcDiagnostic {
+    param([string]$Operation, [string]$Monitor, [int]$Code, $Value, [int]$LastError, [int]$Attempts, [string]$Message, [switch]$SuppressStatus)
+    $summary = Format-DdcDiagnostic -Operation $Operation -Monitor $Monitor -Code $Code -Value $Value -LastError $LastError -Attempts $Attempts -Message $Message
+    $entry = [PSCustomObject]@{
+        Timestamp = Get-Date
+        Operation = $Operation
+        Monitor = $Monitor
+        Code = $Code
+        Value = $Value
+        LastError = $LastError
+        Attempts = $Attempts
+        Message = $Message
+        Summary = $summary
+    }
+    $script:DdcRecentErrors.Add($entry)
+    while ($script:DdcRecentErrors.Count -gt $script:DdcRecentErrorLimit) { $script:DdcRecentErrors.RemoveAt(0) }
+    Update-DdcDiagnosticsText
+    if (-not $SuppressStatus) {
+        Update-Status ("DDC/CI {0} failed: {1} 0x{2:X2} Win32 {3}" -f $Operation.ToLowerInvariant(), $Monitor, $Code, $LastError)
+    }
+    return $entry
+}
+
+function Drain-DdcWriteResults {
+    $results = @([MonitorAPI]::DrainVCPWriteResults())
+    foreach ($result in $results) {
+        if (-not [bool]$result.Success) {
+            Register-DdcDiagnostic -Operation "Write" -Monitor ([string]$result.MonitorName) -Code ([int]$result.Code) -Value ([uint32]$result.Value) -LastError ([int]$result.LastError) -Attempts ([int]$result.Attempts) -Message ([string]$result.ErrorMessage) | Out-Null
+        }
+    }
+}
+
+function Start-DdcWriteResultTimer {
+    if ($script:DdcWriteResultTimer) { $script:DdcWriteResultTimer.Start(); return }
+    $script:DdcWriteResultTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:DdcWriteResultTimer.Interval = [TimeSpan]::FromMilliseconds(300)
+    $script:DdcWriteResultTimer.Add_Tick({ Drain-DdcWriteResults })
+    $script:DdcWriteResultTimer.Start()
+}
+
 function Get-VCPValue {
-    param([IntPtr]$Handle, [byte]$VCPCode)
+    param([IntPtr]$Handle, [byte]$VCPCode, [string]$MonitorName = "")
     $vct = [uint32]0; $cur = [uint32]0; $max = [uint32]0
-    $result = [MonitorAPI]::GetVCPFeatureAndVCPFeatureReply($Handle, $VCPCode, [ref]$vct, [ref]$cur, [ref]$max)
-    return @{ Success = $result; Current = $cur; Maximum = $max; Type = $vct }
+    $lastError = [int]0; $attempts = [int]0
+    $result = [MonitorAPI]::ReadVCPWithRetry($Handle, $VCPCode, $script:DdcReadRetryCount, [ref]$vct, [ref]$cur, [ref]$max, [ref]$lastError, [ref]$attempts)
+    if (-not $result) {
+        Register-DdcDiagnostic -Operation "Read" -Monitor $MonitorName -Code ([int]$VCPCode) -Value $null -LastError $lastError -Attempts $attempts -Message "" -SuppressStatus | Out-Null
+    }
+    return @{ Success = $result; Current = $cur; Maximum = $max; Type = $vct; LastError = $lastError; Attempts = $attempts; RetryCount = [Math]::Max(0, $attempts - 1) }
 }
 
 function Set-VCPValue {
-    param([IntPtr]$Handle, [byte]$VCPCode, [uint32]$Value)
-    return [MonitorAPI]::SetVCPFeature($Handle, $VCPCode, $Value)
+    param([IntPtr]$Handle, [byte]$VCPCode, [uint32]$Value, [string]$MonitorName = "")
+    $lastError = [int]0; $attempts = [int]0
+    $result = [MonitorAPI]::SetVCPWithRetry($Handle, $VCPCode, $Value, $script:DdcWriteRetryCount, [ref]$lastError, [ref]$attempts)
+    if (-not $result) {
+        Register-DdcDiagnostic -Operation "Write" -Monitor $MonitorName -Code ([int]$VCPCode) -Value $Value -LastError $lastError -Attempts $attempts -Message "" | Out-Null
+    }
+    return $result
 }
 
 function Queue-VCPValue {
-    param([IntPtr]$Handle, [byte]$VCPCode, [uint32]$Value, [string]$Key)
+    param([IntPtr]$Handle, [byte]$VCPCode, [uint32]$Value, [string]$Key, [string]$MonitorName = "")
     if ($Handle -eq [IntPtr]::Zero) { return $false }
-    [MonitorAPI]::QueueVCPWrite($Handle, $VCPCode, $Value, $Key)
+    [MonitorAPI]::QueueVCPWrite($Handle, $VCPCode, $Value, $Key, $MonitorName)
     return $true
 }
 
@@ -650,12 +828,12 @@ function Set-VCPValueWithSync {
     if ($script:ApplyToAll -or $Force) {
         for ($i = 0; $i -lt $script:PhysicalMonitors.Count; $i++) {
             $mon = $script:PhysicalMonitors[$i]
-            if (Queue-VCPValue -Handle $mon.Handle -VCPCode $VCPCode -Value $Value -Key "$i`:0x$("{0:X2}" -f $VCPCode)") { $queued++ }
+            if (Queue-VCPValue -Handle $mon.Handle -VCPCode $VCPCode -Value $Value -Key "$i`:0x$("{0:X2}" -f $VCPCode)" -MonitorName $mon.Name) { $queued++ }
         }
         if ($VCPCode -eq [MonitorAPI]::VCP_BRIGHTNESS -and $script:WmiBrightnessAvailable) { Set-WmiBrightness -Value $Value | Out-Null }
     } else {
         $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
-        if (Queue-VCPValue -Handle $mon.Handle -VCPCode $VCPCode -Value $Value -Key "$script:CurrentMonitorIndex`:0x$("{0:X2}" -f $VCPCode)") { $queued++ }
+        if (Queue-VCPValue -Handle $mon.Handle -VCPCode $VCPCode -Value $Value -Key "$script:CurrentMonitorIndex`:0x$("{0:X2}" -f $VCPCode)" -MonitorName $mon.Name) { $queued++ }
         elseif ($VCPCode -eq [MonitorAPI]::VCP_BRIGHTNESS -and $script:WmiBrightnessAvailable) { Set-WmiBrightness -Value $Value | Out-Null }
     }
     if ($queued -gt 0) { return $true }
@@ -675,7 +853,7 @@ function Format-VcpResultLine {
     if ([bool]$Result.Success) {
         return "0x{0:X2} {1,-24} = {2} (max:{3})" -f $code, $desc, [uint32]$Result.Current, [uint32]$Result.Maximum
     }
-    return "0x{0:X2} {1,-24} read failed" -f $code, $desc
+    return "0x{0:X2} {1,-24} read failed (Win32:{2}, retries:{3})" -f $code, $desc, [int]$Result.LastError, [int]$Result.RetryCount
 }
 
 function Stop-VcpWorker {
@@ -694,6 +872,7 @@ function Stop-VcpWorker {
     $script:VcpWorkerOutput = $null
     $script:VcpWorkerAsyncResult = $null
     $script:VcpWorkerMode = ""
+    $script:VcpWorkerMonitorName = ""
     $script:VcpWorkerLastOutputCount = 0
     if ($vcpQueryBtn) { $vcpQueryBtn.IsEnabled = $true }
     if ($vcpScanBtn) { $vcpScanBtn.IsEnabled = $true }
@@ -714,7 +893,7 @@ function Update-VcpWorkerOutput {
                 if ([bool]$result.Success) {
                     $vcpResultBox.Text = "VCP 0x$("{0:X2}" -f $code) ($desc)`nCurrent: $($result.Current)`nMaximum: $($result.Maximum)"
                 } else {
-                    $vcpResultBox.Text = "Failed to read VCP 0x$("{0:X2}" -f $code) ($desc)"
+                    $vcpResultBox.Text = Format-DdcDiagnostic -Operation "Read" -Monitor ([string]$result.MonitorName) -Code $code -Value $null -LastError ([int]$result.LastError) -Attempts ([int]$result.Attempts) -Message ""
                 }
             } else {
                 $vcpResultBox.Text = "Reading VCP..."
@@ -724,48 +903,69 @@ function Update-VcpWorkerOutput {
             $done = if ($last) { [int]$last.Index } else { 0 }
             $total = if ($last) { [int]$last.Count } else { 0 }
             $found = @($items | Where-Object { [bool]$_.Success } | ForEach-Object { Format-VcpResultLine -Result $_ })
-            $header = if ($completed) { "Supported VCP Codes:" } else { "Scanning VCP codes $done/$total..." }
-            $body = if ($found.Count -gt 0) { $found -join "`n" } elseif ($completed) { "None found" } else { "" }
+            $failed = @($items | Where-Object { -not [bool]$_.Success } | ForEach-Object { Format-VcpResultLine -Result $_ })
+            $scanMonitor = if ([string]::IsNullOrWhiteSpace($script:VcpWorkerMonitorName)) { "selected monitor" } else { $script:VcpWorkerMonitorName }
+            $header = if ($completed) { "Supported VCP Codes for ${scanMonitor}:" } else { "Scanning VCP codes $done/$total..." }
+            if ($completed) {
+                $sections = @()
+                if ($found.Count -gt 0) { $sections += "Readable:`n$($found -join "`n")" } else { $sections += "Readable:`nNone found" }
+                if ($failed.Count -gt 0) { $sections += "Failed or unsupported:`n$($failed -join "`n")" }
+                $body = $sections -join "`n`n"
+            } else {
+                $body = if ($found.Count -gt 0) { $found -join "`n" } else { "" }
+            }
             $vcpResultBox.Text = "$header`n$body"
         }
     }
     if ($completed) {
         try { $script:VcpWorker.EndInvoke($script:VcpWorkerAsyncResult) } catch { Update-Status "VCP read failed: $($_.Exception.Message)" }
+        $items = @($script:VcpWorkerOutput)
+        if ($script:VcpWorkerMode -eq "Query" -and $items.Count -gt 0 -and -not [bool]$items[-1].Success) {
+            $failure = $items[-1]
+            Register-DdcDiagnostic -Operation "Read" -Monitor ([string]$failure.MonitorName) -Code ([int]$failure.Code) -Value $null -LastError ([int]$failure.LastError) -Attempts ([int]$failure.Attempts) -Message "" | Out-Null
+        }
         if ($script:VcpWorkerMode -eq "Scan") { Update-Status "VCP scan complete" }
         Stop-VcpWorker
     }
 }
 
 function Start-VcpReadWorker {
-    param([IntPtr]$Handle, [int[]]$Codes, [string]$Mode)
+    param([IntPtr]$Handle, [int[]]$Codes, [string]$Mode, [string]$MonitorName, [int]$ReadRetries = 0)
     Stop-VcpWorker -Cancel
     if ($Handle -eq [IntPtr]::Zero -or $Codes.Count -eq 0) { return }
     $workerScript = {
-        param([IntPtr]$Handle, [int[]]$Codes)
+        param([IntPtr]$Handle, [int[]]$Codes, [string]$MonitorName, [int]$ReadRetries)
         $index = 0
         foreach ($code in $Codes) {
             $index++
             $vct = [uint32]0
             $current = [uint32]0
             $maximum = [uint32]0
-            $ok = [MonitorAPI]::GetVCPFeatureAndVCPFeatureReply($Handle, [byte]$code, [ref]$vct, [ref]$current, [ref]$maximum)
+            $lastError = [int]0
+            $attempts = [int]0
+            $ok = [MonitorAPI]::ReadVCPWithRetry($Handle, [byte]$code, $ReadRetries, [ref]$vct, [ref]$current, [ref]$maximum, [ref]$lastError, [ref]$attempts)
             [PSCustomObject]@{
                 Code = [int]$code
                 Success = [bool]$ok
                 Current = [uint32]$current
                 Maximum = [uint32]$maximum
                 Type = [uint32]$vct
+                LastError = [int]$lastError
+                Attempts = [int]$attempts
+                RetryCount = [Math]::Max(0, $attempts - 1)
+                MonitorName = [string]$MonitorName
                 Index = [int]$index
                 Count = [int]$Codes.Count
             }
         }
     }
     $script:VcpWorkerMode = $Mode
+    $script:VcpWorkerMonitorName = $MonitorName
     $script:VcpWorkerInput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
     $script:VcpWorkerInput.Complete()
     $script:VcpWorkerOutput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
     $script:VcpWorker = [PowerShell]::Create()
-    $script:VcpWorker.AddScript($workerScript.ToString()).AddArgument($Handle).AddArgument($Codes) | Out-Null
+    $script:VcpWorker.AddScript($workerScript.ToString()).AddArgument($Handle).AddArgument($Codes).AddArgument($MonitorName).AddArgument($ReadRetries) | Out-Null
     $script:VcpWorkerAsyncResult = $script:VcpWorker.BeginInvoke($script:VcpWorkerInput, $script:VcpWorkerOutput)
     $script:VcpWorkerLastOutputCount = 0
     if (-not $script:VcpWorkerTimer) {
@@ -835,13 +1035,22 @@ function Update-MonitorSettingsWorkerOutput {
     $workerIndex = $script:MonitorSettingsWorkerIndex
     try { $script:MonitorSettingsWorker.EndInvoke($script:MonitorSettingsWorkerAsyncResult) } catch { Update-Status "Monitor settings read failed: $($_.Exception.Message)" }
     if ($workerIndex -eq $script:CurrentMonitorIndex) {
+        $results = @($script:MonitorSettingsWorkerOutput)
+        $failures = @($results | Where-Object { -not [bool]$_.Success })
         $script:UpdatingUI = $true
         try {
-            foreach ($result in @($script:MonitorSettingsWorkerOutput)) { Apply-MonitorSettingResult -Result $result }
+            foreach ($result in $results) { Apply-MonitorSettingResult -Result $result }
         } finally {
             $script:UpdatingUI = $false
         }
-        Update-Status "$workerName"
+        foreach ($failure in $failures) {
+            Register-DdcDiagnostic -Operation "Read" -Monitor $workerName -Code ([int]$failure.Code) -Value $null -LastError ([int]$failure.LastError) -Attempts ([int]$failure.Attempts) -Message "Monitor setting refresh" -SuppressStatus | Out-Null
+        }
+        if ($failures.Count -gt 0) {
+            Update-Status ("{0} ({1}/7 readable; DDC diagnostics captured)" -f $workerName, ($results.Count - $failures.Count))
+        } else {
+            Update-Status "$workerName"
+        }
         Update-TrayPopupState
         Update-TrayIconText
     }
@@ -862,20 +1071,26 @@ function Start-MonitorSettingsWorker {
         [int][MonitorAPI]::VCP_SHARPNESS
     )
     $workerScript = {
-        param([IntPtr]$Handle, [int[]]$Codes)
+        param([IntPtr]$Handle, [int[]]$Codes, [string]$MonitorName, [int]$ReadRetries)
         $index = 0
         foreach ($code in $Codes) {
             $index++
             $vct = [uint32]0
             $current = [uint32]0
             $maximum = [uint32]0
-            $ok = [MonitorAPI]::GetVCPFeatureAndVCPFeatureReply($Handle, [byte]$code, [ref]$vct, [ref]$current, [ref]$maximum)
+            $lastError = [int]0
+            $attempts = [int]0
+            $ok = [MonitorAPI]::ReadVCPWithRetry($Handle, [byte]$code, $ReadRetries, [ref]$vct, [ref]$current, [ref]$maximum, [ref]$lastError, [ref]$attempts)
             [PSCustomObject]@{
                 Code = [int]$code
                 Success = [bool]$ok
                 Current = [uint32]$current
                 Maximum = [uint32]$maximum
                 Type = [uint32]$vct
+                LastError = [int]$lastError
+                Attempts = [int]$attempts
+                RetryCount = [Math]::Max(0, $attempts - 1)
+                MonitorName = [string]$MonitorName
                 Index = [int]$index
                 Count = [int]$Codes.Count
             }
@@ -887,7 +1102,7 @@ function Start-MonitorSettingsWorker {
     $script:MonitorSettingsWorkerInput.Complete()
     $script:MonitorSettingsWorkerOutput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
     $script:MonitorSettingsWorker = [PowerShell]::Create()
-    $script:MonitorSettingsWorker.AddScript($workerScript.ToString()).AddArgument($Handle).AddArgument($codes) | Out-Null
+    $script:MonitorSettingsWorker.AddScript($workerScript.ToString()).AddArgument($Handle).AddArgument($codes).AddArgument($MonitorName).AddArgument($script:DdcReadRetryCount) | Out-Null
     $script:MonitorSettingsWorkerAsyncResult = $script:MonitorSettingsWorker.BeginInvoke($script:MonitorSettingsWorkerInput, $script:MonitorSettingsWorkerOutput)
     $script:MonitorSettingsWorkerLastOutputCount = 0
     if (-not $script:MonitorSettingsWorkerTimer) {
@@ -925,10 +1140,7 @@ function Get-TimeBasedSettings {
 
 function Apply-TimeBasedSettings {
     $settings = Get-TimeBasedSettings
-    foreach ($mon in $script:PhysicalMonitors) {
-        if ($mon.Handle -ne [IntPtr]::Zero) { Set-VCPValue -Handle $mon.Handle -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value $settings.Brightness | Out-Null; Start-Sleep -Milliseconds 50 }
-    }
-    if ($script:WmiBrightnessAvailable) { Set-WmiBrightness -Value $settings.Brightness | Out-Null }
+    Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value $settings.Brightness -Force | Out-Null
     Set-GammaRamp -Gamma 1.0 -RedMult $settings.GammaRed -GreenMult $settings.GammaGreen -BlueMult $settings.GammaBlue
     return $settings
 }
@@ -1137,7 +1349,7 @@ try {
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.22.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
+        Title="MonitorControl Pro v3.23.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
         Background="#0a0a0a" WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
     <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
@@ -1271,7 +1483,7 @@ try {
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
             <TextBlock Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
-            <TextBlock Text="v3.22.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
+            <TextBlock Text="v3.23.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal">
             <CheckBox x:Name="ApplyAllCheckbox" Content="All Monitors" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -1653,6 +1865,7 @@ $gammaBlueSlider = $window.FindName("GammaBlueSlider"); $gammaBlueValue = $windo
 $capabilitiesBox = $window.FindName("CapabilitiesBox"); $statusText = $window.FindName("StatusText"); $autoModeText = $window.FindName("AutoModeText")
 
 function Update-Status { param([string]$Message); $statusText.Text = $Message }
+Start-DdcWriteResultTimer
 
 function Draw-MonitorLayout {
     $monitorCanvas.Children.Clear()
@@ -1845,7 +2058,7 @@ function Export-ProfileBundle {
 
         $manifest = [PSCustomObject]@{
             BundleSchemaVersion = $script:ProfileBundleSchemaVersion
-            AppVersion = "3.17.0"
+            AppVersion = "3.23.0"
             ProfileSchemaVersion = $script:ProfileSchemaVersion
             ExportedAt = (Get-Date).ToString("o")
             ProfileCount = $exportedProfiles.Count
@@ -2933,18 +3146,18 @@ $vcpQueryBtn.Add_Click({
     $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]; if ($mon.Handle -eq [IntPtr]::Zero) { $vcpResultBox.Text = "No DDC/CI"; return }
     try {
         $codeText = $vcpCodeBox.Text.Trim(); $code = if ($codeText -match '^0x') { [Convert]::ToInt32($codeText, 16) } else { [int]$codeText }
-        Start-VcpReadWorker -Handle $mon.Handle -Codes @($code) -Mode "Query"
+        Start-VcpReadWorker -Handle $mon.Handle -Codes @($code) -Mode "Query" -MonitorName $mon.Name -ReadRetries $script:DdcReadRetryCount
     } catch { $vcpResultBox.Text = "Error: $_" }
 })
 $vcpSetBtn.Add_Click({
     $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]; if ($mon.Handle -eq [IntPtr]::Zero) { return }
     try { $codeText = $vcpCodeBox.Text.Trim(); $code = if ($codeText -match '^0x') { [Convert]::ToInt32($codeText, 16) } else { [int]$codeText }; $value = [uint32]$vcpSetValueBox.Text
-        if (Set-VCPValue -Handle $mon.Handle -VCPCode ([byte]$code) -Value $value) { Update-Status "Set VCP 0x$("{0:X2}" -f $code) = $value"; $vcpQueryBtn.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) }
+        if (Set-VCPValue -Handle $mon.Handle -VCPCode ([byte]$code) -Value $value -MonitorName $mon.Name) { Update-Status "Set VCP 0x$("{0:X2}" -f $code) = $value"; $vcpQueryBtn.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) }
     } catch { Update-Status "Error: $_" }
 })
 $vcpScanBtn.Add_Click({
     $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]; if ($mon.Handle -eq [IntPtr]::Zero) { $vcpResultBox.Text = "No DDC/CI"; return }
-    Start-VcpReadWorker -Handle $mon.Handle -Codes @($script:VCPCodeDescriptions.Keys | Sort-Object) -Mode "Scan"
+    Start-VcpReadWorker -Handle $mon.Handle -Codes @($script:VCPCodeDescriptions.Keys | Sort-Object) -Mode "Scan" -MonitorName $mon.Name -ReadRetries $script:DdcScanRetryCount
 })
 
 $saveProfileBtn.Add_Click({
@@ -3199,7 +3412,7 @@ $window.Add_StateChanged({
     if ($window.WindowState -eq [System.Windows.WindowState]::Minimized) { Hide-MainWindowToTray }
 })
 
-$window.Add_Closed({ if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AmbientLightTimer) { $script:AmbientLightTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }; if ($script:ProfileScheduleTimer) { $script:ProfileScheduleTimer.Stop() }; if ($script:IdleDimTimer) { $script:IdleDimTimer.Stop() }; if ($script:BatteryProfileTimer) { $script:BatteryProfileTimer.Stop() }; if ($script:FpsOverlayTimer) { $script:FpsOverlayTimer.Stop() }; Stop-VcpWorker -Cancel; Stop-MonitorSettingsWorker -Cancel
+$window.Add_Closed({ if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AmbientLightTimer) { $script:AmbientLightTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }; if ($script:ProfileScheduleTimer) { $script:ProfileScheduleTimer.Stop() }; if ($script:IdleDimTimer) { $script:IdleDimTimer.Stop() }; if ($script:BatteryProfileTimer) { $script:BatteryProfileTimer.Stop() }; if ($script:FpsOverlayTimer) { $script:FpsOverlayTimer.Stop() }; if ($script:DdcWriteResultTimer) { $script:DdcWriteResultTimer.Stop() }; Stop-VcpWorker -Cancel; Stop-MonitorSettingsWorker -Cancel
     if ($script:FpsOverlayWindow) { try { $script:FpsOverlayWindow.Close() } catch {} }
     if ($script:HardwareMonitorComputer) { try { $script:HardwareMonitorComputer.Close() } catch {} }
     Dispose-TrayMode
