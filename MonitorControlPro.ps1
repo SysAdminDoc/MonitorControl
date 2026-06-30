@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.27.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro v3.28.0 - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.27.0 - Enhanced with stable monitor identities and labels
+    Version: 3.28.0 - Enhanced with accessibility names and localization scaffold
 #>
 
 param([switch]$StartMinimized, [string]$LoadProfile)
@@ -738,6 +738,69 @@ $script:ProfileExportsPath = Join-Path $script:ProfilesPath "exports"
 $script:ProfileMetadataFiles = @("app-profile-rules.json", "profile-schedules.json", "idle-dim.json", "battery-profile.json", "profile-storage.json", "monitor-identities.json")
 $script:MonitorIdentityRecords = @{}
 $script:UpdatingMonitorLabelUI = $false
+$script:UiCulture = "en-US"
+$script:UiStrings = @{
+    "App.Title" = "MonitorControl Pro"
+    "App.Subtitle" = "v3.28.0 - Click monitor to select"
+    "Tab.Display" = "Display"
+    "Tab.Monitor" = "Monitor"
+    "Tab.GPU" = "GPU"
+    "Tab.VCP" = "VCP"
+    "Tab.Profiles" = "Profiles"
+    "Tab.Schedule" = "Schedule"
+    "Tab.System" = "System"
+    "Action.AllMonitors" = "All Monitors"
+    "Action.Identify" = "Identify"
+    "Action.Refresh" = "Refresh"
+    "Action.Save" = "Save"
+    "Action.Reset" = "Reset"
+    "Action.Query" = "Query"
+    "Action.Set" = "Set"
+    "Action.ScanAll" = "Scan All"
+    "Action.CapsOnly" = "Caps only"
+    "Action.Export" = "Export"
+    "Action.Import" = "Import"
+    "Action.Load" = "Load"
+    "Action.Delete" = "Delete"
+    "Action.Capture" = "Capture"
+    "Action.Add" = "Add"
+    "Action.Remove" = "Remove"
+    "Action.Start" = "Start"
+    "Action.Stop" = "Stop"
+    "Action.SyncFolder" = "Sync Folder"
+    "Action.UseLocal" = "Use Local"
+    "A11y.MonitorCanvas" = "Monitor layout selector"
+    "A11y.SelectedMonitor" = "Selected monitor details"
+    "A11y.MonitorLabel" = "Custom monitor label"
+    "A11y.MonitorIdentity" = "Stable monitor identity"
+    "A11y.Brightness" = "Brightness"
+    "A11y.Contrast" = "Contrast"
+    "A11y.RedGain" = "Red gain"
+    "A11y.GreenGain" = "Green gain"
+    "A11y.BlueGain" = "Blue gain"
+    "A11y.Volume" = "Volume"
+    "A11y.Mute" = "Mute"
+    "A11y.Sharpness" = "Sharpness"
+    "A11y.InputSource" = "Input source"
+    "A11y.ProfileName" = "Profile name"
+    "A11y.ProfilesList" = "Saved profiles"
+    "A11y.VcpCode" = "VCP code"
+    "A11y.VcpPreset" = "VCP preset"
+    "A11y.VcpSetValue" = "VCP set value"
+    "A11y.VcpResults" = "VCP results"
+    "A11y.Capabilities" = "Monitor capabilities"
+    "A11y.Status" = "Status"
+    "A11y.AppProfileExe" = "Application executable"
+    "A11y.AppProfileProfile" = "Application profile"
+    "A11y.AppProfileRules" = "Application profile rules"
+    "A11y.ScheduleTime" = "Schedule time"
+    "A11y.ScheduleProfile" = "Schedule profile"
+    "A11y.ScheduleRules" = "Schedule rules"
+    "A11y.IdleMinutes" = "Idle minutes"
+    "A11y.IdleBrightness" = "Idle brightness"
+    "A11y.BatteryBrightness" = "Battery brightness"
+    "A11y.AcBrightness" = "AC brightness"
+}
 $script:UpdatingUI = $false
 $script:ApplyToAll = $false
 $script:AutoModeEnabled = $false
@@ -1243,6 +1306,135 @@ function Set-MonitorUserLabel {
     Update-TrayPopupState
     Update-TrayIconText
     return $true
+}
+
+function Get-UiString {
+    param([string]$Key)
+    if ($script:UiStrings.ContainsKey($Key)) { return [string]$script:UiStrings[$Key] }
+    return $Key
+}
+
+function Set-LocalizedText {
+    param($Control, [string]$Key, [string]$Property = "")
+    if ($null -eq $Control) { return }
+    $text = Get-UiString -Key $Key
+    if (-not [string]::IsNullOrWhiteSpace($Property)) {
+        $Control.$Property = $text
+    } elseif ($Control.PSObject.Properties.Name -contains "Content") {
+        $Control.Content = $text
+    } elseif ($Control.PSObject.Properties.Name -contains "Header") {
+        $Control.Header = $text
+    } elseif ($Control.PSObject.Properties.Name -contains "Text") {
+        $Control.Text = $text
+    }
+}
+
+function Set-AccessibleName {
+    param($Control, [string]$Key, [string]$HelpKey = "")
+    if ($null -eq $Control) { return }
+    [System.Windows.Automation.AutomationProperties]::SetName($Control, (Get-UiString -Key $Key))
+    if (-not [string]::IsNullOrWhiteSpace($HelpKey)) {
+        [System.Windows.Automation.AutomationProperties]::SetHelpText($Control, (Get-UiString -Key $HelpKey))
+    }
+}
+
+function Set-TabOrder {
+    param([object[]]$Controls)
+    $index = 0
+    foreach ($control in $Controls) {
+        if ($null -eq $control) { continue }
+        try {
+            $control.TabIndex = $index
+            $index++
+        } catch {}
+    }
+}
+
+function Initialize-LocalizationAndAccessibility {
+    if ($window) {
+        $window.Title = "$(Get-UiString -Key 'App.Title') v3.28.0"
+        [System.Windows.Automation.AutomationProperties]::SetName($window, "$(Get-UiString -Key 'App.Title') main window")
+    }
+    Set-LocalizedText -Control $appTitleText -Key "App.Title" -Property "Text"
+    Set-LocalizedText -Control $appSubtitleText -Key "App.Subtitle" -Property "Text"
+    Set-LocalizedText -Control $displayTab -Key "Tab.Display" -Property "Header"
+    Set-LocalizedText -Control $monitorTab -Key "Tab.Monitor" -Property "Header"
+    Set-LocalizedText -Control $gpuTab -Key "Tab.GPU" -Property "Header"
+    Set-LocalizedText -Control $vcpTab -Key "Tab.VCP" -Property "Header"
+    Set-LocalizedText -Control $profilesTab -Key "Tab.Profiles" -Property "Header"
+    Set-LocalizedText -Control $scheduleTab -Key "Tab.Schedule" -Property "Header"
+    Set-LocalizedText -Control $systemTab -Key "Tab.System" -Property "Header"
+    Set-LocalizedText -Control $applyAllCheckbox -Key "Action.AllMonitors"
+    Set-LocalizedText -Control $identifyBtn -Key "Action.Identify"
+    Set-LocalizedText -Control $refreshBtn -Key "Action.Refresh"
+    Set-LocalizedText -Control $monitorLabelSaveBtn -Key "Action.Save"
+    Set-LocalizedText -Control $monitorLabelResetBtn -Key "Action.Reset"
+    Set-LocalizedText -Control $vcpQueryBtn -Key "Action.Query"
+    Set-LocalizedText -Control $vcpSetBtn -Key "Action.Set"
+    Set-LocalizedText -Control $vcpScanBtn -Key "Action.ScanAll"
+    Set-LocalizedText -Control $vcpScanCapabilitiesOnlyCheckbox -Key "Action.CapsOnly"
+    Set-LocalizedText -Control $saveProfileBtn -Key "Action.Save"
+    Set-LocalizedText -Control $loadProfileBtn -Key "Action.Load"
+    Set-LocalizedText -Control $deleteProfileBtn -Key "Action.Delete"
+    Set-LocalizedText -Control $exportProfilesBtn -Key "Action.Export"
+    Set-LocalizedText -Control $importProfilesBtn -Key "Action.Import"
+    Set-LocalizedText -Control $profileSyncFolderBtn -Key "Action.SyncFolder"
+    Set-LocalizedText -Control $profileLocalFolderBtn -Key "Action.UseLocal"
+    Set-LocalizedText -Control $appProfileCaptureBtn -Key "Action.Capture"
+    Set-LocalizedText -Control $appProfileAddBtn -Key "Action.Add"
+    Set-LocalizedText -Control $appProfileRemoveBtn -Key "Action.Remove"
+    Set-LocalizedText -Control $scheduleAddBtn -Key "Action.Add"
+    Set-LocalizedText -Control $scheduleRemoveBtn -Key "Action.Remove"
+    Set-LocalizedText -Control $idleDimSaveBtn -Key "Action.Save"
+    Set-LocalizedText -Control $batteryProfileSaveBtn -Key "Action.Save"
+    Set-LocalizedText -Control $fpsOverlayStartBtn -Key "Action.Start"
+    Set-LocalizedText -Control $fpsOverlayStopBtn -Key "Action.Stop"
+
+    Set-AccessibleName -Control $monitorCanvas -Key "A11y.MonitorCanvas"
+    Set-AccessibleName -Control $selectedMonitorName -Key "A11y.SelectedMonitor"
+    Set-AccessibleName -Control $monitorLabelBox -Key "A11y.MonitorLabel"
+    Set-AccessibleName -Control $monitorIdentityText -Key "A11y.MonitorIdentity"
+    Set-AccessibleName -Control $brightnessSlider -Key "A11y.Brightness"
+    Set-AccessibleName -Control $contrastSlider -Key "A11y.Contrast"
+    Set-AccessibleName -Control $redSlider -Key "A11y.RedGain"
+    Set-AccessibleName -Control $greenSlider -Key "A11y.GreenGain"
+    Set-AccessibleName -Control $blueSlider -Key "A11y.BlueGain"
+    Set-AccessibleName -Control $volumeSlider -Key "A11y.Volume"
+    Set-AccessibleName -Control $muteCheckbox -Key "A11y.Mute"
+    Set-AccessibleName -Control $sharpnessSlider -Key "A11y.Sharpness"
+    Set-AccessibleName -Control $inputSourceCombo -Key "A11y.InputSource"
+    Set-AccessibleName -Control $profileNameBox -Key "A11y.ProfileName"
+    Set-AccessibleName -Control $profilesList -Key "A11y.ProfilesList"
+    Set-AccessibleName -Control $vcpCodeBox -Key "A11y.VcpCode"
+    Set-AccessibleName -Control $vcpPresetCombo -Key "A11y.VcpPreset"
+    Set-AccessibleName -Control $vcpSetValueBox -Key "A11y.VcpSetValue"
+    Set-AccessibleName -Control $vcpResultBox -Key "A11y.VcpResults"
+    Set-AccessibleName -Control $capabilitiesBox -Key "A11y.Capabilities"
+    Set-AccessibleName -Control $statusText -Key "A11y.Status"
+    Set-AccessibleName -Control $appProfileExeBox -Key "A11y.AppProfileExe"
+    Set-AccessibleName -Control $appProfileProfileCombo -Key "A11y.AppProfileProfile"
+    Set-AccessibleName -Control $appProfileRulesList -Key "A11y.AppProfileRules"
+    Set-AccessibleName -Control $scheduleTimeBox -Key "A11y.ScheduleTime"
+    Set-AccessibleName -Control $scheduleProfileCombo -Key "A11y.ScheduleProfile"
+    Set-AccessibleName -Control $scheduleRulesList -Key "A11y.ScheduleRules"
+    Set-AccessibleName -Control $idleDimMinutesBox -Key "A11y.IdleMinutes"
+    Set-AccessibleName -Control $idleDimBrightnessBox -Key "A11y.IdleBrightness"
+    Set-AccessibleName -Control $batteryBrightnessBox -Key "A11y.BatteryBrightness"
+    Set-AccessibleName -Control $acBrightnessBox -Key "A11y.AcBrightness"
+
+    Set-TabOrder -Controls @(
+        $applyAllCheckbox,$identifyBtn,$refreshBtn,$monitorLabelBox,$monitorLabelSaveBtn,$monitorLabelResetBtn,
+        $brightnessSlider,$contrastSlider,$redSlider,$greenSlider,$blueSlider,$colorTempWarm,$colorTemp6500,$colorTempCool,$colorTempSRGB,
+        $presetDay,$presetNight,$presetAutoMode,$presetAmbientMode,$presetReset,$dynamicContrastOff,$dynamicContrastOn,$pictureModeWeb,$pictureModeCinema,$pictureModeGame,
+        $inputSourceCombo,$powerOffBtn,$powerStandbyBtn,$powerOnBtn,$volumeSlider,$muteCheckbox,$sharpnessSlider,$resetColorBtn,$factoryResetBtn,$allMonitorsStandbyBtn,
+        $vcpCodeBox,$vcpPresetCombo,$vcpQueryBtn,$vcpSetValueBox,$vcpSetBtn,$vcpScanBtn,$vcpScanCapabilitiesOnlyCheckbox,$vcpResultBox,
+        $profileNameBox,$saveProfileBtn,$loadProfileBtn,$deleteProfileBtn,$profilesList,$exportProfilesBtn,$importProfilesBtn,$profileSyncFolderBtn,$profileLocalFolderBtn,
+        $appProfileEnabledCheckbox,$appProfileExeBox,$appProfileCaptureBtn,$appProfileProfileCombo,$appProfileAddBtn,$appProfileRemoveBtn,$appProfileRulesList,
+        $scheduleEnabledCheckbox,$scheduleTimeBox,$scheduleProfileCombo,$scheduleAddBtn,$scheduleRemoveBtn,$scheduleRulesList,
+        $idleDimEnabledCheckbox,$idleDimMinutesBox,$idleDimBrightnessBox,$idleDimRestoreCheckbox,$idleDimSaveBtn,
+        $batteryProfileEnabledCheckbox,$batteryBrightnessBox,$acBrightnessBox,$batteryProfileSaveBtn,
+        $displaySettingsBtn,$colorMgmtBtn,$gpuControlPanelBtn,$gammaRedSlider,$gammaGreenSlider,$gammaBlueSlider,$resetGammaBtn,$capabilitiesBox
+    )
 }
 
 function Wait-DdcWriteQueueIdle {
@@ -1962,7 +2154,7 @@ try {
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.27.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
+        Title="MonitorControl Pro v3.28.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
         Background="#0a0a0a" WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
     <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
@@ -2095,8 +2287,8 @@ try {
     <Grid>
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
-            <TextBlock Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
-            <TextBlock Text="v3.27.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
+            <TextBlock x:Name="AppTitleText" Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
+            <TextBlock x:Name="AppSubtitleText" Text="v3.28.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal">
             <CheckBox x:Name="ApplyAllCheckbox" Content="All Monitors" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -2116,7 +2308,7 @@ try {
         </Grid>
     </Border>
     <TabControl Grid.Row="4">
-        <TabItem Header="Display">
+        <TabItem x:Name="DisplayTab" Header="Display">
             <Border Background="#151515" CornerRadius="0,5,5,5" Padding="10"><ScrollViewer VerticalScrollBarVisibility="Auto"><Grid>
                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="8"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
@@ -2175,7 +2367,7 @@ try {
                 </Grid></Border>
             </Grid></ScrollViewer></Border>
         </TabItem>
-        <TabItem Header="Monitor">
+        <TabItem x:Name="MonitorTab" Header="Monitor">
             <Border Background="#151515" CornerRadius="0,5,5,5" Padding="10"><ScrollViewer VerticalScrollBarVisibility="Auto"><Grid>
                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Border Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid>
@@ -2274,7 +2466,7 @@ try {
                 </Grid></Border>
             </Grid></Border>
         </TabItem>
-        <TabItem Header="VCP">
+        <TabItem x:Name="VcpTab" Header="VCP">
             <Border Background="#151515" CornerRadius="0,5,5,5" Padding="10"><Grid>
                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="*"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Border Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid>
@@ -2298,7 +2490,7 @@ try {
                 </Grid></Border>
             </Grid></Border>
         </TabItem>
-        <TabItem Header="Profiles">
+        <TabItem x:Name="ProfilesTab" Header="Profiles">
             <Border Background="#151515" CornerRadius="0,5,5,5" Padding="10"><Grid>
                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="*"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Border Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
@@ -2341,7 +2533,7 @@ try {
                 </Grid></Border>
             </Grid></Border>
         </TabItem>
-        <TabItem Header="Schedule">
+        <TabItem x:Name="ScheduleTab" Header="Schedule">
             <Border Background="#151515" CornerRadius="0,5,5,5" Padding="10"><Grid>
                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="*"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Border Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid>
@@ -2386,7 +2578,7 @@ try {
                 </Grid></Border>
             </Grid></Border>
         </TabItem>
-        <TabItem Header="System">
+        <TabItem x:Name="SystemTab" Header="System">
             <Border Background="#151515" CornerRadius="0,5,5,5" Padding="10"><Grid>
                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Border Background="#1a1a1a" CornerRadius="5" Padding="10"><StackPanel><TextBlock Text="Quick Links" FontSize="10" Foreground="#909090" Margin="0,0,0,5"/>
@@ -2431,6 +2623,9 @@ try {
     }
 } catch {}
 # Get all UI elements
+$appTitleText = $window.FindName("AppTitleText"); $appSubtitleText = $window.FindName("AppSubtitleText")
+$displayTab = $window.FindName("DisplayTab"); $monitorTab = $window.FindName("MonitorTab"); $vcpTab = $window.FindName("VcpTab")
+$profilesTab = $window.FindName("ProfilesTab"); $scheduleTab = $window.FindName("ScheduleTab"); $systemTab = $window.FindName("SystemTab")
 $monitorCanvas = $window.FindName("MonitorCanvas"); $selectedMonitorName = $window.FindName("SelectedMonitorName")
 $selectedMonitorRes = $window.FindName("SelectedMonitorRes"); $selectedMonitorInfo = $window.FindName("SelectedMonitorInfo")
 $monitorLabelBox = $window.FindName("MonitorLabelBox"); $monitorLabelSaveBtn = $window.FindName("MonitorLabelSaveBtn"); $monitorLabelResetBtn = $window.FindName("MonitorLabelResetBtn")
@@ -2493,6 +2688,7 @@ $capabilitiesBox = $window.FindName("CapabilitiesBox"); $statusText = $window.Fi
 
 function Update-Status { param([string]$Message); $statusText.Text = $Message }
 if ($script:PendingStatusMessage) { Update-Status $script:PendingStatusMessage; $script:PendingStatusMessage = "" }
+Initialize-LocalizationAndAccessibility
 Start-DdcWriteResultTimer
 
 function Draw-MonitorLayout {
@@ -2806,7 +3002,7 @@ function Export-ProfileBundle {
 
         $manifest = [PSCustomObject]@{
             BundleSchemaVersion = $script:ProfileBundleSchemaVersion
-            AppVersion = "3.27.0"
+            AppVersion = "3.28.0"
             ProfileSchemaVersion = $script:ProfileSchemaVersion
             ExportedAt = (Get-Date).ToString("o")
             ProfileCount = $exportedProfiles.Count

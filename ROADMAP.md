@@ -59,13 +59,6 @@ PowerShell/WPF utility for DDC/CI monitor control â€” brightness, contrast,
   Complexity: M
 
 ### P1
-- [ ] P1 - Add accessibility names and localization scaffolding
-  Why: Dense WPF controls have visible text but no automation names/resource layer, limiting screen-reader behavior and making translation expensive.
-  Evidence: `MonitorControlPro.ps1:330`; Monitorian ships many localizations and documents `.resx` globalization.
-  Touches: XAML resources, control creation, status strings, README contribution notes.
-  Acceptance: Interactive controls expose meaningful `AutomationProperties.Name`, tab order is verified, strings are centralized, and at least an English resource baseline exists without changing behavior.
-  Complexity: M
-
 - [ ] P1 - Ship a signed portable release artifact
   Why: README installation is direct script download/run, while peer Windows tools ship installer/Store/Winget style artifacts; unsigned scripts create avoidable trust friction.
   Evidence: `README.md:65`; Twinkle Tray and Monitorian document package-manager installs, and Microsoft documents `Set-AuthenticodeSignature` for signing scripts.
