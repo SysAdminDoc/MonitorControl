@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.21.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro v3.22.0 - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.21.0 - Enhanced with async VCP explorer reads
+    Version: 3.22.0 - Enhanced with async monitor setting refresh
 #>
 
 param([switch]$StartMinimized, [string]$LoadProfile)
@@ -477,6 +477,14 @@ $script:VcpWorkerAsyncResult = $null
 $script:VcpWorkerTimer = $null
 $script:VcpWorkerMode = ""
 $script:VcpWorkerLastOutputCount = 0
+$script:MonitorSettingsWorker = $null
+$script:MonitorSettingsWorkerInput = $null
+$script:MonitorSettingsWorkerOutput = $null
+$script:MonitorSettingsWorkerAsyncResult = $null
+$script:MonitorSettingsWorkerTimer = $null
+$script:MonitorSettingsWorkerIndex = -1
+$script:MonitorSettingsWorkerName = ""
+$script:MonitorSettingsWorkerLastOutputCount = 0
 $script:DefaultProfilesPath = "$env:APPDATA\MonitorControlPro"
 $script:ProfileStorageSettingsPath = Join-Path $script:DefaultProfilesPath "profile-storage.json"
 $script:ProfilesPath = $script:DefaultProfilesPath
@@ -771,6 +779,126 @@ function Start-VcpReadWorker {
     $script:VcpWorkerTimer.Start()
 }
 
+function Stop-MonitorSettingsWorker {
+    param([switch]$Cancel)
+    if ($script:MonitorSettingsWorkerTimer) { $script:MonitorSettingsWorkerTimer.Stop() }
+    if ($script:MonitorSettingsWorker) {
+        if ($Cancel -and $script:MonitorSettingsWorkerAsyncResult -and -not $script:MonitorSettingsWorkerAsyncResult.IsCompleted) {
+            try { $script:MonitorSettingsWorker.Stop() } catch {}
+        }
+        try { $script:MonitorSettingsWorker.Dispose() } catch {}
+    }
+    if ($script:MonitorSettingsWorkerInput) { try { $script:MonitorSettingsWorkerInput.Dispose() } catch {} }
+    if ($script:MonitorSettingsWorkerOutput) { try { $script:MonitorSettingsWorkerOutput.Dispose() } catch {} }
+    $script:MonitorSettingsWorker = $null
+    $script:MonitorSettingsWorkerInput = $null
+    $script:MonitorSettingsWorkerOutput = $null
+    $script:MonitorSettingsWorkerAsyncResult = $null
+    $script:MonitorSettingsWorkerIndex = -1
+    $script:MonitorSettingsWorkerName = ""
+    $script:MonitorSettingsWorkerLastOutputCount = 0
+}
+
+function Apply-MonitorSettingResult {
+    param($Result)
+    if (-not [bool]$Result.Success) { return }
+    $code = [int]$Result.Code
+    $current = [uint32]$Result.Current
+    $maximum = [uint32]$Result.Maximum
+    if ($code -eq [MonitorAPI]::VCP_BRIGHTNESS) {
+        $brightnessSlider.Maximum = $maximum; $brightnessSlider.Value = $current; $brightnessValue.Text = $current
+    } elseif ($code -eq [MonitorAPI]::VCP_CONTRAST) {
+        $contrastSlider.Maximum = $maximum; $contrastSlider.Value = $current; $contrastValue.Text = $current
+    } elseif ($code -eq [MonitorAPI]::VCP_RED_GAIN) {
+        $redSlider.Maximum = $maximum; $redSlider.Value = $current; $redValue.Text = $current
+    } elseif ($code -eq [MonitorAPI]::VCP_GREEN_GAIN) {
+        $greenSlider.Maximum = $maximum; $greenSlider.Value = $current; $greenValue.Text = $current
+    } elseif ($code -eq [MonitorAPI]::VCP_BLUE_GAIN) {
+        $blueSlider.Maximum = $maximum; $blueSlider.Value = $current; $blueValue.Text = $current
+    } elseif ($code -eq [MonitorAPI]::VCP_VOLUME) {
+        $volumeSlider.Maximum = $maximum; $volumeSlider.Value = $current; $volumeValue.Text = $current
+    } elseif ($code -eq [MonitorAPI]::VCP_SHARPNESS) {
+        $sharpnessSlider.Maximum = $maximum; $sharpnessSlider.Value = $current; $sharpnessValue.Text = $current
+    }
+}
+
+function Update-MonitorSettingsWorkerOutput {
+    if (-not $script:MonitorSettingsWorker -or -not $script:MonitorSettingsWorkerOutput -or -not $script:MonitorSettingsWorkerAsyncResult) { return }
+    $count = $script:MonitorSettingsWorkerOutput.Count
+    $completed = [bool]$script:MonitorSettingsWorkerAsyncResult.IsCompleted
+    if ($count -ne $script:MonitorSettingsWorkerLastOutputCount -and -not $completed) {
+        $script:MonitorSettingsWorkerLastOutputCount = $count
+        Update-Status "Reading from $script:MonitorSettingsWorkerName... $count/7"
+    }
+    if (-not $completed) { return }
+    $workerName = $script:MonitorSettingsWorkerName
+    $workerIndex = $script:MonitorSettingsWorkerIndex
+    try { $script:MonitorSettingsWorker.EndInvoke($script:MonitorSettingsWorkerAsyncResult) } catch { Update-Status "Monitor settings read failed: $($_.Exception.Message)" }
+    if ($workerIndex -eq $script:CurrentMonitorIndex) {
+        $script:UpdatingUI = $true
+        try {
+            foreach ($result in @($script:MonitorSettingsWorkerOutput)) { Apply-MonitorSettingResult -Result $result }
+        } finally {
+            $script:UpdatingUI = $false
+        }
+        Update-Status "$workerName"
+        Update-TrayPopupState
+        Update-TrayIconText
+    }
+    Stop-MonitorSettingsWorker
+}
+
+function Start-MonitorSettingsWorker {
+    param([IntPtr]$Handle, [int]$MonitorIndex, [string]$MonitorName)
+    Stop-MonitorSettingsWorker -Cancel
+    if ($Handle -eq [IntPtr]::Zero) { return }
+    $codes = @(
+        [int][MonitorAPI]::VCP_BRIGHTNESS,
+        [int][MonitorAPI]::VCP_CONTRAST,
+        [int][MonitorAPI]::VCP_RED_GAIN,
+        [int][MonitorAPI]::VCP_GREEN_GAIN,
+        [int][MonitorAPI]::VCP_BLUE_GAIN,
+        [int][MonitorAPI]::VCP_VOLUME,
+        [int][MonitorAPI]::VCP_SHARPNESS
+    )
+    $workerScript = {
+        param([IntPtr]$Handle, [int[]]$Codes)
+        $index = 0
+        foreach ($code in $Codes) {
+            $index++
+            $vct = [uint32]0
+            $current = [uint32]0
+            $maximum = [uint32]0
+            $ok = [MonitorAPI]::GetVCPFeatureAndVCPFeatureReply($Handle, [byte]$code, [ref]$vct, [ref]$current, [ref]$maximum)
+            [PSCustomObject]@{
+                Code = [int]$code
+                Success = [bool]$ok
+                Current = [uint32]$current
+                Maximum = [uint32]$maximum
+                Type = [uint32]$vct
+                Index = [int]$index
+                Count = [int]$Codes.Count
+            }
+        }
+    }
+    $script:MonitorSettingsWorkerIndex = $MonitorIndex
+    $script:MonitorSettingsWorkerName = $MonitorName
+    $script:MonitorSettingsWorkerInput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
+    $script:MonitorSettingsWorkerInput.Complete()
+    $script:MonitorSettingsWorkerOutput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
+    $script:MonitorSettingsWorker = [PowerShell]::Create()
+    $script:MonitorSettingsWorker.AddScript($workerScript.ToString()).AddArgument($Handle).AddArgument($codes) | Out-Null
+    $script:MonitorSettingsWorkerAsyncResult = $script:MonitorSettingsWorker.BeginInvoke($script:MonitorSettingsWorkerInput, $script:MonitorSettingsWorkerOutput)
+    $script:MonitorSettingsWorkerLastOutputCount = 0
+    if (-not $script:MonitorSettingsWorkerTimer) {
+        $script:MonitorSettingsWorkerTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:MonitorSettingsWorkerTimer.Interval = [TimeSpan]::FromMilliseconds(150)
+        $script:MonitorSettingsWorkerTimer.Add_Tick({ Update-MonitorSettingsWorkerOutput })
+    }
+    Update-Status "Reading from $MonitorName... 0/$($codes.Count)"
+    $script:MonitorSettingsWorkerTimer.Start()
+}
+
 function Set-GammaRamp {
     param([double]$Gamma = 1.0, [double]$RedMult = 1.0, [double]$GreenMult = 1.0, [double]$BlueMult = 1.0)
     $hdc = [MonitorAPI]::GetDC([IntPtr]::Zero)
@@ -1009,7 +1137,7 @@ try {
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.21.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
+        Title="MonitorControl Pro v3.22.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
         Background="#0a0a0a" WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
     <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
@@ -1143,7 +1271,7 @@ try {
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
             <TextBlock Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
-            <TextBlock Text="v3.21.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
+            <TextBlock Text="v3.22.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal">
             <CheckBox x:Name="ApplyAllCheckbox" Content="All Monitors" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -1573,31 +1701,35 @@ function Draw-MonitorLayout {
 
 function Load-MonitorSettings {
     if ($script:PhysicalMonitors.Count -eq 0 -or $script:CurrentMonitorIndex -ge $script:PhysicalMonitors.Count) { return }
-    $script:UpdatingUI = $true
     $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]; $h = $mon.Handle
     Update-Status "Reading from $($mon.Name)..."
-    if ($h -eq [IntPtr]::Zero -and $script:WmiBrightnessAvailable) {
-        $wmiBrightness = Get-WmiBrightness
-        if ($null -ne $wmiBrightness) {
-            $brightnessSlider.Maximum = 100; $brightnessSlider.Value = $wmiBrightness; $brightnessValue.Text = $wmiBrightness
-            $capabilitiesBox.Text = "Integrated display brightness via WMI"
-            $script:UpdatingUI = $false; Update-Status "$($mon.Name) via WMI"; Update-TrayPopupState; Update-TrayIconText
+    Stop-MonitorSettingsWorker -Cancel
+    $script:UpdatingUI = $true
+    try {
+        $inputSourceCombo.Items.Clear()
+        @(@{N="HDMI 1";V=0x11},@{N="HDMI 2";V=0x12},@{N="DisplayPort 1";V=0x0F},@{N="DisplayPort 2";V=0x10},@{N="USB-C";V=0x13},@{N="DVI";V=0x03},@{N="VGA";V=0x01}) | ForEach-Object {
+            $item = New-Object System.Windows.Controls.ComboBoxItem; $item.Content = $_.N; $item.Tag = $_.V; $inputSourceCombo.Items.Add($item) | Out-Null
+        }
+        $capabilitiesBox.Text = if ($mon.Capabilities) { $mon.Capabilities } else { "DDC/CI capabilities not available" }
+        if ($h -eq [IntPtr]::Zero -and $script:WmiBrightnessAvailable) {
+            $wmiBrightness = Get-WmiBrightness
+            if ($null -ne $wmiBrightness) {
+                $brightnessSlider.Maximum = 100; $brightnessSlider.Value = $wmiBrightness; $brightnessValue.Text = $wmiBrightness
+                $capabilitiesBox.Text = "Integrated display brightness via WMI"
+                Update-Status "$($mon.Name) via WMI"; Update-TrayPopupState; Update-TrayIconText
+                return
+            }
+        }
+        if ($h -eq [IntPtr]::Zero) {
+            Update-Status "$($mon.Name)"
+            Update-TrayPopupState
+            Update-TrayIconText
             return
         }
+    } finally {
+        $script:UpdatingUI = $false
     }
-    $b = Get-VCPValue -Handle $h -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS); if ($b.Success) { $brightnessSlider.Maximum = $b.Maximum; $brightnessSlider.Value = $b.Current; $brightnessValue.Text = $b.Current }
-    $c = Get-VCPValue -Handle $h -VCPCode ([MonitorAPI]::VCP_CONTRAST); if ($c.Success) { $contrastSlider.Maximum = $c.Maximum; $contrastSlider.Value = $c.Current; $contrastValue.Text = $c.Current }
-    $r = Get-VCPValue -Handle $h -VCPCode ([MonitorAPI]::VCP_RED_GAIN); if ($r.Success) { $redSlider.Maximum = $r.Maximum; $redSlider.Value = $r.Current; $redValue.Text = $r.Current }
-    $g = Get-VCPValue -Handle $h -VCPCode ([MonitorAPI]::VCP_GREEN_GAIN); if ($g.Success) { $greenSlider.Maximum = $g.Maximum; $greenSlider.Value = $g.Current; $greenValue.Text = $g.Current }
-    $bl = Get-VCPValue -Handle $h -VCPCode ([MonitorAPI]::VCP_BLUE_GAIN); if ($bl.Success) { $blueSlider.Maximum = $bl.Maximum; $blueSlider.Value = $bl.Current; $blueValue.Text = $bl.Current }
-    $v = Get-VCPValue -Handle $h -VCPCode ([MonitorAPI]::VCP_VOLUME); if ($v.Success) { $volumeSlider.Maximum = $v.Maximum; $volumeSlider.Value = $v.Current; $volumeValue.Text = $v.Current }
-    $sh = Get-VCPValue -Handle $h -VCPCode ([MonitorAPI]::VCP_SHARPNESS); if ($sh.Success) { $sharpnessSlider.Maximum = $sh.Maximum; $sharpnessSlider.Value = $sh.Current; $sharpnessValue.Text = $sh.Current }
-    $inputSourceCombo.Items.Clear()
-    @(@{N="HDMI 1";V=0x11},@{N="HDMI 2";V=0x12},@{N="DisplayPort 1";V=0x0F},@{N="DisplayPort 2";V=0x10},@{N="USB-C";V=0x13},@{N="DVI";V=0x03},@{N="VGA";V=0x01}) | ForEach-Object {
-        $item = New-Object System.Windows.Controls.ComboBoxItem; $item.Content = $_.N; $item.Tag = $_.V; $inputSourceCombo.Items.Add($item) | Out-Null
-    }
-    $capabilitiesBox.Text = if ($mon.Capabilities) { $mon.Capabilities } else { "DDC/CI capabilities not available" }
-    $script:UpdatingUI = $false; Update-Status "$($mon.Name)"; Update-TrayPopupState; Update-TrayIconText
+    Start-MonitorSettingsWorker -Handle $h -MonitorIndex $script:CurrentMonitorIndex -MonitorName $mon.Name
 }
 
 function Refresh-Monitors { Get-Monitors; if ($script:CurrentMonitorIndex -ge $script:PhysicalMonitors.Count) { $script:CurrentMonitorIndex = 0 }; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList }
@@ -3067,7 +3199,7 @@ $window.Add_StateChanged({
     if ($window.WindowState -eq [System.Windows.WindowState]::Minimized) { Hide-MainWindowToTray }
 })
 
-$window.Add_Closed({ if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AmbientLightTimer) { $script:AmbientLightTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }; if ($script:ProfileScheduleTimer) { $script:ProfileScheduleTimer.Stop() }; if ($script:IdleDimTimer) { $script:IdleDimTimer.Stop() }; if ($script:BatteryProfileTimer) { $script:BatteryProfileTimer.Stop() }; if ($script:FpsOverlayTimer) { $script:FpsOverlayTimer.Stop() }; Stop-VcpWorker -Cancel
+$window.Add_Closed({ if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AmbientLightTimer) { $script:AmbientLightTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }; if ($script:ProfileScheduleTimer) { $script:ProfileScheduleTimer.Stop() }; if ($script:IdleDimTimer) { $script:IdleDimTimer.Stop() }; if ($script:BatteryProfileTimer) { $script:BatteryProfileTimer.Stop() }; if ($script:FpsOverlayTimer) { $script:FpsOverlayTimer.Stop() }; Stop-VcpWorker -Cancel; Stop-MonitorSettingsWorker -Cancel
     if ($script:FpsOverlayWindow) { try { $script:FpsOverlayWindow.Close() } catch {} }
     if ($script:HardwareMonitorComputer) { try { $script:HardwareMonitorComputer.Close() } catch {} }
     Dispose-TrayMode
