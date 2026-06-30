@@ -55,7 +55,7 @@ PowerShell/WPF utility for DDC/CI monitor control â€” brightness, contrast,
   Evidence: `MonitorControlPro.ps1:1483`, `MonitorControlPro.ps1:1533`; Microsoft documents roughly 40 ms for VCP reads and 50 ms for VCP writes.
   Touches: `MonitorControlPro.ps1` hardware wrappers, slider handlers, VCP scan, profile/app/schedule/idle apply paths.
   Acceptance: Rapid slider dragging remains responsive, writes are coalesced per monitor/code, VCP scan shows progress without `DoEvents`, and failed writes surface in status/log.
-  Progress: v3.20.0 adds coalesced background writes for slider, profile, preset, and all-monitor set paths; v3.21.0 moves VCP Explorer query/scan reads to a background worker with timer-based progress; v3.22.0 moves monitor setting refresh reads to a background worker; v3.23.0 routes time-based writes through the queued path and surfaces DDC retry diagnostics for read/write failures.
+  Progress: v3.20.0 adds coalesced background writes for slider, profile, preset, and all-monitor set paths; v3.21.0 moves VCP Explorer query/scan reads to a background worker with timer-based progress; v3.22.0 moves monitor setting refresh reads to a background worker; v3.23.0 routes time-based writes through the queued path and surfaces DDC retry diagnostics for read/write failures; v3.30.0 routes VCP Explorer Set, color reset, and factory reset through queued writes with timer-delayed refresh instead of UI-thread sleeps.
   Complexity: M
 
 ### P1
