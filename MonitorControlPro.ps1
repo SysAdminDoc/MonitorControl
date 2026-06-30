@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.30.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro v3.31.0 - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.30.0 - Enhanced with nonblocking advanced DDC writes
+    Version: 3.31.0 - Enhanced with async capabilities reads
 #>
 
 param([switch]$StartMinimized, [string]$LoadProfile)
@@ -703,6 +703,12 @@ $script:MonitorSettingsWorkerTimer = $null
 $script:MonitorSettingsWorkerIndex = -1
 $script:MonitorSettingsWorkerName = ""
 $script:MonitorSettingsWorkerLastOutputCount = 0
+$script:CapabilitiesWorker = $null
+$script:CapabilitiesWorkerInput = $null
+$script:CapabilitiesWorkerOutput = $null
+$script:CapabilitiesWorkerAsyncResult = $null
+$script:CapabilitiesWorkerTimer = $null
+$script:CapabilitiesWorkerLastOutputCount = 0
 $script:DdcReadRetryCount = [MonitorAPI]::VcpReadRetryCount
 $script:DdcWriteRetryCount = [MonitorAPI]::VcpWriteRetryCount
 $script:DdcScanRetryCount = 0
@@ -741,7 +747,7 @@ $script:UpdatingMonitorLabelUI = $false
 $script:UiCulture = "en-US"
 $script:UiStrings = @{
     "App.Title" = "MonitorControl Pro"
-    "App.Subtitle" = "v3.30.0 - Click monitor to select"
+    "App.Subtitle" = "v3.31.0 - Click monitor to select"
     "Tab.Display" = "Display"
     "Tab.Monitor" = "Monitor"
     "Tab.GPU" = "GPU"
@@ -1353,7 +1359,7 @@ function Set-TabOrder {
 
 function Initialize-LocalizationAndAccessibility {
     if ($window) {
-        $window.Title = "$(Get-UiString -Key 'App.Title') v3.30.0"
+        $window.Title = "$(Get-UiString -Key 'App.Title') v3.31.0"
         [System.Windows.Automation.AutomationProperties]::SetName($window, "$(Get-UiString -Key 'App.Title') main window")
     }
     Set-LocalizedText -Control $appTitleText -Key "App.Title" -Property "Text"
@@ -1464,9 +1470,128 @@ function Clear-PhysicalMonitorHandles {
     if ($ClearList) { $script:PhysicalMonitors = @() }
 }
 
+function Stop-CapabilitiesWorker {
+    param([switch]$Cancel)
+    if ($script:CapabilitiesWorkerTimer) { $script:CapabilitiesWorkerTimer.Stop() }
+    if ($script:CapabilitiesWorker) {
+        if ($Cancel -and $script:CapabilitiesWorkerAsyncResult -and -not $script:CapabilitiesWorkerAsyncResult.IsCompleted) {
+            try { $script:CapabilitiesWorker.Stop() } catch {}
+        }
+        try { $script:CapabilitiesWorker.Dispose() } catch {}
+    }
+    if ($script:CapabilitiesWorkerInput) { try { $script:CapabilitiesWorkerInput.Dispose() } catch {} }
+    if ($script:CapabilitiesWorkerOutput) { try { $script:CapabilitiesWorkerOutput.Dispose() } catch {} }
+    $script:CapabilitiesWorker = $null
+    $script:CapabilitiesWorkerInput = $null
+    $script:CapabilitiesWorkerOutput = $null
+    $script:CapabilitiesWorkerAsyncResult = $null
+    $script:CapabilitiesWorkerLastOutputCount = 0
+}
+
+function Update-CapabilitiesBox {
+    param($Monitor)
+    if ($null -eq $capabilitiesBox -or $null -eq $Monitor) { return }
+    if ($Monitor.Capabilities) {
+        $prefix = if ([bool]$Monitor.CapabilitiesKnown) { "Parsed VCP codes: $($Monitor.SupportedVcpCodes.Count)" } else { "Parsed VCP codes: unknown" }
+        $capabilitiesBox.Text = "$prefix`n`n$($Monitor.Capabilities)"
+    } elseif ([bool]$Monitor.CapabilitiesPending) {
+        $capabilitiesBox.Text = "DDC/CI capabilities read pending"
+    } else {
+        $capabilitiesBox.Text = "DDC/CI capabilities not available"
+    }
+}
+
+function Update-CapabilitiesWorkerOutput {
+    if (-not $script:CapabilitiesWorker -or -not $script:CapabilitiesWorkerOutput -or -not $script:CapabilitiesWorkerAsyncResult) { return }
+    $count = $script:CapabilitiesWorkerOutput.Count
+    $completed = [bool]$script:CapabilitiesWorkerAsyncResult.IsCompleted
+    if ($count -ne $script:CapabilitiesWorkerLastOutputCount -and -not $completed) {
+        $script:CapabilitiesWorkerLastOutputCount = $count
+        Update-Status "Reading capabilities... $count"
+    }
+    if (-not $completed) { return }
+    try { $script:CapabilitiesWorker.EndInvoke($script:CapabilitiesWorkerAsyncResult) } catch { Update-Status "Capabilities read failed: $($_.Exception.Message)" }
+    foreach ($result in @($script:CapabilitiesWorkerOutput)) {
+        $index = [int]$result.Index
+        if ($index -lt 0 -or $index -ge $script:PhysicalMonitors.Count) { continue }
+        $mon = $script:PhysicalMonitors[$index]
+        if ($mon.Handle.ToInt64() -ne [int64]$result.HandleValue) { continue }
+        $capabilityInfo = ConvertFrom-MonitorCapabilities -Capabilities ([string]$result.Capabilities)
+        $mon.Capabilities = [string]$result.Capabilities
+        $mon.CapabilitiesKnown = [bool]$capabilityInfo.Known
+        $mon.SupportedVcpCodes = $capabilityInfo.Codes
+        $mon.CapabilitiesPending = $false
+    }
+    if ($script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) {
+        $selected = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
+        Update-CapabilitiesBox -Monitor $selected
+        Update-CapabilityControls -Monitor $selected
+    }
+    Update-Status "Capabilities read complete"
+    Stop-CapabilitiesWorker
+}
+
+function Start-CapabilitiesWorker {
+    Stop-CapabilitiesWorker -Cancel
+    $targets = @()
+    for ($i = 0; $i -lt $script:PhysicalMonitors.Count; $i++) {
+        $mon = $script:PhysicalMonitors[$i]
+        if ($mon.Handle -ne [IntPtr]::Zero) {
+            $mon.CapabilitiesPending = $true
+            $targets += [PSCustomObject]@{ Index = [int]$i; Handle = $mon.Handle; HandleValue = $mon.Handle.ToInt64(); Name = [string]$mon.Name }
+        }
+    }
+    if ($targets.Count -eq 0) { return }
+    $workerScript = {
+        param([object[]]$Targets)
+        foreach ($target in $Targets) {
+            $capabilities = ""
+            $lastError = [int]0
+            try {
+                $capLen = [uint32]0
+                if ([MonitorAPI]::GetCapabilitiesStringLength($target.Handle, [ref]$capLen) -and $capLen -gt 0) {
+                    $capStr = New-Object System.Text.StringBuilder -ArgumentList ([int]$capLen)
+                    if ([MonitorAPI]::CapabilitiesRequestAndCapabilitiesReply($target.Handle, $capStr, $capLen)) {
+                        $capabilities = $capStr.ToString()
+                    } else {
+                        $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                    }
+                } else {
+                    $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                }
+            } catch {
+                $lastError = -1
+            }
+            [PSCustomObject]@{
+                Index = [int]$target.Index
+                HandleValue = [int64]$target.HandleValue
+                MonitorName = [string]$target.Name
+                Capabilities = [string]$capabilities
+                Success = -not [string]::IsNullOrWhiteSpace($capabilities)
+                LastError = [int]$lastError
+            }
+        }
+    }
+    $script:CapabilitiesWorkerInput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
+    $script:CapabilitiesWorkerInput.Complete()
+    $script:CapabilitiesWorkerOutput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
+    $script:CapabilitiesWorker = [PowerShell]::Create()
+    $script:CapabilitiesWorker.AddScript($workerScript.ToString()).AddArgument($targets) | Out-Null
+    $script:CapabilitiesWorkerAsyncResult = $script:CapabilitiesWorker.BeginInvoke($script:CapabilitiesWorkerInput, $script:CapabilitiesWorkerOutput)
+    $script:CapabilitiesWorkerLastOutputCount = 0
+    if (-not $script:CapabilitiesWorkerTimer) {
+        $script:CapabilitiesWorkerTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:CapabilitiesWorkerTimer.Interval = [TimeSpan]::FromMilliseconds(200)
+        $script:CapabilitiesWorkerTimer.Add_Tick({ Update-CapabilitiesWorkerOutput })
+    }
+    Update-Status "Reading capabilities... 0/$($targets.Count)"
+    $script:CapabilitiesWorkerTimer.Start()
+}
+
 function Get-Monitors {
     Stop-MonitorSettingsWorker -Cancel
     Stop-VcpWorker -Cancel
+    Stop-CapabilitiesWorker -Cancel
     Wait-DdcWriteQueueIdle -TimeoutMs 1000 | Out-Null
     Clear-PhysicalMonitorHandles -ClearList
     $monitorHandles = [MonitorAPI]::GetAllMonitorHandles()
@@ -1494,23 +1619,14 @@ function Get-Monitors {
                         $name = if ($pm.szPhysicalMonitorDescription) { $pm.szPhysicalMonitorDescription } else {
                             if ($displayDevices.ContainsKey($monInfo.DeviceName)) { $displayDevices[$monInfo.DeviceName] } else { "Monitor $monitorIndex" }
                         }
-                        $capabilities = ""
-                        try {
-                            $capLen = [uint32]0
-                            if ([MonitorAPI]::GetCapabilitiesStringLength($pm.hPhysicalMonitor, [ref]$capLen) -and $capLen -gt 0) {
-                                $capStr = New-Object System.Text.StringBuilder -ArgumentList ([int]$capLen)
-                                if ([MonitorAPI]::CapabilitiesRequestAndCapabilitiesReply($pm.hPhysicalMonitor, $capStr, $capLen)) { $capabilities = $capStr.ToString() }
-                            }
-                        } catch {}
-                        $capabilityInfo = ConvertFrom-MonitorCapabilities -Capabilities $capabilities
                         $identity = New-MonitorIdentity -DisplayDeviceName $monInfo.DeviceName -FriendlyName $name -Width $devMode.dmPelsWidth -Height $devMode.dmPelsHeight -MonitorIndex $monitorIndex
                         $monitorObject = [PSCustomObject]@{
                             Handle = $pm.hPhysicalMonitor; HMonitor = $hMonitor; Name = $name; Index = $monitorIndex
                             DeviceName = $monInfo.DeviceName; Width = $devMode.dmPelsWidth; Height = $devMode.dmPelsHeight
                             RefreshRate = $devMode.dmDisplayFrequency; IsPrimary = ($monInfo.Flags -band [MonitorAPI]::MONITORINFOF_PRIMARY) -ne 0
                             Left = $monInfo.Monitor.Left; Top = $monInfo.Monitor.Top; Right = $monInfo.Monitor.Right
-                            Bottom = $monInfo.Monitor.Bottom; Capabilities = $capabilities
-                            CapabilitiesKnown = [bool]$capabilityInfo.Known; SupportedVcpCodes = $capabilityInfo.Codes
+                            Bottom = $monInfo.Monitor.Bottom; Capabilities = ""
+                            CapabilitiesKnown = $false; SupportedVcpCodes = @{}; CapabilitiesPending = $true
                             IdentityKey = $identity.Key; IdentitySource = $identity.Source; IdentityDefaultLabel = $identity.DefaultLabel
                             DevicePath = $identity.DevicePath; MonitorDeviceString = $identity.DeviceString; HardwareId = $identity.HardwareId
                             Manufacturer = $identity.Manufacturer; EdidModel = $identity.Model; EdidSerial = $identity.Serial; EdidName = $identity.EdidName
@@ -1532,7 +1648,7 @@ function Get-Monitors {
             Handle = [IntPtr]::Zero; HMonitor = [IntPtr]::Zero; Name = $fallbackName; Index = 1
             DeviceName = $fallbackDevice; Width = 1920; Height = 1080; RefreshRate = 60; IsPrimary = $true
             Left = 0; Top = 0; Right = 1920; Bottom = 1080; Capabilities = ""
-            CapabilitiesKnown = $false; SupportedVcpCodes = @{}
+            CapabilitiesKnown = $false; SupportedVcpCodes = @{}; CapabilitiesPending = $false
             IdentityKey = $identity.Key; IdentitySource = $identity.Source; IdentityDefaultLabel = $identity.DefaultLabel
             DevicePath = $identity.DevicePath; MonitorDeviceString = $identity.DeviceString; HardwareId = $identity.HardwareId
             Manufacturer = $identity.Manufacturer; EdidModel = $identity.Model; EdidSerial = $identity.Serial; EdidName = $identity.EdidName
@@ -2155,7 +2271,7 @@ try {
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.30.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
+        Title="MonitorControl Pro v3.31.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
         Background="#0a0a0a" WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
     <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
@@ -2289,7 +2405,7 @@ try {
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
             <TextBlock x:Name="AppTitleText" Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
-            <TextBlock x:Name="AppSubtitleText" Text="v3.30.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
+            <TextBlock x:Name="AppSubtitleText" Text="v3.31.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal">
             <CheckBox x:Name="ApplyAllCheckbox" Content="All Monitors" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -2749,8 +2865,7 @@ function Load-MonitorSettings {
         @(@{N="HDMI 1";V=0x11},@{N="HDMI 2";V=0x12},@{N="DisplayPort 1";V=0x0F},@{N="DisplayPort 2";V=0x10},@{N="USB-C";V=0x13},@{N="DVI";V=0x03},@{N="VGA";V=0x01}) | ForEach-Object {
             $item = New-Object System.Windows.Controls.ComboBoxItem; $item.Content = $_.N; $item.Tag = $_.V; $inputSourceCombo.Items.Add($item) | Out-Null
         }
-        $capabilityPrefix = if ([bool]$mon.CapabilitiesKnown) { "Parsed VCP codes: $($mon.SupportedVcpCodes.Count)" } else { "Parsed VCP codes: unknown" }
-        $capabilitiesBox.Text = if ($mon.Capabilities) { "$capabilityPrefix`n`n$($mon.Capabilities)" } else { "DDC/CI capabilities not available" }
+        Update-CapabilitiesBox -Monitor $mon
         Update-CapabilityControls -Monitor $mon
         if ($h -eq [IntPtr]::Zero -and $script:WmiBrightnessAvailable) {
             $wmiBrightness = Get-WmiBrightness
@@ -2789,6 +2904,7 @@ function Refresh-Monitors {
     }
     Draw-MonitorLayout
     Load-MonitorSettings
+    Start-CapabilitiesWorker
     Update-ProfilesList
 }
 
@@ -3021,7 +3137,7 @@ function Export-ProfileBundle {
 
         $manifest = [PSCustomObject]@{
             BundleSchemaVersion = $script:ProfileBundleSchemaVersion
-            AppVersion = "3.30.0"
+            AppVersion = "3.31.0"
             ProfileSchemaVersion = $script:ProfileSchemaVersion
             ExportedAt = (Get-Date).ToString("o")
             ProfileCount = $exportedProfiles.Count
@@ -4440,7 +4556,7 @@ function Update-GpuStats {
 }
 
 # Initialize
-Initialize-WmiBrightness; Load-MonitorIdentitySettings; Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList
+Initialize-WmiBrightness; Load-MonitorIdentitySettings; Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Load-MonitorSettings; Start-CapabilitiesWorker; Update-ProfilesList
 Load-AppProfileRules; Update-AppProfileControls; Start-AppProfileWatcher
 Load-ProfileSchedules; Update-ScheduleControls; Start-ProfileScheduleWatcher
 Load-IdleDimSettings; Update-IdleDimControls; Start-IdleDimWatcher
@@ -4458,7 +4574,7 @@ $window.Add_StateChanged({
     if ($window.WindowState -eq [System.Windows.WindowState]::Minimized) { Hide-MainWindowToTray }
 })
 
-$window.Add_Closed({ if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AmbientLightTimer) { $script:AmbientLightTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }; if ($script:ProfileScheduleTimer) { $script:ProfileScheduleTimer.Stop() }; if ($script:IdleDimTimer) { $script:IdleDimTimer.Stop() }; if ($script:BatteryProfileTimer) { $script:BatteryProfileTimer.Stop() }; if ($script:FpsOverlayTimer) { $script:FpsOverlayTimer.Stop() }; if ($script:DdcWriteResultTimer) { $script:DdcWriteResultTimer.Stop() }; foreach ($timer in @($script:DeferredRefreshTimers)) { try { $timer.Stop() } catch {} }; $script:DeferredRefreshTimers = @(); Stop-VcpWorker -Cancel; Stop-MonitorSettingsWorker -Cancel
+$window.Add_Closed({ if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AmbientLightTimer) { $script:AmbientLightTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }; if ($script:ProfileScheduleTimer) { $script:ProfileScheduleTimer.Stop() }; if ($script:IdleDimTimer) { $script:IdleDimTimer.Stop() }; if ($script:BatteryProfileTimer) { $script:BatteryProfileTimer.Stop() }; if ($script:FpsOverlayTimer) { $script:FpsOverlayTimer.Stop() }; if ($script:DdcWriteResultTimer) { $script:DdcWriteResultTimer.Stop() }; foreach ($timer in @($script:DeferredRefreshTimers)) { try { $timer.Stop() } catch {} }; $script:DeferredRefreshTimers = @(); Stop-VcpWorker -Cancel; Stop-MonitorSettingsWorker -Cancel; Stop-CapabilitiesWorker -Cancel
     if ($script:FpsOverlayWindow) { try { $script:FpsOverlayWindow.Close() } catch {} }
     if ($script:HardwareMonitorComputer) { try { $script:HardwareMonitorComputer.Close() } catch {} }
     Dispose-TrayMode
