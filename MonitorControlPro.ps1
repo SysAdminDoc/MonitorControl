@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.19.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro v3.20.0 - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.19.0 - Enhanced with schedule timeline UI
+    Version: 3.20.0 - Enhanced with coalesced background DDC writes
 #>
 
 param([switch]$StartMinimized, [string]$LoadProfile)
@@ -17,6 +17,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Collections.Generic;
 using System.Text;
+using System.Threading;
 
 public class MonitorAPI
 {
@@ -92,6 +93,61 @@ public class MonitorAPI
     public static extern bool GetCapabilitiesStringLength(IntPtr hMonitor, out uint pdwCapabilitiesStringLengthInCharacters);
     [DllImport("dxva2.dll", SetLastError = true)]
     public static extern bool CapabilitiesRequestAndCapabilitiesReply(IntPtr hMonitor, StringBuilder pszASCIICapabilitiesString, uint dwCapabilitiesStringLengthInCharacters);
+
+    private class QueuedVcpWrite {
+        public IntPtr Handle;
+        public byte Code;
+        public uint Value;
+        public string Key;
+    }
+
+    private static readonly object VcpWriteQueueLock = new object();
+    private static readonly Dictionary<string, QueuedVcpWrite> QueuedVcpWrites = new Dictionary<string, QueuedVcpWrite>();
+    private static bool VcpWriteWorkerActive = false;
+
+    public static void QueueVCPWrite(IntPtr hMonitor, byte bVCPCode, uint dwNewValue, string coalesceKey)
+    {
+        if (hMonitor == IntPtr.Zero) { return; }
+        string key = String.IsNullOrEmpty(coalesceKey) ? hMonitor.ToInt64().ToString("X") + ":" + bVCPCode.ToString("X2") : coalesceKey;
+        lock (VcpWriteQueueLock)
+        {
+            QueuedVcpWrites[key] = new QueuedVcpWrite { Handle = hMonitor, Code = bVCPCode, Value = dwNewValue, Key = key };
+            if (!VcpWriteWorkerActive)
+            {
+                VcpWriteWorkerActive = true;
+                ThreadPool.QueueUserWorkItem(ProcessQueuedVcpWrites);
+            }
+        }
+    }
+
+    private static void ProcessQueuedVcpWrites(object state)
+    {
+        while (true)
+        {
+            QueuedVcpWrite[] batch;
+            lock (VcpWriteQueueLock)
+            {
+                if (QueuedVcpWrites.Count == 0)
+                {
+                    VcpWriteWorkerActive = false;
+                    return;
+                }
+                batch = new QueuedVcpWrite[QueuedVcpWrites.Count];
+                QueuedVcpWrites.Values.CopyTo(batch, 0);
+                QueuedVcpWrites.Clear();
+            }
+            foreach (QueuedVcpWrite write in batch)
+            {
+                try { SetVCPFeature(write.Handle, write.Code, write.Value); } catch { }
+                Thread.Sleep(50);
+            }
+        }
+    }
+
+    public static int GetPendingVCPWriteCount()
+    {
+        lock (VcpWriteQueueLock) { return QueuedVcpWrites.Count; }
+    }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     public struct PHYSICAL_MONITOR {
@@ -566,18 +622,29 @@ function Set-VCPValue {
     return [MonitorAPI]::SetVCPFeature($Handle, $VCPCode, $Value)
 }
 
+function Queue-VCPValue {
+    param([IntPtr]$Handle, [byte]$VCPCode, [uint32]$Value, [string]$Key)
+    if ($Handle -eq [IntPtr]::Zero) { return $false }
+    [MonitorAPI]::QueueVCPWrite($Handle, $VCPCode, $Value, $Key)
+    return $true
+}
+
 function Set-VCPValueWithSync {
     param([byte]$VCPCode, [uint32]$Value, [switch]$Force)
+    $queued = 0
     if ($script:ApplyToAll -or $Force) {
-        foreach ($mon in $script:PhysicalMonitors) {
-            if ($mon.Handle -ne [IntPtr]::Zero) { Set-VCPValue -Handle $mon.Handle -VCPCode $VCPCode -Value $Value | Out-Null; Start-Sleep -Milliseconds 50 }
+        for ($i = 0; $i -lt $script:PhysicalMonitors.Count; $i++) {
+            $mon = $script:PhysicalMonitors[$i]
+            if (Queue-VCPValue -Handle $mon.Handle -VCPCode $VCPCode -Value $Value -Key "$i`:0x$("{0:X2}" -f $VCPCode)") { $queued++ }
         }
         if ($VCPCode -eq [MonitorAPI]::VCP_BRIGHTNESS -and $script:WmiBrightnessAvailable) { Set-WmiBrightness -Value $Value | Out-Null }
     } else {
         $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
-        if ($mon.Handle -ne [IntPtr]::Zero) { Set-VCPValue -Handle $mon.Handle -VCPCode $VCPCode -Value $Value | Out-Null }
+        if (Queue-VCPValue -Handle $mon.Handle -VCPCode $VCPCode -Value $Value -Key "$script:CurrentMonitorIndex`:0x$("{0:X2}" -f $VCPCode)") { $queued++ }
         elseif ($VCPCode -eq [MonitorAPI]::VCP_BRIGHTNESS -and $script:WmiBrightnessAvailable) { Set-WmiBrightness -Value $Value | Out-Null }
     }
+    if ($queued -gt 0) { return $true }
+    return ($VCPCode -eq [MonitorAPI]::VCP_BRIGHTNESS -and $script:WmiBrightnessAvailable)
 }
 
 function Set-GammaRamp {
@@ -818,7 +885,7 @@ try {
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.19.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
+        Title="MonitorControl Pro v3.20.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
         Background="#0a0a0a" WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
     <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
@@ -952,7 +1019,7 @@ try {
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
             <TextBlock Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
-            <TextBlock Text="v3.19.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
+            <TextBlock Text="v3.20.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal">
             <CheckBox x:Name="ApplyAllCheckbox" Content="All Monitors" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -2603,7 +2670,7 @@ $pipSecondaryHdmi1Btn.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::V
 $pipSecondaryHdmi2Btn.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_PIP_SECONDARY_SOURCE) -Value ([MonitorAPI]::PIP_SECONDARY_HDMI2); Update-Status "PiP/PbP secondary: HDMI 2" })
 $resetColorBtn.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_RESTORE_FACTORY_COLOR) -Value 1; Start-Sleep -Milliseconds 500; Load-MonitorSettings; Update-Status "Colors Reset" })
 $factoryResetBtn.Add_Click({ if ([System.Windows.MessageBox]::Show("Reset ALL settings?", "Factory Reset", "YesNo", "Warning") -eq "Yes") { Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_RESTORE_FACTORY_DEFAULTS) -Value 1; Start-Sleep -Milliseconds 1000; Load-MonitorSettings; Update-Status "Factory Reset Done" } })
-$allMonitorsStandbyBtn.Add_Click({ foreach ($mon in $script:PhysicalMonitors) { if ($mon.Handle -ne [IntPtr]::Zero) { Set-VCPValue -Handle $mon.Handle -VCPCode ([MonitorAPI]::VCP_POWER_MODE) -Value ([MonitorAPI]::POWER_STANDBY) | Out-Null; Start-Sleep -Milliseconds 100 } }; Update-Status "All Standby" })
+$allMonitorsStandbyBtn.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_POWER_MODE) -Value ([MonitorAPI]::POWER_STANDBY) -Force | Out-Null; Update-Status "All Standby queued" })
 
 $vcpPresetCombo.Add_SelectionChanged({ if ($vcpPresetCombo.SelectedItem -ne $null) { $vcpCodeBox.Text = "0x{0:X2}" -f $vcpPresetCombo.SelectedItem.Tag } })
 $vcpQueryBtn.Add_Click({
