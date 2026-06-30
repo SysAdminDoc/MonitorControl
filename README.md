@@ -1,7 +1,7 @@
 # MonitorControl Pro
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v3.23.0-brightgreen" alt="Version v3.23.0">
+  <img src="https://img.shields.io/badge/Version-v3.24.0-brightgreen" alt="Version v3.24.0">
   <img src="https://img.shields.io/badge/PowerShell-5.1+-blue?logo=powershell" alt="PowerShell 5.1+">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/DDC%2FCI-Supported-green" alt="DDC/CI">
@@ -28,6 +28,7 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 - **Apply to All Monitors** — Sync settings across all connected displays
 - **Monitor Identification** — On-screen overlays showing monitor numbers
 - **Laptop Brightness Fallback** — Uses `WmiMonitorBrightnessMethods` for integrated displays when DDC/CI handles are unavailable
+- **Safe Monitor Refresh** — Re-enumeration and app close destroy stale physical-monitor handles once before replacing the monitor list
 
 ### Automation
 - **System Tray Mode** - Persistent notification-area icon with a brightness popup, linked-monitor toggle, and profile cycling
