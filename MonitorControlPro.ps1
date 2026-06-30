@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.26.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro v3.27.0 - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.26.0 - Enhanced with capabilities-based control support
+    Version: 3.27.0 - Enhanced with stable monitor identities and labels
 #>
 
 param([switch]$StartMinimized, [string]$LoadProfile)
@@ -731,10 +731,13 @@ $script:AppProfileRulesPath = Join-Path $script:ProfilesPath "app-profile-rules.
 $script:ProfileScheduleRulesPath = Join-Path $script:ProfilesPath "profile-schedules.json"
 $script:IdleDimSettingsPath = Join-Path $script:ProfilesPath "idle-dim.json"
 $script:BatteryProfileSettingsPath = Join-Path $script:ProfilesPath "battery-profile.json"
-$script:ProfileSchemaVersion = 2
+$script:MonitorIdentitySettingsPath = Join-Path $script:ProfilesPath "monitor-identities.json"
+$script:ProfileSchemaVersion = 3
 $script:ProfileBundleSchemaVersion = 1
 $script:ProfileExportsPath = Join-Path $script:ProfilesPath "exports"
-$script:ProfileMetadataFiles = @("app-profile-rules.json", "profile-schedules.json", "idle-dim.json", "battery-profile.json", "profile-storage.json")
+$script:ProfileMetadataFiles = @("app-profile-rules.json", "profile-schedules.json", "idle-dim.json", "battery-profile.json", "profile-storage.json", "monitor-identities.json")
+$script:MonitorIdentityRecords = @{}
+$script:UpdatingMonitorLabelUI = $false
 $script:UpdatingUI = $false
 $script:ApplyToAll = $false
 $script:AutoModeEnabled = $false
@@ -965,6 +968,283 @@ function Update-CapabilityControls {
     Update-VcpPresetItems -Monitor $Monitor
 }
 
+function Get-StableHash {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return "" }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
+        $hash = $sha.ComputeHash($bytes)
+        return (($hash | ForEach-Object { $_.ToString("x2") }) -join "").Substring(0, 16)
+    } finally {
+        $sha.Dispose()
+    }
+}
+
+function Convert-EdidManufacturerId {
+    param([byte[]]$Edid)
+    if ($null -eq $Edid -or $Edid.Length -lt 10) { return "" }
+    $word = (([int]$Edid[8]) -shl 8) -bor [int]$Edid[9]
+    $chars = foreach ($shift in 10,5,0) {
+        $code = ($word -shr $shift) -band 31
+        if ($code -lt 1 -or $code -gt 26) { return "" }
+        [char](64 + $code)
+    }
+    return (-join $chars)
+}
+
+function Get-EdidTextDescriptor {
+    param([byte[]]$Edid, [byte]$Tag)
+    if ($null -eq $Edid -or $Edid.Length -lt 128) { return "" }
+    for ($offset = 54; $offset -le 108; $offset += 18) {
+        if ($Edid[$offset] -eq 0 -and $Edid[$offset + 1] -eq 0 -and $Edid[$offset + 2] -eq 0 -and $Edid[$offset + 3] -eq $Tag) {
+            $text = [System.Text.Encoding]::ASCII.GetString($Edid, $offset + 5, 13)
+            return $text.Trim([char[]]@(0, 10, 13, 32))
+        }
+    }
+    return ""
+}
+
+function Read-MonitorEdidFromDeviceId {
+    param([string]$MonitorDeviceId)
+    $result = [ordered]@{
+        DeviceId = $MonitorDeviceId
+        HardwareId = ""
+        Manufacturer = ""
+        Model = ""
+        Serial = ""
+        Name = ""
+    }
+    if ([string]::IsNullOrWhiteSpace($MonitorDeviceId)) { return [PSCustomObject]$result }
+    $hardwareId = ""
+    $instanceId = ""
+    if ($MonitorDeviceId -match '^MONITOR\\([^\\]+)\\([^\\]+)') {
+        $hardwareId = $Matches[1]
+        $instanceId = $Matches[2]
+        $result.HardwareId = $hardwareId
+    }
+    $basePath = "HKLM:\SYSTEM\CurrentControlSet\Enum\DISPLAY"
+    $candidatePaths = @()
+    if ($hardwareId -and $instanceId) {
+        $candidatePaths += (Join-Path (Join-Path (Join-Path $basePath $hardwareId) $instanceId) "Device Parameters")
+    }
+    if ($hardwareId) {
+        try {
+            $candidatePaths += @(Get-ChildItem -LiteralPath (Join-Path $basePath $hardwareId) -ErrorAction Stop | ForEach-Object { Join-Path $_.PSPath "Device Parameters" })
+        } catch {}
+    }
+    $edid = $null
+    foreach ($path in ($candidatePaths | Select-Object -Unique)) {
+        try {
+            if (Test-Path -LiteralPath $path) {
+                $prop = Get-ItemProperty -LiteralPath $path -Name EDID -ErrorAction Stop
+                if ($prop.EDID -and $prop.EDID.Length -ge 128) {
+                    $edid = [byte[]]@($prop.EDID | ForEach-Object { [byte]$_ })
+                    break
+                }
+            }
+        } catch {}
+    }
+    if ($null -eq $edid -or $edid.Length -lt 128) { return [PSCustomObject]$result }
+    $result.Manufacturer = Convert-EdidManufacturerId -Edid $edid
+    $productCode = (([int]$edid[11]) -shl 8) -bor [int]$edid[10]
+    $result.Model = "{0:X4}" -f $productCode
+    $numericSerial = [BitConverter]::ToUInt32($edid, 12)
+    $serialText = Get-EdidTextDescriptor -Edid $edid -Tag 0xFF
+    $result.Serial = if (-not [string]::IsNullOrWhiteSpace($serialText)) { $serialText } elseif ($numericSerial -ne 0) { $numericSerial.ToString() } else { "" }
+    $result.Name = Get-EdidTextDescriptor -Edid $edid -Tag 0xFC
+    return [PSCustomObject]$result
+}
+
+function Get-MonitorDisplayDevice {
+    param([string]$DisplayDeviceName)
+    if ([string]::IsNullOrWhiteSpace($DisplayDeviceName)) { return $null }
+    $monitorDevice = New-Object MonitorAPI+DISPLAY_DEVICE
+    $monitorDevice.cb = [System.Runtime.InteropServices.Marshal]::SizeOf($monitorDevice)
+    if ([MonitorAPI]::EnumDisplayDevices($DisplayDeviceName, 0, [ref]$monitorDevice, 0)) {
+        return [PSCustomObject]@{
+            DeviceName = $monitorDevice.DeviceName
+            DeviceString = $monitorDevice.DeviceString
+            DeviceID = $monitorDevice.DeviceID
+            DeviceKey = $monitorDevice.DeviceKey
+        }
+    }
+    return $null
+}
+
+function New-MonitorIdentity {
+    param([string]$DisplayDeviceName, [string]$FriendlyName, [int]$Width, [int]$Height, [int]$MonitorIndex)
+    $displayDevice = Get-MonitorDisplayDevice -DisplayDeviceName $DisplayDeviceName
+    $devicePath = if ($displayDevice) { [string]$displayDevice.DeviceID } else { "" }
+    $deviceString = if ($displayDevice) { [string]$displayDevice.DeviceString } else { "" }
+    $edid = Read-MonitorEdidFromDeviceId -MonitorDeviceId $devicePath
+    $defaultLabel = if (-not [string]::IsNullOrWhiteSpace($edid.Name)) {
+        [string]$edid.Name
+    } elseif (-not [string]::IsNullOrWhiteSpace($deviceString)) {
+        $deviceString
+    } elseif (-not [string]::IsNullOrWhiteSpace($FriendlyName)) {
+        $FriendlyName
+    } else {
+        "Monitor $MonitorIndex"
+    }
+    $source = "display"
+    $keySeed = @($DisplayDeviceName, $FriendlyName, $Width, $Height, $MonitorIndex) -join "|"
+    if (-not [string]::IsNullOrWhiteSpace($edid.Manufacturer) -and -not [string]::IsNullOrWhiteSpace($edid.Model) -and -not [string]::IsNullOrWhiteSpace($edid.Serial)) {
+        $source = "edid"
+        $keySeed = @($edid.Manufacturer, $edid.Model, $edid.Serial) -join "|"
+    } elseif (-not [string]::IsNullOrWhiteSpace($devicePath)) {
+        $source = if (-not [string]::IsNullOrWhiteSpace($edid.Manufacturer)) { "edid-device" } else { "device" }
+        $keySeed = @($devicePath, $edid.Manufacturer, $edid.Model, $edid.Name) -join "|"
+    }
+    return [PSCustomObject]@{
+        Key = "{0}:{1}" -f $source, (Get-StableHash -Text $keySeed)
+        Source = $source
+        DevicePath = $devicePath
+        DeviceString = $deviceString
+        HardwareId = [string]$edid.HardwareId
+        Manufacturer = [string]$edid.Manufacturer
+        Model = [string]$edid.Model
+        Serial = [string]$edid.Serial
+        EdidName = [string]$edid.Name
+        DefaultLabel = $defaultLabel
+    }
+}
+
+function Load-MonitorIdentitySettings {
+    $script:MonitorIdentityRecords = @{}
+    if (-not (Test-Path -LiteralPath $script:MonitorIdentitySettingsPath)) { return }
+    try {
+        $data = Read-JsonFileSafely -Path $script:MonitorIdentitySettingsPath -Label "Monitor identities"
+        if ($null -eq $data) { return }
+        foreach ($entry in @($data.Monitors)) {
+            if ($null -eq $entry -or [string]::IsNullOrWhiteSpace([string]$entry.Key)) { continue }
+            $script:MonitorIdentityRecords[[string]$entry.Key] = [PSCustomObject]@{
+                Key = [string]$entry.Key
+                Label = if ($entry.PSObject.Properties.Name -contains "Label") { [string]$entry.Label } else { "" }
+                DefaultLabel = if ($entry.PSObject.Properties.Name -contains "DefaultLabel") { [string]$entry.DefaultLabel } else { "" }
+                Source = if ($entry.PSObject.Properties.Name -contains "Source") { [string]$entry.Source } else { "" }
+                DevicePath = if ($entry.PSObject.Properties.Name -contains "DevicePath") { [string]$entry.DevicePath } else { "" }
+                HardwareId = if ($entry.PSObject.Properties.Name -contains "HardwareId") { [string]$entry.HardwareId } else { "" }
+                Manufacturer = if ($entry.PSObject.Properties.Name -contains "Manufacturer") { [string]$entry.Manufacturer } else { "" }
+                Model = if ($entry.PSObject.Properties.Name -contains "Model") { [string]$entry.Model } else { "" }
+                Serial = if ($entry.PSObject.Properties.Name -contains "Serial") { [string]$entry.Serial } else { "" }
+                EdidName = if ($entry.PSObject.Properties.Name -contains "EdidName") { [string]$entry.EdidName } else { "" }
+                UpdatedAt = if ($entry.PSObject.Properties.Name -contains "UpdatedAt") { [string]$entry.UpdatedAt } else { "" }
+            }
+        }
+    } catch {
+        Update-Status "Monitor labels could not be loaded"
+    }
+}
+
+function Save-MonitorIdentitySettings {
+    $entries = @($script:MonitorIdentityRecords.Values | Sort-Object -Property Label, Key)
+    $payload = [PSCustomObject]@{
+        SchemaVersion = 1
+        UpdatedAt = (Get-Date).ToString("o")
+        Monitors = $entries
+    }
+    return (Write-JsonFileSafely -Path $script:MonitorIdentitySettingsPath -Data $payload -Depth 5)
+}
+
+function Get-MonitorIdentityRecord {
+    param($Monitor)
+    if ($null -eq $Monitor -or [string]::IsNullOrWhiteSpace([string]$Monitor.IdentityKey)) { return $null }
+    if ($script:MonitorIdentityRecords.ContainsKey([string]$Monitor.IdentityKey)) { return $script:MonitorIdentityRecords[[string]$Monitor.IdentityKey] }
+    return $null
+}
+
+function Get-MonitorDisplayLabel {
+    param($Monitor)
+    if ($null -eq $Monitor) { return "No monitor" }
+    if (-not [string]::IsNullOrWhiteSpace([string]$Monitor.UserLabel)) { return [string]$Monitor.UserLabel }
+    if (-not [string]::IsNullOrWhiteSpace([string]$Monitor.IdentityDefaultLabel)) { return [string]$Monitor.IdentityDefaultLabel }
+    if (-not [string]::IsNullOrWhiteSpace([string]$Monitor.Name)) { return [string]$Monitor.Name }
+    return "Monitor $($Monitor.Index)"
+}
+
+function Apply-MonitorIdentity {
+    param($Monitor)
+    if ($null -eq $Monitor) { return }
+    $record = Get-MonitorIdentityRecord -Monitor $Monitor
+    $label = if ($record -and -not [string]::IsNullOrWhiteSpace([string]$record.Label)) { [string]$record.Label } else { "" }
+    $Monitor | Add-Member -NotePropertyName UserLabel -NotePropertyValue $label -Force
+    $Monitor | Add-Member -NotePropertyName DisplayLabel -NotePropertyValue (Get-MonitorDisplayLabel -Monitor $Monitor) -Force
+}
+
+function Update-MonitorIdentityAssignments {
+    foreach ($mon in @($script:PhysicalMonitors)) { Apply-MonitorIdentity -Monitor $mon }
+}
+
+function Find-MonitorIndexByIdentity {
+    param([string]$IdentityKey)
+    if ([string]::IsNullOrWhiteSpace($IdentityKey)) { return -1 }
+    for ($i = 0; $i -lt $script:PhysicalMonitors.Count; $i++) {
+        if ([string]$script:PhysicalMonitors[$i].IdentityKey -eq $IdentityKey) { return $i }
+    }
+    return -1
+}
+
+function Update-MonitorIdentityControls {
+    if ($null -eq $monitorLabelBox -or $null -eq $monitorIdentityText) { return }
+    if ($script:PhysicalMonitors.Count -eq 0 -or $script:CurrentMonitorIndex -ge $script:PhysicalMonitors.Count) { return }
+    $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
+    $script:UpdatingMonitorLabelUI = $true
+    try {
+        $monitorLabelBox.Text = if (-not [string]::IsNullOrWhiteSpace([string]$mon.UserLabel)) { [string]$mon.UserLabel } else { "" }
+        $identitySummary = if (-not [string]::IsNullOrWhiteSpace([string]$mon.Manufacturer)) {
+            "Identity: $($mon.Manufacturer) $($mon.EdidModel) $($mon.EdidSerial)"
+        } else {
+            "Identity: $($mon.IdentitySource)"
+        }
+        $monitorIdentityText.Text = $identitySummary
+        $monitorIdentityText.ToolTip = "Key: $($mon.IdentityKey)`nDevice: $($mon.DevicePath)"
+    } finally {
+        $script:UpdatingMonitorLabelUI = $false
+    }
+}
+
+function Set-MonitorUserLabel {
+    param($Monitor, [string]$Label)
+    if ($null -eq $Monitor -or [string]::IsNullOrWhiteSpace([string]$Monitor.IdentityKey)) { return $false }
+    $cleanLabel = if ($null -eq $Label) { "" } else { $Label.Trim() }
+    if ($cleanLabel.Length -gt 80) { $cleanLabel = $cleanLabel.Substring(0, 80) }
+    $record = Get-MonitorIdentityRecord -Monitor $Monitor
+    if ($null -eq $record) {
+        $record = [PSCustomObject]@{
+            Key = [string]$Monitor.IdentityKey
+            Label = ""
+            DefaultLabel = [string]$Monitor.IdentityDefaultLabel
+            Source = [string]$Monitor.IdentitySource
+            DevicePath = [string]$Monitor.DevicePath
+            HardwareId = [string]$Monitor.HardwareId
+            Manufacturer = [string]$Monitor.Manufacturer
+            Model = [string]$Monitor.EdidModel
+            Serial = [string]$Monitor.EdidSerial
+            EdidName = [string]$Monitor.EdidName
+            UpdatedAt = ""
+        }
+    }
+    $record.Label = $cleanLabel
+    $record.DefaultLabel = [string]$Monitor.IdentityDefaultLabel
+    $record.Source = [string]$Monitor.IdentitySource
+    $record.DevicePath = [string]$Monitor.DevicePath
+    $record.HardwareId = [string]$Monitor.HardwareId
+    $record.Manufacturer = [string]$Monitor.Manufacturer
+    $record.Model = [string]$Monitor.EdidModel
+    $record.Serial = [string]$Monitor.EdidSerial
+    $record.EdidName = [string]$Monitor.EdidName
+    $record.UpdatedAt = (Get-Date).ToString("o")
+    $script:MonitorIdentityRecords[[string]$Monitor.IdentityKey] = $record
+    if (-not (Save-MonitorIdentitySettings)) { return $false }
+    Apply-MonitorIdentity -Monitor $Monitor
+    Draw-MonitorLayout
+    Update-MonitorIdentityControls
+    Update-TrayPopupState
+    Update-TrayIconText
+    return $true
+}
+
 function Wait-DdcWriteQueueIdle {
     param([int]$TimeoutMs = 1000)
     $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
@@ -1030,14 +1310,21 @@ function Get-Monitors {
                             }
                         } catch {}
                         $capabilityInfo = ConvertFrom-MonitorCapabilities -Capabilities $capabilities
-                        $script:PhysicalMonitors += [PSCustomObject]@{
+                        $identity = New-MonitorIdentity -DisplayDeviceName $monInfo.DeviceName -FriendlyName $name -Width $devMode.dmPelsWidth -Height $devMode.dmPelsHeight -MonitorIndex $monitorIndex
+                        $monitorObject = [PSCustomObject]@{
                             Handle = $pm.hPhysicalMonitor; HMonitor = $hMonitor; Name = $name; Index = $monitorIndex
                             DeviceName = $monInfo.DeviceName; Width = $devMode.dmPelsWidth; Height = $devMode.dmPelsHeight
                             RefreshRate = $devMode.dmDisplayFrequency; IsPrimary = ($monInfo.Flags -band [MonitorAPI]::MONITORINFOF_PRIMARY) -ne 0
                             Left = $monInfo.Monitor.Left; Top = $monInfo.Monitor.Top; Right = $monInfo.Monitor.Right
                             Bottom = $monInfo.Monitor.Bottom; Capabilities = $capabilities
                             CapabilitiesKnown = [bool]$capabilityInfo.Known; SupportedVcpCodes = $capabilityInfo.Codes
+                            IdentityKey = $identity.Key; IdentitySource = $identity.Source; IdentityDefaultLabel = $identity.DefaultLabel
+                            DevicePath = $identity.DevicePath; MonitorDeviceString = $identity.DeviceString; HardwareId = $identity.HardwareId
+                            Manufacturer = $identity.Manufacturer; EdidModel = $identity.Model; EdidSerial = $identity.Serial; EdidName = $identity.EdidName
+                            UserLabel = ""; DisplayLabel = $identity.DefaultLabel
                         }
+                        Apply-MonitorIdentity -Monitor $monitorObject
+                        $script:PhysicalMonitors += $monitorObject
                         $monitorIndex++
                     }
                 }
@@ -1047,12 +1334,19 @@ function Get-Monitors {
     if ($script:PhysicalMonitors.Count -eq 0) {
         $fallbackName = if ($script:WmiBrightnessAvailable) { "Integrated Laptop Display" } else { "No DDC/CI Monitor" }
         $fallbackDevice = if ($script:WmiBrightnessAvailable) { "WMI" } else { "" }
-        $script:PhysicalMonitors += [PSCustomObject]@{
+        $identity = New-MonitorIdentity -DisplayDeviceName $fallbackDevice -FriendlyName $fallbackName -Width 1920 -Height 1080 -MonitorIndex 1
+        $fallbackObject = [PSCustomObject]@{
             Handle = [IntPtr]::Zero; HMonitor = [IntPtr]::Zero; Name = $fallbackName; Index = 1
             DeviceName = $fallbackDevice; Width = 1920; Height = 1080; RefreshRate = 60; IsPrimary = $true
             Left = 0; Top = 0; Right = 1920; Bottom = 1080; Capabilities = ""
             CapabilitiesKnown = $false; SupportedVcpCodes = @{}
+            IdentityKey = $identity.Key; IdentitySource = $identity.Source; IdentityDefaultLabel = $identity.DefaultLabel
+            DevicePath = $identity.DevicePath; MonitorDeviceString = $identity.DeviceString; HardwareId = $identity.HardwareId
+            Manufacturer = $identity.Manufacturer; EdidModel = $identity.Model; EdidSerial = $identity.Serial; EdidName = $identity.EdidName
+            UserLabel = ""; DisplayLabel = $identity.DefaultLabel
         }
+        Apply-MonitorIdentity -Monitor $fallbackObject
+        $script:PhysicalMonitors += $fallbackObject
     }
 }
 
@@ -1668,7 +1962,7 @@ try {
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.26.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
+        Title="MonitorControl Pro v3.27.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
         Background="#0a0a0a" WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
     <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
@@ -1802,7 +2096,7 @@ try {
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
             <TextBlock Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
-            <TextBlock Text="v3.26.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
+            <TextBlock Text="v3.27.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal">
             <CheckBox x:Name="ApplyAllCheckbox" Content="All Monitors" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -1883,8 +2177,18 @@ try {
         </TabItem>
         <TabItem Header="Monitor">
             <Border Background="#151515" CornerRadius="0,5,5,5" Padding="10"><ScrollViewer VerticalScrollBarVisibility="Auto"><Grid>
-                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="8"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <Border Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="5"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="8"/><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                        <TextBlock Text="Label" FontSize="10" Foreground="#909090" VerticalAlignment="Center"/>
+                        <TextBox x:Name="MonitorLabelBox" Grid.Column="2" VerticalAlignment="Center"/>
+                        <Button x:Name="MonitorLabelSaveBtn" Grid.Column="4" Content="Save" Style="{StaticResource GreenBtn}" Padding="10,4" FontSize="9"/>
+                        <Button x:Name="MonitorLabelResetBtn" Grid.Column="6" Content="Reset" Style="{StaticResource Btn}" Padding="10,4" FontSize="9"/>
+                    </Grid>
+                    <TextBlock x:Name="MonitorIdentityText" Grid.Row="2" Text="Identity: unknown" FontSize="8" Foreground="#606060" TextTrimming="CharacterEllipsis"/>
+                </Grid></Border>
+                <Grid Grid.Row="2"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="8"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                     <Border Background="#1a1a1a" CornerRadius="5" Padding="10"><StackPanel><TextBlock Text="Input Source" FontSize="10" Foreground="#909090" Margin="0,0,0,5"/>
                         <ComboBox x:Name="InputSourceCombo"/></StackPanel></Border>
                     <Border Grid.Column="2" Background="#1a1a1a" CornerRadius="5" Padding="10"><StackPanel><TextBlock Text="Power Control" FontSize="10" Foreground="#909090" Margin="0,0,0,5"/>
@@ -1894,7 +2198,7 @@ try {
                             <Button x:Name="PowerOnBtn" Grid.Column="4" Content="On" Style="{StaticResource GreenBtn}" Padding="4,4" FontSize="9"/>
                         </Grid></StackPanel></Border>
                 </Grid>
-                <Grid Grid.Row="2"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="8"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                <Grid Grid.Row="4"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="8"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                     <Border Background="#1a1a1a" CornerRadius="5" Padding="10,8"><Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="5"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                         <Grid><StackPanel Orientation="Horizontal"><TextBlock Text="Volume" FontSize="10" Foreground="#909090"/><CheckBox x:Name="MuteCheckbox" Content="Mute" Margin="8,0,0,0" VerticalAlignment="Center" FontSize="9"/></StackPanel>
                             <TextBlock x:Name="VolumeValue" Text="50" FontSize="10" Foreground="#fff" FontWeight="SemiBold" HorizontalAlignment="Right"/></Grid>
@@ -1905,12 +2209,12 @@ try {
                         <Slider x:Name="SharpnessSlider" Grid.Row="2" Value="50" Tag="#3498db" Style="{StaticResource Sld}"/>
                     </Grid></Border>
                 </Grid>
-                <Border Grid.Row="4" Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                <Border Grid.Row="6" Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                     <Button x:Name="ResetColorBtn" Content="Reset Colors" Style="{StaticResource Btn}"/>
                     <Button x:Name="FactoryResetBtn" Grid.Column="2" Content="Factory Reset" Style="{StaticResource WarnBtn}"/>
                 </Grid></Border>
-                <Button x:Name="AllMonitorsStandbyBtn" Grid.Row="6" Content="All Monitors to Standby" Style="{StaticResource Btn}"/>
-                <Border Grid.Row="8" Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid>
+                <Button x:Name="AllMonitorsStandbyBtn" Grid.Row="8" Content="All Monitors to Standby" Style="{StaticResource Btn}"/>
+                <Border Grid.Row="10" Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid>
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                         <TextBlock Text="PiP / PbP Mode" FontSize="10" Foreground="#909090" VerticalAlignment="Center"/>
@@ -2129,6 +2433,8 @@ try {
 # Get all UI elements
 $monitorCanvas = $window.FindName("MonitorCanvas"); $selectedMonitorName = $window.FindName("SelectedMonitorName")
 $selectedMonitorRes = $window.FindName("SelectedMonitorRes"); $selectedMonitorInfo = $window.FindName("SelectedMonitorInfo")
+$monitorLabelBox = $window.FindName("MonitorLabelBox"); $monitorLabelSaveBtn = $window.FindName("MonitorLabelSaveBtn"); $monitorLabelResetBtn = $window.FindName("MonitorLabelResetBtn")
+$monitorIdentityText = $window.FindName("MonitorIdentityText")
 $applyAllCheckbox = $window.FindName("ApplyAllCheckbox"); $refreshBtn = $window.FindName("RefreshBtn"); $identifyBtn = $window.FindName("IdentifyBtn")
 $brightnessSlider = $window.FindName("BrightnessSlider"); $brightnessValue = $window.FindName("BrightnessValue")
 $contrastSlider = $window.FindName("ContrastSlider"); $contrastValue = $window.FindName("ContrastValue")
@@ -2228,16 +2534,17 @@ function Draw-MonitorLayout {
     }
     if ($script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) {
         $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
-        $selectedMonitorName.Text = "$($mon.Index): $($mon.Name)"
+        $selectedMonitorName.Text = "$($mon.Index): $(Get-MonitorDisplayLabel -Monitor $mon)"
         $selectedMonitorRes.Text = "$($mon.Width) x $($mon.Height) @ $($mon.RefreshRate)Hz"
         $selectedMonitorInfo.Text = "$($mon.DeviceName)$(if ($mon.IsPrimary) { ' (Primary)' } else { '' })"
+        Update-MonitorIdentityControls
     }
 }
 
 function Load-MonitorSettings {
     if ($script:PhysicalMonitors.Count -eq 0 -or $script:CurrentMonitorIndex -ge $script:PhysicalMonitors.Count) { return }
     $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]; $h = $mon.Handle
-    Update-Status "Reading from $($mon.Name)..."
+    Update-Status "Reading from $(Get-MonitorDisplayLabel -Monitor $mon)..."
     Stop-MonitorSettingsWorker -Cancel
     $script:UpdatingUI = $true
     try {
@@ -2255,12 +2562,12 @@ function Load-MonitorSettings {
                 foreach ($control in @($brightnessSlider,$presetDay,$presetNight,$presetAutoMode,$presetAmbientMode,$presetReset)) { if ($control) { $control.IsEnabled = $true; $control.ToolTip = "Integrated display brightness via WMI" } }
                 $brightnessSlider.Maximum = 100; $brightnessSlider.Value = $wmiBrightness; $brightnessValue.Text = $wmiBrightness
                 $capabilitiesBox.Text = "Integrated display brightness via WMI"
-                Update-Status "$($mon.Name) via WMI"; Update-TrayPopupState; Update-TrayIconText
+                Update-Status "$(Get-MonitorDisplayLabel -Monitor $mon) via WMI"; Update-TrayPopupState; Update-TrayIconText
                 return
             }
         }
         if ($h -eq [IntPtr]::Zero) {
-            Update-Status "$($mon.Name)"
+            Update-Status "$(Get-MonitorDisplayLabel -Monitor $mon)"
             Update-TrayPopupState
             Update-TrayIconText
             return
@@ -2271,7 +2578,22 @@ function Load-MonitorSettings {
     Start-MonitorSettingsWorker -Handle $h -MonitorIndex $script:CurrentMonitorIndex -MonitorName $mon.Name
 }
 
-function Refresh-Monitors { Get-Monitors; if ($script:CurrentMonitorIndex -ge $script:PhysicalMonitors.Count) { $script:CurrentMonitorIndex = 0 }; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList }
+function Refresh-Monitors {
+    $previousIdentity = ""
+    if ($script:PhysicalMonitors.Count -gt 0 -and $script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) {
+        $previousIdentity = [string]$script:PhysicalMonitors[$script:CurrentMonitorIndex].IdentityKey
+    }
+    Get-Monitors
+    $matchedIndex = Find-MonitorIndexByIdentity -IdentityKey $previousIdentity
+    if ($matchedIndex -ge 0) {
+        $script:CurrentMonitorIndex = $matchedIndex
+    } elseif ($script:CurrentMonitorIndex -ge $script:PhysicalMonitors.Count) {
+        $script:CurrentMonitorIndex = 0
+    }
+    Draw-MonitorLayout
+    Load-MonitorSettings
+    Update-ProfilesList
+}
 function Get-UserProfileFiles {
     if (-not (Test-Path -LiteralPath $script:ProfilesPath)) { return @() }
     return @(Get-ChildItem -Path $script:ProfilesPath -Filter "*.json" -File |
@@ -2285,11 +2607,26 @@ function Update-ProfilesList {
     Update-AppProfileProfileCombo
 }
 
-function New-ProfileObject {
-    param([string]$Name)
+function Get-ProfilePropertyValue {
+    param($Object, [string]$Property, $Default = $null)
+    if ($null -ne $Object -and $Object.PSObject.Properties.Name -contains $Property -and $null -ne $Object.$Property) { return $Object.$Property }
+    return $Default
+}
+
+function Get-ProfileIntValue {
+    param($Object, [string]$Property, [int]$Default = 0)
+    $value = Get-ProfilePropertyValue -Object $Object -Property $Property -Default $null
+    if ($null -eq $value -or [string]::IsNullOrWhiteSpace([string]$value)) { return $Default }
+    return [int]$value
+}
+
+function New-ProfileSettingsObject {
+    param($Monitor)
     return [PSCustomObject]@{
-        SchemaVersion = $script:ProfileSchemaVersion
-        Name = $Name
+        IdentityKey = if ($Monitor) { [string]$Monitor.IdentityKey } else { "" }
+        MonitorLabel = if ($Monitor) { Get-MonitorDisplayLabel -Monitor $Monitor } else { "" }
+        MonitorName = if ($Monitor) { [string]$Monitor.Name } else { "" }
+        DevicePath = if ($Monitor) { [string]$Monitor.DevicePath } else { "" }
         Brightness = [int]$brightnessSlider.Value
         Contrast = [int]$contrastSlider.Value
         Red = [int]$redSlider.Value
@@ -2299,29 +2636,91 @@ function New-ProfileObject {
         GammaRed = [int]$gammaRedSlider.Value
         GammaGreen = [int]$gammaGreenSlider.Value
         GammaBlue = [int]$gammaBlueSlider.Value
+    }
+}
+
+function New-ProfileObject {
+    param([string]$Name)
+    $monitor = if ($script:PhysicalMonitors.Count -gt 0 -and $script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) { $script:PhysicalMonitors[$script:CurrentMonitorIndex] } else { $null }
+    $setting = New-ProfileSettingsObject -Monitor $monitor
+    return [PSCustomObject]@{
+        SchemaVersion = $script:ProfileSchemaVersion
+        Name = $Name
+        MonitorIdentityKey = [string]$setting.IdentityKey
+        MonitorLabel = [string]$setting.MonitorLabel
+        MonitorName = [string]$setting.MonitorName
+        MonitorDevicePath = [string]$setting.DevicePath
+        MonitorSettings = @($setting)
+        Brightness = [int]$setting.Brightness
+        Contrast = [int]$setting.Contrast
+        Red = [int]$setting.Red
+        Green = [int]$setting.Green
+        Blue = [int]$setting.Blue
+        Gamma = [int]$setting.Gamma
+        GammaRed = [int]$setting.GammaRed
+        GammaGreen = [int]$setting.GammaGreen
+        GammaBlue = [int]$setting.GammaBlue
         UpdatedAt = (Get-Date).ToString("o")
     }
 }
 
 function ConvertTo-CurrentProfileSchema {
     param($Profile, [string]$FallbackName)
-    $schema = if ($Profile.PSObject.Properties.Name -contains "SchemaVersion") { [int]$Profile.SchemaVersion } else { 1 }
-    $name = if ($Profile.Name) { [string]$Profile.Name } else { $FallbackName }
-    $converted = [PSCustomObject]@{
+    $name = if (Get-ProfilePropertyValue -Object $Profile -Property "Name" -Default "") { [string]$Profile.Name } else { $FallbackName }
+    $topSetting = [PSCustomObject]@{
+        IdentityKey = [string](Get-ProfilePropertyValue -Object $Profile -Property "MonitorIdentityKey" -Default "")
+        MonitorLabel = [string](Get-ProfilePropertyValue -Object $Profile -Property "MonitorLabel" -Default "")
+        MonitorName = [string](Get-ProfilePropertyValue -Object $Profile -Property "MonitorName" -Default "")
+        DevicePath = [string](Get-ProfilePropertyValue -Object $Profile -Property "MonitorDevicePath" -Default "")
+        Brightness = Get-ProfileIntValue -Object $Profile -Property "Brightness" -Default 50
+        Contrast = Get-ProfileIntValue -Object $Profile -Property "Contrast" -Default 50
+        Red = Get-ProfileIntValue -Object $Profile -Property "Red" -Default 50
+        Green = Get-ProfileIntValue -Object $Profile -Property "Green" -Default 50
+        Blue = Get-ProfileIntValue -Object $Profile -Property "Blue" -Default 50
+        Gamma = Get-ProfileIntValue -Object $Profile -Property "Gamma" -Default 100
+        GammaRed = Get-ProfileIntValue -Object $Profile -Property "GammaRed" -Default 100
+        GammaGreen = Get-ProfileIntValue -Object $Profile -Property "GammaGreen" -Default 100
+        GammaBlue = Get-ProfileIntValue -Object $Profile -Property "GammaBlue" -Default 100
+    }
+    $settings = @()
+    foreach ($setting in @((Get-ProfilePropertyValue -Object $Profile -Property "MonitorSettings" -Default @()))) {
+        if ($null -eq $setting) { continue }
+        $settings += [PSCustomObject]@{
+            IdentityKey = [string](Get-ProfilePropertyValue -Object $setting -Property "IdentityKey" -Default "")
+            MonitorLabel = [string](Get-ProfilePropertyValue -Object $setting -Property "MonitorLabel" -Default "")
+            MonitorName = [string](Get-ProfilePropertyValue -Object $setting -Property "MonitorName" -Default "")
+            DevicePath = [string](Get-ProfilePropertyValue -Object $setting -Property "DevicePath" -Default "")
+            Brightness = Get-ProfileIntValue -Object $setting -Property "Brightness" -Default $topSetting.Brightness
+            Contrast = Get-ProfileIntValue -Object $setting -Property "Contrast" -Default $topSetting.Contrast
+            Red = Get-ProfileIntValue -Object $setting -Property "Red" -Default $topSetting.Red
+            Green = Get-ProfileIntValue -Object $setting -Property "Green" -Default $topSetting.Green
+            Blue = Get-ProfileIntValue -Object $setting -Property "Blue" -Default $topSetting.Blue
+            Gamma = Get-ProfileIntValue -Object $setting -Property "Gamma" -Default $topSetting.Gamma
+            GammaRed = Get-ProfileIntValue -Object $setting -Property "GammaRed" -Default $topSetting.GammaRed
+            GammaGreen = Get-ProfileIntValue -Object $setting -Property "GammaGreen" -Default $topSetting.GammaGreen
+            GammaBlue = Get-ProfileIntValue -Object $setting -Property "GammaBlue" -Default $topSetting.GammaBlue
+        }
+    }
+    if ($settings.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace([string]$topSetting.IdentityKey)) { $settings += $topSetting }
+    return [PSCustomObject]@{
         SchemaVersion = $script:ProfileSchemaVersion
         Name = $name
-        Brightness = [int]$Profile.Brightness
-        Contrast = [int]$Profile.Contrast
-        Red = [int]$Profile.Red
-        Green = [int]$Profile.Green
-        Blue = [int]$Profile.Blue
-        Gamma = if ($null -ne $Profile.Gamma) { [int]$Profile.Gamma } else { 100 }
-        GammaRed = if ($null -ne $Profile.GammaRed) { [int]$Profile.GammaRed } else { 100 }
-        GammaGreen = if ($null -ne $Profile.GammaGreen) { [int]$Profile.GammaGreen } else { 100 }
-        GammaBlue = if ($null -ne $Profile.GammaBlue) { [int]$Profile.GammaBlue } else { 100 }
-        UpdatedAt = if ($Profile.UpdatedAt) { [string]$Profile.UpdatedAt } else { (Get-Date).ToString("o") }
+        MonitorIdentityKey = [string]$topSetting.IdentityKey
+        MonitorLabel = [string]$topSetting.MonitorLabel
+        MonitorName = [string]$topSetting.MonitorName
+        MonitorDevicePath = [string]$topSetting.DevicePath
+        MonitorSettings = @($settings)
+        Brightness = [int]$topSetting.Brightness
+        Contrast = [int]$topSetting.Contrast
+        Red = [int]$topSetting.Red
+        Green = [int]$topSetting.Green
+        Blue = [int]$topSetting.Blue
+        Gamma = [int]$topSetting.Gamma
+        GammaRed = [int]$topSetting.GammaRed
+        GammaGreen = [int]$topSetting.GammaGreen
+        GammaBlue = [int]$topSetting.GammaBlue
+        UpdatedAt = if (Get-ProfilePropertyValue -Object $Profile -Property "UpdatedAt" -Default "") { [string]$Profile.UpdatedAt } else { (Get-Date).ToString("o") }
     }
-    return $converted
 }
 
 function Save-ProfileObject {
@@ -2333,7 +2732,7 @@ function Save-ProfileObject {
     }
     try { $Profile.Name = $safeName } catch {}
     $path = Join-Path $script:ProfilesPath "$safeName.json"
-    return (Write-JsonFileSafely -Path $path -Data $Profile -Depth 4)
+    return (Write-JsonFileSafely -Path $path -Data $Profile -Depth 6)
 }
 
 function Read-ProfileObject {
@@ -2396,7 +2795,7 @@ function Export-ProfileBundle {
             $profile = Read-ProfileObject -Name $profileFile.BaseName
             if ($null -eq $profile) { continue }
             $safeName = $profileFile.BaseName
-            $profile | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $tempProfiles "$safeName.json") -Encoding UTF8
+            $profile | ConvertTo-Json -Depth 6 | Set-Content -Path (Join-Path $tempProfiles "$safeName.json") -Encoding UTF8
             $exportedProfiles += $safeName
         }
 
@@ -2407,7 +2806,7 @@ function Export-ProfileBundle {
 
         $manifest = [PSCustomObject]@{
             BundleSchemaVersion = $script:ProfileBundleSchemaVersion
-            AppVersion = "3.26.0"
+            AppVersion = "3.27.0"
             ProfileSchemaVersion = $script:ProfileSchemaVersion
             ExportedAt = (Get-Date).ToString("o")
             ProfileCount = $exportedProfiles.Count
@@ -2491,6 +2890,7 @@ function Set-ProfileStorageRoot {
         $script:ProfileScheduleRulesPath = Join-Path $script:ProfilesPath "profile-schedules.json"
         $script:IdleDimSettingsPath = Join-Path $script:ProfilesPath "idle-dim.json"
         $script:BatteryProfileSettingsPath = Join-Path $script:ProfilesPath "battery-profile.json"
+        $script:MonitorIdentitySettingsPath = Join-Path $script:ProfilesPath "monitor-identities.json"
         $script:ProfileExportsPath = Join-Path $script:ProfilesPath "exports"
         return $true
     } catch {
@@ -2528,6 +2928,7 @@ function Reset-ProfileBackedAutomationState {
     $script:AcBrightness = 75
     $script:LastPowerLineStatus = $null
     $script:ProfileCycleIndex = -1
+    $script:MonitorIdentityRecords = @{}
 }
 
 function Update-ProfileStorageControls {
@@ -2543,11 +2944,15 @@ function Reload-ProfileStorageState {
     Load-ProfileSchedules
     Load-IdleDimSettings
     Load-BatteryProfileSettings
+    Load-MonitorIdentitySettings
+    Update-MonitorIdentityAssignments
     Update-ProfilesList
     Update-AppProfileControls
     Update-ScheduleControls
     Update-IdleDimControls
     Update-BatteryProfileControls
+    Draw-MonitorLayout
+    Load-MonitorSettings
     Start-AppProfileWatcher
     Start-ProfileScheduleWatcher
     Start-IdleDimWatcher
@@ -2649,24 +3054,51 @@ function Apply-ProfileByName {
         Update-Status "Profile '$Name' not found"
         return $false
     }
+    $active = $p
+    $targetIndex = -1
+    $targetMissing = $false
+    if (-not $script:ApplyToAll) {
+        foreach ($setting in @($p.MonitorSettings)) {
+            $candidateIndex = Find-MonitorIndexByIdentity -IdentityKey ([string]$setting.IdentityKey)
+            if ($candidateIndex -ge 0) {
+                $active = $setting
+                $targetIndex = $candidateIndex
+                break
+            }
+        }
+        if ($targetIndex -lt 0 -and -not [string]::IsNullOrWhiteSpace([string]$p.MonitorIdentityKey)) { $targetMissing = $true }
+        if ($targetIndex -ge 0 -and $targetIndex -ne $script:CurrentMonitorIndex) {
+            $script:CurrentMonitorIndex = $targetIndex
+            Draw-MonitorLayout
+        }
+    }
     try {
         $script:UpdatingUI = $true
-        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value $p.Brightness
-        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_CONTRAST) -Value $p.Contrast
-        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_RED_GAIN) -Value $p.Red
-        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_GREEN_GAIN) -Value $p.Green
-        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BLUE_GAIN) -Value $p.Blue
-        $brightnessSlider.Value = $p.Brightness; $brightnessValue.Text = $p.Brightness
-        $contrastSlider.Value = $p.Contrast; $contrastValue.Text = $p.Contrast
-        $redSlider.Value = $p.Red; $redValue.Text = $p.Red
-        $greenSlider.Value = $p.Green; $greenValue.Text = $p.Green
-        $blueSlider.Value = $p.Blue; $blueValue.Text = $p.Blue
-        if ($p.Gamma) { $gammaSlider.Value = $p.Gamma; $gammaValue.Text = ($p.Gamma / 100).ToString("F2") }
-        if ($p.GammaRed) {
-            $gammaRedSlider.Value = $p.GammaRed
-            $gammaGreenSlider.Value = $p.GammaGreen
-            $gammaBlueSlider.Value = $p.GammaBlue
-            Set-GammaRamp -Gamma ($p.Gamma/100) -RedMult ($p.GammaRed/100) -GreenMult ($p.GammaGreen/100) -BlueMult ($p.GammaBlue/100)
+        $brightness = Get-ProfileIntValue -Object $active -Property "Brightness" -Default $p.Brightness
+        $contrast = Get-ProfileIntValue -Object $active -Property "Contrast" -Default $p.Contrast
+        $red = Get-ProfileIntValue -Object $active -Property "Red" -Default $p.Red
+        $green = Get-ProfileIntValue -Object $active -Property "Green" -Default $p.Green
+        $blue = Get-ProfileIntValue -Object $active -Property "Blue" -Default $p.Blue
+        $gamma = Get-ProfileIntValue -Object $active -Property "Gamma" -Default $p.Gamma
+        $gammaRed = Get-ProfileIntValue -Object $active -Property "GammaRed" -Default $p.GammaRed
+        $gammaGreen = Get-ProfileIntValue -Object $active -Property "GammaGreen" -Default $p.GammaGreen
+        $gammaBlue = Get-ProfileIntValue -Object $active -Property "GammaBlue" -Default $p.GammaBlue
+        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value $brightness
+        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_CONTRAST) -Value $contrast
+        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_RED_GAIN) -Value $red
+        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_GREEN_GAIN) -Value $green
+        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BLUE_GAIN) -Value $blue
+        $brightnessSlider.Value = $brightness; $brightnessValue.Text = $brightness
+        $contrastSlider.Value = $contrast; $contrastValue.Text = $contrast
+        $redSlider.Value = $red; $redValue.Text = $red
+        $greenSlider.Value = $green; $greenValue.Text = $green
+        $blueSlider.Value = $blue; $blueValue.Text = $blue
+        if ($gamma) { $gammaSlider.Value = $gamma; $gammaValue.Text = ($gamma / 100).ToString("F2") }
+        if ($gammaRed) {
+            $gammaRedSlider.Value = $gammaRed
+            $gammaGreenSlider.Value = $gammaGreen
+            $gammaBlueSlider.Value = $gammaBlue
+            Set-GammaRamp -Gamma ($gamma/100) -RedMult ($gammaRed/100) -GreenMult ($gammaGreen/100) -BlueMult ($gammaBlue/100)
         }
     } catch {
         Update-Status "Profile '$Name' failed"
@@ -2675,7 +3107,13 @@ function Apply-ProfileByName {
         $script:UpdatingUI = $false
     }
     $profilesList.SelectedItem = $Name
-    Update-Status "$Reason '$Name'"
+    if ($targetIndex -ge 0) {
+        Update-Status "$Reason '$Name' -> $(Get-MonitorDisplayLabel -Monitor $script:PhysicalMonitors[$targetIndex])"
+    } elseif ($targetMissing) {
+        Update-Status "$Reason '$Name' (saved monitor missing; current monitor used)"
+    } else {
+        Update-Status "$Reason '$Name'"
+    }
     Update-TrayPopupState
     Update-TrayIconText
     return $true
@@ -3073,7 +3511,7 @@ function Get-CurrentMonitorLabel {
     if ($script:ApplyToAll) { return "All monitors" }
     if ($script:PhysicalMonitors.Count -eq 0 -or $script:CurrentMonitorIndex -ge $script:PhysicalMonitors.Count) { return "No monitor" }
     $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
-    return "$($mon.Index): $($mon.Name)"
+    return "$($mon.Index): $(Get-MonitorDisplayLabel -Monitor $mon)"
 }
 
 function Update-TrayIconText {
@@ -3439,6 +3877,21 @@ Update-VcpPresetItems -Monitor $null
 # Event handlers
 $applyAllCheckbox.Add_Checked({ Set-ApplyToAllMode -Enabled $true }); $applyAllCheckbox.Add_Unchecked({ Set-ApplyToAllMode -Enabled $false })
 $refreshBtn.Add_Click({ Refresh-Monitors }); $identifyBtn.Add_Click({ Show-IdentifyOverlays })
+$monitorLabelSaveBtn.Add_Click({
+    if ($script:PhysicalMonitors.Count -eq 0 -or $script:CurrentMonitorIndex -ge $script:PhysicalMonitors.Count) { return }
+    $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
+    if (Set-MonitorUserLabel -Monitor $mon -Label $monitorLabelBox.Text) {
+        $label = Get-MonitorDisplayLabel -Monitor $mon
+        Update-Status "Monitor label saved: $label"
+    }
+})
+$monitorLabelResetBtn.Add_Click({
+    if ($script:PhysicalMonitors.Count -eq 0 -or $script:CurrentMonitorIndex -ge $script:PhysicalMonitors.Count) { return }
+    $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
+    if (Set-MonitorUserLabel -Monitor $mon -Label "") {
+        Update-Status "Monitor label reset: $(Get-MonitorDisplayLabel -Monitor $mon)"
+    }
+})
 
 $brightnessSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$brightnessSlider.Value; $brightnessValue.Text = $v; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value $v; Update-TrayPopupState; Update-TrayIconText })
 $contrastSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$contrastSlider.Value; $contrastValue.Text = $v; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_CONTRAST) -Value $v })
@@ -3761,7 +4214,7 @@ function Update-GpuStats {
 }
 
 # Initialize
-Initialize-WmiBrightness; Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList
+Initialize-WmiBrightness; Load-MonitorIdentitySettings; Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList
 Load-AppProfileRules; Update-AppProfileControls; Start-AppProfileWatcher
 Load-ProfileSchedules; Update-ScheduleControls; Start-ProfileScheduleWatcher
 Load-IdleDimSettings; Update-IdleDimControls; Start-IdleDimWatcher

@@ -59,13 +59,6 @@ PowerShell/WPF utility for DDC/CI monitor control â€” brightness, contrast,
   Complexity: M
 
 ### P1
-- [ ] P1 - Add stable monitor identity and user labels
-  Why: Profiles and automation currently depend on current monitor order, which can change after docking, GPU driver resets, sleep, or cable movement.
-  Evidence: `MonitorControlPro.ps1:224`, `MonitorControlPro.ps1:776`; ControlMyMonitor exposes monitor strings/short IDs, BetterDisplay exposes EDID details, and Monitorian supports user-renamed monitor labels.
-  Touches: monitor enumeration, profile schema, automation rules, tray label, visual layout.
-  Acceptance: Each monitor gets a stable identity record using device path plus EDID/manufacturer/model/serial when available, users can rename displays, and profile application can target a saved monitor even after order changes.
-  Complexity: L
-
 - [ ] P1 - Add accessibility names and localization scaffolding
   Why: Dense WPF controls have visible text but no automation names/resource layer, limiting screen-reader behavior and making translation expensive.
   Evidence: `MonitorControlPro.ps1:330`; Monitorian ships many localizations and documents `.resx` globalization.
