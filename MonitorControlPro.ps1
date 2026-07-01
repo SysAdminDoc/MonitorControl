@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.33.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro v3.34.0 - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.33.0 - Added disabled-by-default local automation bridge
+    Version: 3.34.0 - Added no-hardware parser and storage tests
 #>
 
 param([switch]$StartMinimized, [string]$LoadProfile)
@@ -663,6 +663,7 @@ function Get-SafeProfileName {
     if ([string]::IsNullOrWhiteSpace($Name)) { return "" }
     $trimmed = $Name.Trim()
     if ([System.IO.Path]::GetFileName($trimmed) -ne $trimmed) { return "" }
+    if ($trimmed.TrimEnd(" ", ".") -ne $trimmed) { return "" }
     $safeName = [System.IO.Path]::GetFileNameWithoutExtension($trimmed)
     if ([string]::IsNullOrWhiteSpace($safeName)) { return "" }
     if ($safeName.TrimEnd(" ", ".") -ne $safeName) { return "" }
@@ -775,7 +776,7 @@ $script:UpdatingMonitorLabelUI = $false
 $script:UiCulture = "en-US"
 $script:UiStrings = @{
     "App.Title" = "MonitorControl Pro"
-    "App.Subtitle" = "v3.33.0 - Click monitor to select"
+    "App.Subtitle" = "v3.34.0 - Click monitor to select"
     "Tab.Display" = "Display"
     "Tab.Monitor" = "Monitor"
     "Tab.GPU" = "GPU"
@@ -974,6 +975,30 @@ function Test-MonitorSupportsVcpValue {
     $values = @($Monitor.SupportedVcpCodes[$Code])
     if ($values.Count -eq 0) { return $true }
     return $values -contains $Value
+}
+
+function ConvertTo-VcpCode {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    $inputText = $Text.Trim()
+    $style = [System.Globalization.NumberStyles]::Integer
+    if ($inputText.StartsWith("0x", [StringComparison]::OrdinalIgnoreCase)) {
+        $inputText = $inputText.Substring(2)
+        $style = [System.Globalization.NumberStyles]::HexNumber
+    }
+    if ([string]::IsNullOrWhiteSpace($inputText)) { return $null }
+    $value = 0
+    if (-not [int]::TryParse($inputText, $style, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$value)) { return $null }
+    if ($value -lt 0 -or $value -gt 255) { return $null }
+    return $value
+}
+
+function ConvertTo-VcpValue {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    $value = [uint32]0
+    if (-not [uint32]::TryParse($Text.Trim(), [System.Globalization.NumberStyles]::Integer, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$value)) { return $null }
+    return $value
 }
 
 function Set-ControlVcpSupport {
@@ -1391,7 +1416,7 @@ function Set-TabOrder {
 
 function Initialize-LocalizationAndAccessibility {
     if ($window) {
-        $window.Title = "$(Get-UiString -Key 'App.Title') v3.33.0"
+        $window.Title = "$(Get-UiString -Key 'App.Title') v3.34.0"
         [System.Windows.Automation.AutomationProperties]::SetName($window, "$(Get-UiString -Key 'App.Title') main window")
     }
     Set-LocalizedText -Control $appTitleText -Key "App.Title" -Property "Text"
@@ -2062,7 +2087,7 @@ function New-DdcCompatibilityReport {
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.AppendLine("MonitorControl Pro DDC Compatibility Report")
     [void]$sb.AppendLine("Generated: $((Get-Date).ToString("yyyy-MM-dd HH:mm:ss zzz"))")
-    [void]$sb.AppendLine("App version: 3.33.0")
+    [void]$sb.AppendLine("App version: 3.34.0")
     [void]$sb.AppendLine("OS: $($system.OS)")
     [void]$sb.AppendLine("PowerShell: $($system.PowerShell)")
     [void]$sb.AppendLine("")
@@ -2504,7 +2529,7 @@ function Invoke-AutomationBridgeRequest {
     $path = ([string]$Request.Path).TrimEnd("/").ToLowerInvariant()
     if ($path -eq "") { $path = "/" }
     if ($Request.Method -eq "GET" -and ($path -eq "/health" -or $path -eq "/api/health")) {
-        return New-AutomationBridgeResponse -Status 200 -Body @{ ok = $true; version = "3.33.0"; bridge = "ready"; mqtt = [bool]$script:AutomationBridgeMqttEnabled }
+        return New-AutomationBridgeResponse -Status 200 -Body @{ ok = $true; version = "3.34.0"; bridge = "ready"; mqtt = [bool]$script:AutomationBridgeMqttEnabled }
     }
     if ($Request.Method -eq "GET" -and ($path -eq "/monitors" -or $path -eq "/api/monitors")) {
         return New-AutomationBridgeResponse -Status 200 -Body @{ monitors = @(Get-AutomationBridgeMonitorList) }
@@ -3066,7 +3091,7 @@ try {
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.33.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
+        Title="MonitorControl Pro v3.34.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
         Background="#0a0a0a" WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
     <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
@@ -3204,7 +3229,7 @@ try {
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
             <TextBlock x:Name="AppTitleText" Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
-            <TextBlock x:Name="AppSubtitleText" Text="v3.33.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
+            <TextBlock x:Name="AppSubtitleText" Text="v3.34.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal">
             <CheckBox x:Name="ApplyAllCheckbox" Content="All Monitors" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -3961,7 +3986,7 @@ function Export-ProfileBundle {
 
         $manifest = [PSCustomObject]@{
             BundleSchemaVersion = $script:ProfileBundleSchemaVersion
-            AppVersion = "3.33.0"
+            AppVersion = "3.34.0"
             ProfileSchemaVersion = $script:ProfileSchemaVersion
             ExportedAt = (Get-Date).ToString("o")
             ProfileCount = $exportedProfiles.Count
@@ -4438,8 +4463,9 @@ function Update-ScheduleControls {
 }
 
 function Get-ActiveScheduleRule {
+    param([datetime]$Now = (Get-Date))
     if ($script:ProfileSchedules.Count -eq 0) { return $null }
-    $now = Get-Date
+    $now = $Now
     $nowMinutes = ($now.Hour * 60) + $now.Minute
     $ordered = @($script:ProfileSchedules | Sort-Object @{ Expression = { Get-ScheduleMinutes -TimeText $_.Time } })
     $due = @($ordered | Where-Object { (Get-ScheduleMinutes -TimeText $_.Time) -le $nowMinutes })
@@ -4522,13 +4548,23 @@ function Read-IdleDimSettingsFromUI {
     return $true
 }
 
+function Get-IdleSecondsFromTicks {
+    param([uint32]$CurrentTick, [uint32]$LastInputTick)
+    $current = [uint64]$CurrentTick
+    $last = [uint64]$LastInputTick
+    $elapsedMs = if ($current -ge $last) {
+        $current - $last
+    } else {
+        ([uint64][uint32]::MaxValue - $last) + $current + 1
+    }
+    return [int][Math]::Floor($elapsedMs / 1000)
+}
+
 function Get-IdleSeconds {
     $info = New-Object MonitorAPI+LASTINPUTINFO
     $info.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf($info)
     if (-not [MonitorAPI]::GetLastInputInfo([ref]$info)) { return 0 }
-    $current = [MonitorAPI]::GetTickCount()
-    $elapsedMs = if ($current -ge $info.dwTime) { $current - $info.dwTime } else { ([uint64][uint32]::MaxValue - $info.dwTime) + $current }
-    return [int]($elapsedMs / 1000)
+    return Get-IdleSecondsFromTicks -CurrentTick ([MonitorAPI]::GetTickCount()) -LastInputTick $info.dwTime
 }
 
 function Invoke-IdleDimCheck {
@@ -5115,13 +5151,17 @@ $vcpPresetCombo.Add_SelectionChanged({ if ($vcpPresetCombo.SelectedItem -ne $nul
 $vcpQueryBtn.Add_Click({
     $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]; if ($mon.Handle -eq [IntPtr]::Zero) { $vcpResultBox.Text = "No DDC/CI"; return }
     try {
-        $codeText = $vcpCodeBox.Text.Trim(); $code = if ($codeText -match '^0x') { [Convert]::ToInt32($codeText, 16) } else { [int]$codeText }
+        $code = ConvertTo-VcpCode -Text $vcpCodeBox.Text
+        if ($null -eq $code) { $vcpResultBox.Text = "Invalid VCP code"; return }
         Start-VcpReadWorker -Handle $mon.Handle -Codes @($code) -Mode "Query" -MonitorName $mon.Name -ReadRetries $script:DdcReadRetryCount
     } catch { $vcpResultBox.Text = "Error: $_" }
 })
 $vcpSetBtn.Add_Click({
     $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]; if ($mon.Handle -eq [IntPtr]::Zero) { return }
-    try { $codeText = $vcpCodeBox.Text.Trim(); $code = if ($codeText -match '^0x') { [Convert]::ToInt32($codeText, 16) } else { [int]$codeText }; $value = [uint32]$vcpSetValueBox.Text
+    try {
+        $code = ConvertTo-VcpCode -Text $vcpCodeBox.Text
+        $value = ConvertTo-VcpValue -Text $vcpSetValueBox.Text
+        if ($null -eq $code -or $null -eq $value) { Update-Status "VCP code/value invalid"; return }
         if (-not (Test-MonitorSupportsVcp -Monitor $mon -Code $code)) { Update-Status "VCP 0x$("{0:X2}" -f $code) is not in capabilities"; return }
         if (Set-VCPValueWithSync -VCPCode ([byte]$code) -Value $value) { Update-Status "Queued VCP 0x$("{0:X2}" -f $code) = $value" }
         else { Update-Status "No DDC/CI write target" }

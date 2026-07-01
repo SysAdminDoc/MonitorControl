@@ -49,10 +49,4 @@ PowerShell/WPF utility for DDC/CI monitor control â€” brightness, contrast,
 
 ## Research-Driven Additions
 
-### P2
-- [ ] P2 - Add no-hardware parser and storage tests
-  Why: The repo has no test harness despite growing schedule/profile/VCP parsing logic; many failures can be caught without monitor hardware.
-  Evidence: PowerShell Parser check passes today, but there are no Pester tests; PSScriptAnalyzer and Pester are standard PowerShell quality tools.
-  Touches: `tests/`, extracted pure functions or dot-source-safe test harness, local test command docs.
-  Acceptance: Local tests cover schedule rollover, idle tick wraparound, profile migration/quarantine, filename validation, capabilities parsing, and VCP value parsing without needing DDC hardware.
-  Complexity: M
+No active roadmap items.
