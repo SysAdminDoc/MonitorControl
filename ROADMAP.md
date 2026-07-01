@@ -50,13 +50,6 @@ PowerShell/WPF utility for DDC/CI monitor control â€” brightness, contrast,
 ## Research-Driven Additions
 
 ### P2
-- [ ] P2 - Add optional local automation bridge with network-off default
-  Why: Existing roadmap mentions MQTT/Home Assistant and local protocol control, but the safe foundation is a disabled-by-default localhost bridge with explicit API key and command allowlist.
-  Evidence: ddc-ci-control-bridge provides MCP/MQTT patterns; Home Assistant MQTT Light defines brightness/state integration conventions.
-  Touches: optional listener module, config JSON, tray/status indicator, README security notes.
-  Acceptance: Bridge is off by default, binds only to localhost unless changed, requires an API key for writes, supports list/read/set brightness/profile, logs all writes, and MQTT/Home Assistant remains opt-in.
-  Complexity: L
-
 - [ ] P2 - Add no-hardware parser and storage tests
   Why: The repo has no test harness despite growing schedule/profile/VCP parsing logic; many failures can be caught without monitor hardware.
   Evidence: PowerShell Parser check passes today, but there are no Pester tests; PSScriptAnalyzer and Pester are standard PowerShell quality tools.
