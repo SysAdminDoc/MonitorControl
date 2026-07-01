@@ -1,7 +1,7 @@
 # MonitorControl Pro
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v3.33.0-brightgreen" alt="Version v3.33.0">
+  <img src="https://img.shields.io/badge/Version-v3.34.0-brightgreen" alt="Version v3.34.0">
   <img src="https://img.shields.io/badge/PowerShell-5.1+-blue?logo=powershell" alt="PowerShell 5.1+">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/DDC%2FCI-Supported-green" alt="DDC/CI">
@@ -56,6 +56,7 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 - **Nonblocking Advanced Writes** — VCP Explorer Set, color reset, and factory reset actions use queued DDC writes with deferred refresh instead of UI-thread sleeps
 - **Async Capabilities Reads** — Monitor `vcp(...)` capabilities load from a background worker after enumeration, keeping refresh responsive
 - **DDC Compatibility Report** — Builds a copyable diagnostics report with monitor identities, capability status, common VCP probe results, OS/GPU driver data, and recent DDC errors
+- **No-Hardware Regression Tests** — Pester tests cover schedule rollover, idle tick wraparound, profile JSON quarantine, filename validation, capabilities parsing, and VCP input parsing
 - **Async VCP Reads** — VCP Explorer query and scan operations run in a background worker with live scan progress
 - **Async Monitor Refresh** — Monitor brightness, contrast, color gain, volume, and sharpness reads refresh from a background worker
 - **Coalesced DDC Writes** — Slider, profile, preset, and all-monitor writes queue on a background worker so rapid UI changes do not block the WPF thread
@@ -111,6 +112,13 @@ $Shortcut.Save()
 ```
 
 The release builder writes `dist\MonitorControlPro-vX.Y.Z.zip`, signs `MonitorControlPro.ps1` when a local code-signing certificate is available, and includes `SHA256SUMS` in the ZIP.
+
+### Run No-Hardware Tests
+```powershell
+.\tools\run-tests.ps1
+```
+
+The Pester suite imports only selected pure function definitions from `MonitorControlPro.ps1`, so it does not enumerate displays, open the WPF app, or require DDC/CI hardware.
 
 ## Usage
 
