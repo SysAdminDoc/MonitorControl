@@ -1,7 +1,7 @@
 # MonitorControl Pro
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v3.32.0-brightgreen" alt="Version v3.32.0">
+  <img src="https://img.shields.io/badge/Version-v3.33.0-brightgreen" alt="Version v3.33.0">
   <img src="https://img.shields.io/badge/PowerShell-5.1+-blue?logo=powershell" alt="PowerShell 5.1+">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/DDC%2FCI-Supported-green" alt="DDC/CI">
@@ -37,6 +37,7 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 - **Idle Dim** - Poll Windows idle time and dim all monitors after inactivity, with optional brightness restore on activity
 - **Ambient Light Mode** - Poll Windows `LightSensor` readings and map lux to monitor brightness automatically when a sensor is available
 - **Battery Profile** - Apply separate brightness targets when Windows switches between AC power and battery
+- **Local Automation Bridge** - Disabled-by-default localhost HTTP bridge for list/read brightness, set brightness, and profile load commands
 - **Auto Mode** - Automatic brightness and color temperature based on time of day:
   - Day (7 AM - 6 PM): 80% brightness, neutral colors
   - Evening (6 PM - 9 PM): 60% brightness, slightly warm
@@ -153,6 +154,13 @@ The release builder writes `dist\MonitorControlPro-vX.Y.Z.zip`, signs `MonitorCo
 - Open the **Schedule** tab and enable **Idle dim**
 - Set the idle threshold in minutes, target brightness, and whether activity should restore the previous brightness
 - Settings are saved in `%APPDATA%\MonitorControlPro\idle-dim.json`
+
+### Local Automation Bridge
+- Open the **System** tab and enable **Local Automation Bridge** only when needed
+- Default bind is `127.0.0.1:34291`; non-local bind addresses must be entered manually
+- Write commands require the generated API key through `X-MonitorControl-Key`, `Authorization: Bearer <key>`, or JSON `apiKey`
+- Supported endpoints are `GET /api/health`, `GET /api/monitors`, `GET /api/profiles`, `GET /api/brightness`, `POST /api/brightness`, and `POST /api/profile`
+- MQTT/Home Assistant integration remains disabled; use the bridge as the local foundation before enabling network integrations
 
 ### Navigation
 - Click on monitor rectangles to select different displays
@@ -347,6 +355,8 @@ Your monitor either:
 
 ### Data Storage
 - Profiles: `%APPDATA%\MonitorControlPro\*.json`
+- Automation bridge settings: `%APPDATA%\MonitorControlPro\automation-bridge.json`
+- Automation bridge write log: `%APPDATA%\MonitorControlPro\automation-bridge-writes.jsonl`
 - No registry modifications
 - No admin rights required
 

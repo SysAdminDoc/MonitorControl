@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.32.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro v3.33.0 - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.32.0 - Added copyable DDC compatibility reports
+    Version: 3.33.0 - Added disabled-by-default local automation bridge
 #>
 
 param([switch]$StartMinimized, [string]$LoadProfile)
@@ -718,6 +718,23 @@ $script:DdcReportWorkerLastOutputCount = 0
 $script:DdcReportTargets = @()
 $script:DdcReportLastText = ""
 $script:DdcReportOutputPath = ""
+$script:AutomationBridgeSettingsPath = ""
+$script:AutomationBridgeWriteLogPath = ""
+$script:AutomationBridgeEnabled = $false
+$script:AutomationBridgeBindAddress = "127.0.0.1"
+$script:AutomationBridgePort = 34291
+$script:AutomationBridgeApiKey = ""
+$script:AutomationBridgeMqttEnabled = $false
+$script:AutomationBridgeAllowedCommands = @("list", "readBrightness", "setBrightness", "loadProfile")
+$script:AutomationBridgeWorker = $null
+$script:AutomationBridgeInput = $null
+$script:AutomationBridgeOutput = $null
+$script:AutomationBridgeAsyncResult = $null
+$script:AutomationBridgeTimer = $null
+$script:AutomationBridgeRequests = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
+$script:AutomationBridgeResponses = [hashtable]::Synchronized(@{})
+$script:AutomationBridgeState = [hashtable]::Synchronized(@{ Stop = $false })
+$script:UpdatingAutomationBridgeUI = $false
 $script:DdcReadRetryCount = [MonitorAPI]::VcpReadRetryCount
 $script:DdcWriteRetryCount = [MonitorAPI]::VcpWriteRetryCount
 $script:DdcScanRetryCount = 0
@@ -726,6 +743,8 @@ $script:DdcRecentErrorLimit = 20
 $script:DdcWriteResultTimer = $null
 $script:DefaultProfilesPath = "$env:APPDATA\MonitorControlPro"
 $script:ProfileStorageSettingsPath = Join-Path $script:DefaultProfilesPath "profile-storage.json"
+$script:AutomationBridgeSettingsPath = Join-Path $script:DefaultProfilesPath "automation-bridge.json"
+$script:AutomationBridgeWriteLogPath = Join-Path $script:DefaultProfilesPath "automation-bridge-writes.jsonl"
 $script:ProfilesPath = $script:DefaultProfilesPath
 $script:ProfileStorageMode = "Local"
 if (-not (Test-Path -LiteralPath $script:DefaultProfilesPath)) { New-Item -ItemType Directory -Path $script:DefaultProfilesPath -Force | Out-Null }
@@ -750,13 +769,13 @@ $script:MonitorIdentitySettingsPath = Join-Path $script:ProfilesPath "monitor-id
 $script:ProfileSchemaVersion = 3
 $script:ProfileBundleSchemaVersion = 1
 $script:ProfileExportsPath = Join-Path $script:ProfilesPath "exports"
-$script:ProfileMetadataFiles = @("app-profile-rules.json", "profile-schedules.json", "idle-dim.json", "battery-profile.json", "profile-storage.json", "monitor-identities.json")
+$script:ProfileMetadataFiles = @("app-profile-rules.json", "profile-schedules.json", "idle-dim.json", "battery-profile.json", "profile-storage.json", "monitor-identities.json", "automation-bridge.json")
 $script:MonitorIdentityRecords = @{}
 $script:UpdatingMonitorLabelUI = $false
 $script:UiCulture = "en-US"
 $script:UiStrings = @{
     "App.Title" = "MonitorControl Pro"
-    "App.Subtitle" = "v3.32.0 - Click monitor to select"
+    "App.Subtitle" = "v3.33.0 - Click monitor to select"
     "Tab.Display" = "Display"
     "Tab.Monitor" = "Monitor"
     "Tab.GPU" = "GPU"
@@ -807,6 +826,7 @@ $script:UiStrings = @{
     "A11y.VcpResults" = "VCP results"
     "A11y.Capabilities" = "Monitor capabilities"
     "A11y.DdcReport" = "DDC compatibility report"
+    "A11y.AutomationBridge" = "Local automation bridge"
     "A11y.Status" = "Status"
     "A11y.AppProfileExe" = "Application executable"
     "A11y.AppProfileProfile" = "Application profile"
@@ -1371,7 +1391,7 @@ function Set-TabOrder {
 
 function Initialize-LocalizationAndAccessibility {
     if ($window) {
-        $window.Title = "$(Get-UiString -Key 'App.Title') v3.32.0"
+        $window.Title = "$(Get-UiString -Key 'App.Title') v3.33.0"
         [System.Windows.Automation.AutomationProperties]::SetName($window, "$(Get-UiString -Key 'App.Title') main window")
     }
     Set-LocalizedText -Control $appTitleText -Key "App.Title" -Property "Text"
@@ -1408,6 +1428,7 @@ function Initialize-LocalizationAndAccessibility {
     Set-LocalizedText -Control $batteryProfileSaveBtn -Key "Action.Save"
     Set-LocalizedText -Control $fpsOverlayStartBtn -Key "Action.Start"
     Set-LocalizedText -Control $fpsOverlayStopBtn -Key "Action.Stop"
+    Set-LocalizedText -Control $automationBridgeSaveBtn -Key "Action.Save"
     Set-LocalizedText -Control $ddcReportGenerateBtn -Key "Action.BuildReport"
     Set-LocalizedText -Control $ddcReportCopyBtn -Key "Action.Copy"
 
@@ -1432,6 +1453,7 @@ function Initialize-LocalizationAndAccessibility {
     Set-AccessibleName -Control $vcpResultBox -Key "A11y.VcpResults"
     Set-AccessibleName -Control $capabilitiesBox -Key "A11y.Capabilities"
     Set-AccessibleName -Control $ddcReportBox -Key "A11y.DdcReport"
+    Set-AccessibleName -Control $automationBridgeEnabledCheckbox -Key "A11y.AutomationBridge"
     Set-AccessibleName -Control $statusText -Key "A11y.Status"
     Set-AccessibleName -Control $appProfileExeBox -Key "A11y.AppProfileExe"
     Set-AccessibleName -Control $appProfileProfileCombo -Key "A11y.AppProfileProfile"
@@ -1456,6 +1478,7 @@ function Initialize-LocalizationAndAccessibility {
         $idleDimEnabledCheckbox,$idleDimMinutesBox,$idleDimBrightnessBox,$idleDimRestoreCheckbox,$idleDimSaveBtn,
         $batteryProfileEnabledCheckbox,$batteryBrightnessBox,$acBrightnessBox,$batteryProfileSaveBtn,
         $displaySettingsBtn,$colorMgmtBtn,$gpuControlPanelBtn,$gammaRedSlider,$gammaGreenSlider,$gammaBlueSlider,$resetGammaBtn,$capabilitiesBox,
+        $automationBridgeEnabledCheckbox,$automationBridgeBindBox,$automationBridgePortBox,$automationBridgeKeyBox,$automationBridgeSaveBtn,
         $ddcReportGenerateBtn,$ddcReportCopyBtn,$ddcReportBox
     )
 }
@@ -2039,7 +2062,7 @@ function New-DdcCompatibilityReport {
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.AppendLine("MonitorControl Pro DDC Compatibility Report")
     [void]$sb.AppendLine("Generated: $((Get-Date).ToString("yyyy-MM-dd HH:mm:ss zzz"))")
-    [void]$sb.AppendLine("App version: 3.32.0")
+    [void]$sb.AppendLine("App version: 3.33.0")
     [void]$sb.AppendLine("OS: $($system.OS)")
     [void]$sb.AppendLine("PowerShell: $($system.PowerShell)")
     [void]$sb.AppendLine("")
@@ -2234,6 +2257,443 @@ function Start-DdcReportWorker {
     }
     Update-Status "Generating DDC report... 0/$total"
     $script:DdcReportWorkerTimer.Start()
+}
+
+function New-AutomationBridgeApiKey {
+    $bytes = New-Object byte[] 24
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+    return (($bytes | ForEach-Object { $_.ToString("x2") }) -join "")
+}
+
+function Get-AutomationBridgeSettingsObject {
+    return [PSCustomObject]@{
+        Enabled = [bool]$script:AutomationBridgeEnabled
+        BindAddress = [string]$script:AutomationBridgeBindAddress
+        Port = [int]$script:AutomationBridgePort
+        ApiKey = [string]$script:AutomationBridgeApiKey
+        MqttEnabled = [bool]$script:AutomationBridgeMqttEnabled
+        AllowedCommands = @($script:AutomationBridgeAllowedCommands)
+        UpdatedAt = (Get-Date).ToString("o")
+    }
+}
+
+function Save-AutomationBridgeSettings {
+    if ([string]::IsNullOrWhiteSpace($script:AutomationBridgeApiKey)) { $script:AutomationBridgeApiKey = New-AutomationBridgeApiKey }
+    Write-JsonFileSafely -Path $script:AutomationBridgeSettingsPath -Data (Get-AutomationBridgeSettingsObject) -Depth 5 | Out-Null
+}
+
+function Load-AutomationBridgeSettings {
+    $script:AutomationBridgeEnabled = $false
+    $script:AutomationBridgeBindAddress = "127.0.0.1"
+    $script:AutomationBridgePort = 34291
+    $script:AutomationBridgeApiKey = New-AutomationBridgeApiKey
+    $script:AutomationBridgeMqttEnabled = $false
+    $settingsExists = Test-Path -LiteralPath $script:AutomationBridgeSettingsPath
+    if ($settingsExists) {
+        try {
+            $data = Read-JsonFileSafely -Path $script:AutomationBridgeSettingsPath -Label "Automation bridge"
+            if ($null -ne $data) {
+                $script:AutomationBridgeEnabled = [bool]$data.Enabled
+                if ($data.BindAddress) { $script:AutomationBridgeBindAddress = [string]$data.BindAddress }
+                if ($data.Port) { $script:AutomationBridgePort = [Math]::Max(1024, [Math]::Min(65535, [int]$data.Port)) }
+                if ($data.ApiKey) { $script:AutomationBridgeApiKey = [string]$data.ApiKey }
+                $script:AutomationBridgeMqttEnabled = [bool]$data.MqttEnabled
+            }
+        } catch {
+            Update-Status "Automation bridge settings could not be loaded"
+        }
+    }
+    if ($settingsExists) { Save-AutomationBridgeSettings }
+}
+
+function Resolve-AutomationBridgeIPAddress {
+    param([string]$BindAddress)
+    if ([string]::IsNullOrWhiteSpace($BindAddress) -or $BindAddress.Trim().ToLowerInvariant() -eq "localhost") {
+        return [System.Net.IPAddress]::Loopback
+    }
+    $address = [System.Net.IPAddress]::Loopback
+    if ([System.Net.IPAddress]::TryParse($BindAddress.Trim(), [ref]$address)) { return $address }
+    return [System.Net.IPAddress]::Loopback
+}
+
+function Read-AutomationBridgeSettingsFromUI {
+    if ($null -eq $automationBridgePortBox) { return $false }
+    $port = 0
+    if (-not [int]::TryParse($automationBridgePortBox.Text.Trim(), [ref]$port) -or $port -lt 1024 -or $port -gt 65535) {
+        Update-Status "Bridge port must be 1024-65535"
+        return $false
+    }
+    $bind = $automationBridgeBindBox.Text.Trim()
+    if ([string]::IsNullOrWhiteSpace($bind)) { $bind = "127.0.0.1" }
+    $null = Resolve-AutomationBridgeIPAddress -BindAddress $bind
+    $key = $automationBridgeKeyBox.Password.Trim()
+    if ($key.Length -lt 16) {
+        Update-Status "Bridge API key must be at least 16 characters"
+        return $false
+    }
+    $script:AutomationBridgeBindAddress = $bind
+    $script:AutomationBridgePort = $port
+    $script:AutomationBridgeApiKey = $key
+    $script:AutomationBridgeEnabled = [bool]$automationBridgeEnabledCheckbox.IsChecked
+    $script:AutomationBridgeMqttEnabled = $false
+    return $true
+}
+
+function Update-AutomationBridgeControls {
+    if ($null -eq $automationBridgeEnabledCheckbox) { return }
+    $script:UpdatingAutomationBridgeUI = $true
+    try {
+        $automationBridgeEnabledCheckbox.IsChecked = [bool]$script:AutomationBridgeEnabled
+        $automationBridgeBindBox.Text = [string]$script:AutomationBridgeBindAddress
+        $automationBridgePortBox.Text = ([int]$script:AutomationBridgePort).ToString()
+        $automationBridgeKeyBox.Password = [string]$script:AutomationBridgeApiKey
+        $running = $null -ne $script:AutomationBridgeWorker
+        $state = if ($running) { "Listening" } elseif ($script:AutomationBridgeEnabled) { "Stopped" } else { "Off" }
+        $mqtt = if ($script:AutomationBridgeMqttEnabled) { "MQTT on" } else { "MQTT off" }
+        $automationBridgeStatusText.Text = "$state - http://$script:AutomationBridgeBindAddress`:$script:AutomationBridgePort ($mqtt)"
+    } finally {
+        $script:UpdatingAutomationBridgeUI = $false
+    }
+}
+
+function New-AutomationBridgeResponse {
+    param([int]$Status, $Body)
+    return [PSCustomObject]@{ Status = [int]$Status; Body = $Body }
+}
+
+function Get-AutomationBridgeBodyJson {
+    param($Request)
+    if ($null -eq $Request -or [string]::IsNullOrWhiteSpace([string]$Request.Body)) { return $null }
+    try { return ([string]$Request.Body | ConvertFrom-Json) } catch { return $null }
+}
+
+function Get-AutomationBridgeInputValue {
+    param($Request, $Body, [string]$Name)
+    if ($Request.Query -and $Request.Query.ContainsKey($Name)) { return [string]$Request.Query[$Name] }
+    if ($null -ne $Body -and $Body.PSObject.Properties.Name -contains $Name) { return [string]$Body.$Name }
+    return ""
+}
+
+function Test-AutomationBridgeWriteAuthorized {
+    param($Request, $Body)
+    $provided = ""
+    if ($Request.Headers -and $Request.Headers.ContainsKey("x-monitorcontrol-key")) { $provided = [string]$Request.Headers["x-monitorcontrol-key"] }
+    if (-not $provided -and $Request.Headers -and $Request.Headers.ContainsKey("authorization")) {
+        $auth = [string]$Request.Headers["authorization"]
+        if ($auth -match '^Bearer\s+(.+)$') { $provided = $matches[1] }
+    }
+    if (-not $provided) { $provided = Get-AutomationBridgeInputValue -Request $Request -Body $Body -Name "apiKey" }
+    return (-not [string]::IsNullOrWhiteSpace($provided) -and $provided -eq $script:AutomationBridgeApiKey)
+}
+
+function Write-AutomationBridgeWriteLog {
+    param([string]$Action, [string]$Target, $Value, [bool]$Success, [string]$Remote, [string]$Message)
+    $entry = [PSCustomObject]@{
+        Timestamp = (Get-Date).ToString("o")
+        Action = $Action
+        Target = $Target
+        Value = $Value
+        Success = [bool]$Success
+        Remote = $Remote
+        Message = $Message
+    }
+    try {
+        $encoding = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::AppendAllText($script:AutomationBridgeWriteLogPath, (($entry | ConvertTo-Json -Compress -Depth 5) + [Environment]::NewLine), $encoding)
+    } catch {}
+}
+
+function Get-AutomationBridgeMonitorList {
+    $items = @()
+    foreach ($mon in @($script:PhysicalMonitors)) {
+        if ($null -eq $mon) { continue }
+        $brightness = $null
+        if (($mon.Index - 1) -eq $script:CurrentMonitorIndex) { $brightness = [int]$brightnessSlider.Value }
+        $items += [PSCustomObject]@{
+            Index = [int]$mon.Index
+            Label = [string](Get-MonitorDisplayLabel -Monitor $mon)
+            Name = [string]$mon.Name
+            IdentityKey = [string]$mon.IdentityKey
+            DeviceName = [string]$mon.DeviceName
+            HasDdc = ([int64]$mon.Handle.ToInt64() -ne 0)
+            Brightness = $brightness
+        }
+    }
+    return $items
+}
+
+function Resolve-AutomationBridgeMonitorIndex {
+    param([string]$MonitorRef)
+    if ([string]::IsNullOrWhiteSpace($MonitorRef) -or $MonitorRef.Trim().ToLowerInvariant() -eq "current") {
+        return $script:CurrentMonitorIndex
+    }
+    $ref = $MonitorRef.Trim()
+    $number = 0
+    if ([int]::TryParse($ref, [ref]$number)) {
+        for ($i = 0; $i -lt $script:PhysicalMonitors.Count; $i++) {
+            if ([int]$script:PhysicalMonitors[$i].Index -eq $number) { return $i }
+        }
+    }
+    for ($i = 0; $i -lt $script:PhysicalMonitors.Count; $i++) {
+        $mon = $script:PhysicalMonitors[$i]
+        if ($ref -eq [string]$mon.IdentityKey -or $ref -eq (Get-MonitorDisplayLabel -Monitor $mon)) { return $i }
+    }
+    return -1
+}
+
+function Read-AutomationBridgeBrightness {
+    param([string]$MonitorRef)
+    $index = Resolve-AutomationBridgeMonitorIndex -MonitorRef $MonitorRef
+    if ($index -lt 0 -or $index -ge $script:PhysicalMonitors.Count) { return New-AutomationBridgeResponse -Status 404 -Body @{ error = "Monitor not found" } }
+    $mon = $script:PhysicalMonitors[$index]
+    if ($mon.Handle -eq [IntPtr]::Zero) {
+        if ($script:WmiBrightnessAvailable) {
+            $wmi = Get-WmiBrightness
+            if ($null -ne $wmi) { return New-AutomationBridgeResponse -Status 200 -Body @{ monitor = $mon.Index; brightness = [int]$wmi; source = "WMI" } }
+        }
+        return New-AutomationBridgeResponse -Status 409 -Body @{ error = "No DDC/CI handle" }
+    }
+    $result = Get-VCPValue -Handle $mon.Handle -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -MonitorName $mon.Name
+    if (-not [bool]$result.Success) { return New-AutomationBridgeResponse -Status 502 -Body @{ error = "DDC read failed"; win32 = [int]$result.LastError } }
+    return New-AutomationBridgeResponse -Status 200 -Body @{ monitor = $mon.Index; brightness = [int]$result.Current; maximum = [int]$result.Maximum; source = "DDC" }
+}
+
+function Set-AutomationBridgeBrightness {
+    param([string]$MonitorRef, [int]$Value, [string]$Remote)
+    $value = [Math]::Max(0, [Math]::Min(100, $Value))
+    $targets = @()
+    if ($script:PhysicalMonitors.Count -eq 0) {
+        Write-AutomationBridgeWriteLog -Action "setBrightness" -Target $MonitorRef -Value $value -Success $false -Remote $Remote -Message "No monitors enumerated"
+        return New-AutomationBridgeResponse -Status 404 -Body @{ error = "No monitors enumerated" }
+    }
+    if ($MonitorRef -and $MonitorRef.Trim().ToLowerInvariant() -eq "all") {
+        $targets = @(0..($script:PhysicalMonitors.Count - 1))
+    } else {
+        $index = Resolve-AutomationBridgeMonitorIndex -MonitorRef $MonitorRef
+        if ($index -lt 0 -or $index -ge $script:PhysicalMonitors.Count) {
+            Write-AutomationBridgeWriteLog -Action "setBrightness" -Target $MonitorRef -Value $value -Success $false -Remote $Remote -Message "Monitor not found"
+            return New-AutomationBridgeResponse -Status 404 -Body @{ error = "Monitor not found" }
+        }
+        $targets = @($index)
+    }
+    $queued = 0
+    foreach ($index in $targets) {
+        $mon = $script:PhysicalMonitors[$index]
+        if (Queue-VCPValue -Handle $mon.Handle -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value ([uint32]$value) -Key "bridge:$index`:0x10" -MonitorName $mon.Name) { $queued++ }
+        if ($index -eq $script:CurrentMonitorIndex) {
+            $script:UpdatingUI = $true
+            try { $brightnessSlider.Value = $value; $brightnessValue.Text = $value.ToString() } finally { $script:UpdatingUI = $false }
+        }
+    }
+    if ($queued -eq 0 -and $script:WmiBrightnessAvailable) {
+        if (Set-WmiBrightness -Value ([uint32]$value)) { $queued = 1 }
+    }
+    $success = $queued -gt 0
+    Write-AutomationBridgeWriteLog -Action "setBrightness" -Target $(if ($MonitorRef) { $MonitorRef } else { "current" }) -Value $value -Success $success -Remote $Remote -Message $(if ($success) { "Queued" } else { "No write target" })
+    if (-not $success) { return New-AutomationBridgeResponse -Status 409 -Body @{ error = "No DDC/CI or WMI write target" } }
+    Update-Status "Bridge brightness $value queued"
+    Update-TrayPopupState
+    Update-TrayIconText
+    return New-AutomationBridgeResponse -Status 202 -Body @{ queued = $queued; brightness = $value }
+}
+
+function Invoke-AutomationBridgeRequest {
+    param($Request)
+    $body = Get-AutomationBridgeBodyJson -Request $Request
+    $path = ([string]$Request.Path).TrimEnd("/").ToLowerInvariant()
+    if ($path -eq "") { $path = "/" }
+    if ($Request.Method -eq "GET" -and ($path -eq "/health" -or $path -eq "/api/health")) {
+        return New-AutomationBridgeResponse -Status 200 -Body @{ ok = $true; version = "3.33.0"; bridge = "ready"; mqtt = [bool]$script:AutomationBridgeMqttEnabled }
+    }
+    if ($Request.Method -eq "GET" -and ($path -eq "/monitors" -or $path -eq "/api/monitors")) {
+        return New-AutomationBridgeResponse -Status 200 -Body @{ monitors = @(Get-AutomationBridgeMonitorList) }
+    }
+    if ($Request.Method -eq "GET" -and ($path -eq "/profiles" -or $path -eq "/api/profiles")) {
+        return New-AutomationBridgeResponse -Status 200 -Body @{ profiles = @((Get-UserProfileFiles | ForEach-Object { $_.BaseName })) }
+    }
+    if ($path -eq "/brightness" -or $path -eq "/api/brightness") {
+        if ($Request.Method -eq "GET") { return Read-AutomationBridgeBrightness -MonitorRef (Get-AutomationBridgeInputValue -Request $Request -Body $body -Name "monitor") }
+        if ($Request.Method -eq "POST") {
+            if (-not (Test-AutomationBridgeWriteAuthorized -Request $Request -Body $body)) { return New-AutomationBridgeResponse -Status 401 -Body @{ error = "API key required for writes" } }
+            $rawValue = Get-AutomationBridgeInputValue -Request $Request -Body $body -Name "value"
+            $value = 0
+            if (-not [int]::TryParse($rawValue, [ref]$value)) { return New-AutomationBridgeResponse -Status 400 -Body @{ error = "Brightness value required" } }
+            return Set-AutomationBridgeBrightness -MonitorRef (Get-AutomationBridgeInputValue -Request $Request -Body $body -Name "monitor") -Value $value -Remote ([string]$Request.Remote)
+        }
+    }
+    if (($path -eq "/profile" -or $path -eq "/api/profile") -and $Request.Method -eq "POST") {
+        if (-not (Test-AutomationBridgeWriteAuthorized -Request $Request -Body $body)) { return New-AutomationBridgeResponse -Status 401 -Body @{ error = "API key required for writes" } }
+        $name = Get-AutomationBridgeInputValue -Request $Request -Body $body -Name "name"
+        if ([string]::IsNullOrWhiteSpace($name)) { return New-AutomationBridgeResponse -Status 400 -Body @{ error = "Profile name required" } }
+        $ok = Apply-ProfileByName -Name $name -Reason "Bridge profile"
+        Write-AutomationBridgeWriteLog -Action "loadProfile" -Target $name -Value "" -Success $ok -Remote ([string]$Request.Remote) -Message $(if ($ok) { "Loaded" } else { "Failed" })
+        if (-not $ok) { return New-AutomationBridgeResponse -Status 404 -Body @{ error = "Profile not found or failed" } }
+        return New-AutomationBridgeResponse -Status 202 -Body @{ profile = $name; queued = $true }
+    }
+    return New-AutomationBridgeResponse -Status 404 -Body @{ error = "Endpoint not allowed"; allowed = @($script:AutomationBridgeAllowedCommands) }
+}
+
+function Process-AutomationBridgeRequests {
+    $request = $null
+    while ($script:AutomationBridgeRequests.TryDequeue([ref]$request)) {
+        try {
+            $response = Invoke-AutomationBridgeRequest -Request $request
+        } catch {
+            $response = New-AutomationBridgeResponse -Status 500 -Body @{ error = $_.Exception.Message }
+        }
+        $script:AutomationBridgeResponses[$request.Id] = $response
+        $request = $null
+    }
+}
+
+function Start-AutomationBridgeRequestTimer {
+    if ($script:AutomationBridgeTimer) { $script:AutomationBridgeTimer.Start(); return }
+    $script:AutomationBridgeTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:AutomationBridgeTimer.Interval = [TimeSpan]::FromMilliseconds(100)
+    $script:AutomationBridgeTimer.Add_Tick({ Process-AutomationBridgeRequests })
+    $script:AutomationBridgeTimer.Start()
+}
+
+function Stop-AutomationBridge {
+    $script:AutomationBridgeState["Stop"] = $true
+    if ($script:AutomationBridgeTimer) { $script:AutomationBridgeTimer.Stop() }
+    if ($script:AutomationBridgeWorker) {
+        try {
+            if ($script:AutomationBridgeAsyncResult -and -not $script:AutomationBridgeAsyncResult.AsyncWaitHandle.WaitOne(1500)) {
+                try { $script:AutomationBridgeWorker.Stop() } catch {}
+            }
+        } catch {}
+        try { $script:AutomationBridgeWorker.Dispose() } catch {}
+    }
+    if ($script:AutomationBridgeInput) { try { $script:AutomationBridgeInput.Dispose() } catch {} }
+    if ($script:AutomationBridgeOutput) { try { $script:AutomationBridgeOutput.Dispose() } catch {} }
+    $script:AutomationBridgeWorker = $null
+    $script:AutomationBridgeInput = $null
+    $script:AutomationBridgeOutput = $null
+    $script:AutomationBridgeAsyncResult = $null
+    $script:AutomationBridgeRequests = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
+    $script:AutomationBridgeResponses = [hashtable]::Synchronized(@{})
+    Update-AutomationBridgeControls
+}
+
+function Start-AutomationBridge {
+    Stop-AutomationBridge
+    if (-not $script:AutomationBridgeEnabled) { Update-AutomationBridgeControls; return }
+    $ip = Resolve-AutomationBridgeIPAddress -BindAddress $script:AutomationBridgeBindAddress
+    try {
+        $probe = [System.Net.Sockets.TcpListener]::new($ip, [int]$script:AutomationBridgePort)
+        $probe.Start()
+        $probe.Stop()
+    } catch {
+        Update-Status "Bridge start failed: $($_.Exception.Message)"
+        $script:AutomationBridgeEnabled = $false
+        Save-AutomationBridgeSettings
+        Update-AutomationBridgeControls
+        return
+    }
+    $settings = [PSCustomObject]@{ BindAddress = [string]$ip.ToString(); Port = [int]$script:AutomationBridgePort }
+    $script:AutomationBridgeState = [hashtable]::Synchronized(@{ Stop = $false })
+    $workerScript = {
+        param($Settings, $RequestQueue, $ResponseMap, $BridgeState)
+
+        function ConvertFrom-BridgeQuery {
+            param([string]$Query)
+            $result = @{}
+            if ([string]::IsNullOrWhiteSpace($Query)) { return $result }
+            foreach ($pair in $Query.TrimStart("?").Split("&")) {
+                if ([string]::IsNullOrWhiteSpace($pair)) { continue }
+                $parts = $pair.Split("=", 2)
+                $name = [Uri]::UnescapeDataString($parts[0])
+                $value = if ($parts.Count -gt 1) { [Uri]::UnescapeDataString($parts[1].Replace("+", " ")) } else { "" }
+                $result[$name] = $value
+            }
+            return $result
+        }
+
+        function Send-BridgeJson {
+            param($Client, [int]$Status, $Body)
+            $reason = switch ($Status) { 200 { "OK" } 202 { "Accepted" } 400 { "Bad Request" } 401 { "Unauthorized" } 404 { "Not Found" } 409 { "Conflict" } 500 { "Internal Server Error" } 502 { "Bad Gateway" } default { "OK" } }
+            $payload = if ($null -eq $Body) { "{}" } else { $Body | ConvertTo-Json -Depth 8 -Compress }
+            $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
+            $header = "HTTP/1.1 $Status $reason`r`nContent-Type: application/json; charset=utf-8`r`nContent-Length: $($bodyBytes.Length)`r`nConnection: close`r`n`r`n"
+            $headerBytes = [System.Text.Encoding]::ASCII.GetBytes($header)
+            $stream = $Client.GetStream()
+            $stream.Write($headerBytes, 0, $headerBytes.Length)
+            $stream.Write($bodyBytes, 0, $bodyBytes.Length)
+        }
+
+        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Parse([string]$Settings.BindAddress), [int]$Settings.Port)
+        $listener.Start()
+        try {
+            while (-not [bool]$BridgeState["Stop"]) {
+                if (-not $listener.Pending()) { Start-Sleep -Milliseconds 100; continue }
+                $client = $listener.AcceptTcpClient()
+                try {
+                    $stream = $client.GetStream()
+                    $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::ASCII, $false, 2048, $true)
+                    $requestLine = $reader.ReadLine()
+                    if ([string]::IsNullOrWhiteSpace($requestLine)) { Send-BridgeJson -Client $client -Status 400 -Body @{ error = "Missing request line" }; continue }
+                    $parts = $requestLine.Split(" ")
+                    if ($parts.Count -lt 2) { Send-BridgeJson -Client $client -Status 400 -Body @{ error = "Bad request line" }; continue }
+                    $headers = @{}
+                    while ($true) {
+                        $line = $reader.ReadLine()
+                        if ($null -eq $line -or $line -eq "") { break }
+                        $split = $line.Split(":", 2)
+                        if ($split.Count -eq 2) { $headers[$split[0].Trim().ToLowerInvariant()] = $split[1].Trim() }
+                    }
+                    $body = ""
+                    $length = 0
+                    if ($headers.ContainsKey("content-length")) { [int]::TryParse([string]$headers["content-length"], [ref]$length) | Out-Null }
+                    if ($length -gt 0) {
+                        $buffer = New-Object char[] $length
+                        $read = $reader.Read($buffer, 0, $length)
+                        if ($read -gt 0) { $body = -join $buffer[0..($read - 1)] }
+                    }
+                    $uri = [Uri]::new("http://localhost$($parts[1])")
+                    $id = [guid]::NewGuid().ToString("N")
+                    $request = [PSCustomObject]@{
+                        Id = $id
+                        Method = [string]$parts[0].ToUpperInvariant()
+                        Path = [string]$uri.AbsolutePath
+                        Query = (ConvertFrom-BridgeQuery -Query $uri.Query)
+                        Headers = $headers
+                        Body = $body
+                        Remote = [string]$client.Client.RemoteEndPoint
+                    }
+                    $RequestQueue.Enqueue($request)
+                    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+                    $response = $null
+                    while ([DateTime]::UtcNow -lt $deadline -and -not [bool]$BridgeState["Stop"]) {
+                        if ($ResponseMap.ContainsKey($id)) {
+                            $response = $ResponseMap[$id]
+                            $ResponseMap.Remove($id)
+                            break
+                        }
+                        Start-Sleep -Milliseconds 50
+                    }
+                    if ($null -eq $response) { Send-BridgeJson -Client $client -Status 500 -Body @{ error = "Bridge request timed out" } }
+                    else { Send-BridgeJson -Client $client -Status ([int]$response.Status) -Body $response.Body }
+                } catch {
+                    try { Send-BridgeJson -Client $client -Status 500 -Body @{ error = $_.Exception.Message } } catch {}
+                } finally {
+                    try { $client.Close() } catch {}
+                }
+            }
+        } finally {
+            try { $listener.Stop() } catch {}
+        }
+    }
+    $script:AutomationBridgeInput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
+    $script:AutomationBridgeInput.Complete()
+    $script:AutomationBridgeOutput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
+    $script:AutomationBridgeWorker = [PowerShell]::Create()
+    $script:AutomationBridgeWorker.AddScript($workerScript.ToString()).AddArgument($settings).AddArgument($script:AutomationBridgeRequests).AddArgument($script:AutomationBridgeResponses).AddArgument($script:AutomationBridgeState) | Out-Null
+    $script:AutomationBridgeAsyncResult = $script:AutomationBridgeWorker.BeginInvoke($script:AutomationBridgeInput, $script:AutomationBridgeOutput)
+    Start-AutomationBridgeRequestTimer
+    Update-AutomationBridgeControls
+    Update-Status "Bridge listening on http://$script:AutomationBridgeBindAddress`:$script:AutomationBridgePort"
 }
 
 function Stop-MonitorSettingsWorker {
@@ -2606,7 +3066,7 @@ try {
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.32.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
+        Title="MonitorControl Pro v3.33.0" Width="640" Height="680" MinWidth="560" MinHeight="560"
         Background="#0a0a0a" WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
     <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
@@ -2730,6 +3190,10 @@ try {
         <Setter Property="Background" Value="#1a1a1a"/><Setter Property="Foreground" Value="#e0e0e0"/><Setter Property="BorderBrush" Value="#333"/>
         <Setter Property="BorderThickness" Value="1"/><Setter Property="Padding" Value="6,4"/><Setter Property="FontFamily" Value="Segoe UI"/><Setter Property="CaretBrush" Value="#fff"/>
     </Style>
+    <Style TargetType="PasswordBox">
+        <Setter Property="Background" Value="#1a1a1a"/><Setter Property="Foreground" Value="#e0e0e0"/><Setter Property="BorderBrush" Value="#333"/>
+        <Setter Property="BorderThickness" Value="1"/><Setter Property="Padding" Value="6,4"/><Setter Property="FontFamily" Value="Segoe UI"/><Setter Property="CaretBrush" Value="#fff"/>
+    </Style>
 </Window.Resources>
 <Grid Margin="12,10">
     <Grid.RowDefinitions>
@@ -2740,7 +3204,7 @@ try {
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
             <TextBlock x:Name="AppTitleText" Text="MonitorControl Pro" FontSize="16" FontWeight="SemiBold" Foreground="#fff" FontFamily="Segoe UI"/>
-            <TextBlock x:Name="AppSubtitleText" Text="v3.32.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
+            <TextBlock x:Name="AppSubtitleText" Text="v3.33.0 - Click monitor to select" FontSize="9" Foreground="#505050" Margin="0,1,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal">
             <CheckBox x:Name="ApplyAllCheckbox" Content="All Monitors" VerticalAlignment="Center" Margin="0,0,10,0"/>
@@ -3032,7 +3496,7 @@ try {
         </TabItem>
         <TabItem x:Name="SystemTab" Header="System">
             <Border Background="#151515" CornerRadius="0,5,5,5" Padding="10"><ScrollViewer VerticalScrollBarVisibility="Auto"><Grid>
-                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Border Background="#1a1a1a" CornerRadius="5" Padding="10"><StackPanel><TextBlock Text="Quick Links" FontSize="10" Foreground="#909090" Margin="0,0,0,5"/>
                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                         <Button x:Name="DisplaySettingsBtn" Content="Display" Style="{StaticResource Btn}" Padding="5,4" FontSize="9"/>
@@ -3055,6 +3519,17 @@ try {
                     <TextBox x:Name="CapabilitiesBox" IsReadOnly="True" TextWrapping="Wrap" Height="60" VerticalScrollBarVisibility="Auto" Background="#111" FontFamily="Consolas" FontSize="8"/>
                 </StackPanel></Border>
                 <Border Grid.Row="6" Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <Grid><CheckBox x:Name="AutomationBridgeEnabledCheckbox" Content="Local Automation Bridge" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="AutomationBridgeStatusText" Text="Off" FontSize="9" Foreground="#707070" HorizontalAlignment="Right" VerticalAlignment="Center"/></Grid>
+                    <Grid Grid.Row="2"><Grid.ColumnDefinitions><ColumnDefinition Width="64"/><ColumnDefinition Width="6"/><ColumnDefinition Width="74"/><ColumnDefinition Width="6"/><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                        <TextBox x:Name="AutomationBridgeBindBox" Text="127.0.0.1" VerticalAlignment="Center" FontSize="9"/>
+                        <TextBox x:Name="AutomationBridgePortBox" Grid.Column="2" Text="34291" VerticalAlignment="Center" FontSize="9"/>
+                        <PasswordBox x:Name="AutomationBridgeKeyBox" Grid.Column="4" Password="" VerticalAlignment="Center" FontSize="9"/>
+                        <Button x:Name="AutomationBridgeSaveBtn" Grid.Column="6" Content="Save" Style="{StaticResource GreenBtn}" Padding="10,4" FontSize="9"/>
+                    </Grid>
+                </Grid></Border>
+                <Border Grid.Row="8" Background="#1a1a1a" CornerRadius="5" Padding="10"><Grid>
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                         <TextBlock Text="DDC Compatibility Report" FontSize="10" Foreground="#909090" VerticalAlignment="Center"/>
@@ -3146,6 +3621,9 @@ $gammaRedSlider = $window.FindName("GammaRedSlider"); $gammaRedValue = $window.F
 $gammaGreenSlider = $window.FindName("GammaGreenSlider"); $gammaGreenValue = $window.FindName("GammaGreenValue")
 $gammaBlueSlider = $window.FindName("GammaBlueSlider"); $gammaBlueValue = $window.FindName("GammaBlueValue")
 $capabilitiesBox = $window.FindName("CapabilitiesBox"); $ddcReportBox = $window.FindName("DdcReportBox")
+$automationBridgeEnabledCheckbox = $window.FindName("AutomationBridgeEnabledCheckbox"); $automationBridgeStatusText = $window.FindName("AutomationBridgeStatusText")
+$automationBridgeBindBox = $window.FindName("AutomationBridgeBindBox"); $automationBridgePortBox = $window.FindName("AutomationBridgePortBox")
+$automationBridgeKeyBox = $window.FindName("AutomationBridgeKeyBox"); $automationBridgeSaveBtn = $window.FindName("AutomationBridgeSaveBtn")
 $ddcReportGenerateBtn = $window.FindName("DdcReportGenerateBtn"); $ddcReportCopyBtn = $window.FindName("DdcReportCopyBtn")
 $statusText = $window.FindName("StatusText"); $autoModeText = $window.FindName("AutoModeText")
 
@@ -3483,7 +3961,7 @@ function Export-ProfileBundle {
 
         $manifest = [PSCustomObject]@{
             BundleSchemaVersion = $script:ProfileBundleSchemaVersion
-            AppVersion = "3.32.0"
+            AppVersion = "3.33.0"
             ProfileSchemaVersion = $script:ProfileSchemaVersion
             ExportedAt = (Get-Date).ToString("o")
             ProfileCount = $exportedProfiles.Count
@@ -4866,6 +5344,28 @@ $batteryProfileSaveBtn.Add_Click({
 
 $displaySettingsBtn.Add_Click({ Start-Process "ms-settings:display" }); $colorMgmtBtn.Add_Click({ Start-Process "colorcpl.exe" })
 $gpuControlPanelBtn.Add_Click({ if ($script:HasNvidia) { Start-Process "nvidia-settings" -ErrorAction SilentlyContinue } else { Start-Process "ms-settings:display" } })
+$automationBridgeEnabledCheckbox.Add_Checked({
+    if ($script:UpdatingAutomationBridgeUI) { return }
+    if (-not (Read-AutomationBridgeSettingsFromUI)) { $automationBridgeEnabledCheckbox.IsChecked = $false; return }
+    $script:AutomationBridgeEnabled = $true
+    Save-AutomationBridgeSettings
+    Start-AutomationBridge
+})
+$automationBridgeEnabledCheckbox.Add_Unchecked({
+    if ($script:UpdatingAutomationBridgeUI) { return }
+    if ($null -eq $automationBridgeStatusText) { return }
+    Read-AutomationBridgeSettingsFromUI | Out-Null
+    $script:AutomationBridgeEnabled = $false
+    Save-AutomationBridgeSettings
+    Stop-AutomationBridge
+    Update-Status "Bridge off"
+})
+$automationBridgeSaveBtn.Add_Click({
+    if (-not (Read-AutomationBridgeSettingsFromUI)) { return }
+    Save-AutomationBridgeSettings
+    if ($script:AutomationBridgeEnabled) { Start-AutomationBridge } else { Stop-AutomationBridge }
+    Update-Status "Bridge settings saved"
+})
 $ddcReportGenerateBtn.Add_Click({ Start-DdcReportWorker })
 $ddcReportCopyBtn.Add_Click({
     $text = if ($script:DdcReportLastText) { $script:DdcReportLastText } else { $ddcReportBox.Text }
@@ -4912,6 +5412,7 @@ Load-AppProfileRules; Update-AppProfileControls; Start-AppProfileWatcher
 Load-ProfileSchedules; Update-ScheduleControls; Start-ProfileScheduleWatcher
 Load-IdleDimSettings; Update-IdleDimControls; Start-IdleDimWatcher
 Load-BatteryProfileSettings; Update-BatteryProfileControls; Start-BatteryProfileWatcher
+Load-AutomationBridgeSettings; Update-AutomationBridgeControls; Start-AutomationBridge
 Update-ProfileStorageControls
 if (-not ($script:HasNvidia -or $script:HasAmd -or $script:HasCpuTempMonitor)) { $gpuTab.Visibility = "Collapsed" } else {
     $script:GpuTimer = New-Object System.Windows.Threading.DispatcherTimer; $script:GpuTimer.Interval = [TimeSpan]::FromSeconds(2)
@@ -4925,7 +5426,7 @@ $window.Add_StateChanged({
     if ($window.WindowState -eq [System.Windows.WindowState]::Minimized) { Hide-MainWindowToTray }
 })
 
-$window.Add_Closed({ if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AmbientLightTimer) { $script:AmbientLightTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }; if ($script:ProfileScheduleTimer) { $script:ProfileScheduleTimer.Stop() }; if ($script:IdleDimTimer) { $script:IdleDimTimer.Stop() }; if ($script:BatteryProfileTimer) { $script:BatteryProfileTimer.Stop() }; if ($script:FpsOverlayTimer) { $script:FpsOverlayTimer.Stop() }; if ($script:DdcWriteResultTimer) { $script:DdcWriteResultTimer.Stop() }; foreach ($timer in @($script:DeferredRefreshTimers)) { try { $timer.Stop() } catch {} }; $script:DeferredRefreshTimers = @(); Stop-VcpWorker -Cancel; Stop-MonitorSettingsWorker -Cancel; Stop-CapabilitiesWorker -Cancel; Stop-DdcReportWorker -Cancel
+$window.Add_Closed({ if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AmbientLightTimer) { $script:AmbientLightTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }; if ($script:ProfileScheduleTimer) { $script:ProfileScheduleTimer.Stop() }; if ($script:IdleDimTimer) { $script:IdleDimTimer.Stop() }; if ($script:BatteryProfileTimer) { $script:BatteryProfileTimer.Stop() }; if ($script:FpsOverlayTimer) { $script:FpsOverlayTimer.Stop() }; if ($script:DdcWriteResultTimer) { $script:DdcWriteResultTimer.Stop() }; foreach ($timer in @($script:DeferredRefreshTimers)) { try { $timer.Stop() } catch {} }; $script:DeferredRefreshTimers = @(); Stop-AutomationBridge; Stop-VcpWorker -Cancel; Stop-MonitorSettingsWorker -Cancel; Stop-CapabilitiesWorker -Cancel; Stop-DdcReportWorker -Cancel
     if ($script:FpsOverlayWindow) { try { $script:FpsOverlayWindow.Close() } catch {} }
     if ($script:HardwareMonitorComputer) { try { $script:HardwareMonitorComputer.Close() } catch {} }
     Dispose-TrayMode
