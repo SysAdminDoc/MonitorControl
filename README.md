@@ -10,9 +10,14 @@
 
 A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI protocol. Adjust brightness, contrast, color temperature, input sources, and more — all without touching your monitor's physical buttons.
 
+<p align="center">
+  <img src="screenshot.png" alt="MonitorControl Pro display dashboard" width="900">
+</p>
+
 ## Features
 
 ### Display Controls
+- **Modern Control Center** — Persistent sidebar navigation, selected-display context, high-contrast control cards, and DPI-aware layouts for a clearer Windows 10/11 experience
 - **Brightness & Contrast** — Real-time adjustment via DDC/CI
 - **RGB Gain Control** — Fine-tune red, green, and blue channels independently
 - **Color Temperature Presets** — Quick access to Warm (5000K), 6500K (D65), Cool (9300K), and sRGB
@@ -111,7 +116,7 @@ $Shortcut.Save()
 .\tools\build-release.ps1
 ```
 
-The release builder writes `dist\MonitorControlPro-vX.Y.Z.zip`, signs `MonitorControlPro.ps1` when a local code-signing certificate is available, and includes `SHA256SUMS` in the ZIP.
+The release builder writes an unsigned `dist\MonitorControlPro-vX.Y.Z.zip` and includes `SIGNING.txt` plus `SHA256SUMS` in the ZIP.
 
 ### Run No-Hardware Tests
 ```powershell

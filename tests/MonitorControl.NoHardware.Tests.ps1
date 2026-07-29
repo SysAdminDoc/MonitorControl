@@ -192,3 +192,43 @@ Describe "Idle tick wraparound" {
         Get-IdleSecondsFromTicks -CurrentTick 3000 -LastInputTick $lastInput | Should -Be 5
     }
 }
+
+Describe "Modern control-center shell" {
+    BeforeAll {
+        $appText = Get-Content -LiteralPath $script:AppPath -Raw
+        $xamlMatch = [regex]::Match($appText, '(?s)\[xml\]\$xaml = @"\r?\n(.*?)\r?\n"@')
+        if (-not $xamlMatch.Success) { throw "Main XAML block not found." }
+        [xml]$script:MainXaml = $xamlMatch.Groups[1].Value
+    }
+
+    It "keeps every primary destination in the persistent navigation" {
+        $tabs = @($script:MainXaml.SelectNodes("//*[local-name()='TabItem']"))
+
+        $tabs.Count | Should -Be 7
+        ($tabs.Header -join "|") | Should -Be "Display|Monitor|Hardware|VCP Explorer|Profiles|Automation|System"
+    }
+
+    It "keeps one display-layout canvas and a widescreen DPI-aware window" {
+        @($script:MainXaml.SelectNodes("//*[@*[local-name()='Name']='MonitorCanvas']")).Count | Should -Be 1
+        $window = $script:MainXaml.DocumentElement
+        [int]$window.Width | Should -BeGreaterOrEqual 1000
+        [int]$window.MinWidth | Should -BeGreaterOrEqual 900
+        $window.GetAttribute("TextOptions.TextRenderingMode") | Should -Be "ClearType"
+    }
+}
+
+Describe "Unsigned release packaging" {
+    BeforeAll {
+        $script:BuildReleasePath = Join-Path $script:RepoRoot "tools\build-release.ps1"
+        $script:BuildReleaseText = Get-Content -LiteralPath $script:BuildReleasePath -Raw
+    }
+
+    It "cannot invoke Authenticode signing" {
+        $script:BuildReleaseText | Should -Not -Match "Set-AuthenticodeSignature"
+        $script:BuildReleaseText | Should -Match "intentionally not code signed"
+    }
+
+    It "packages the screenshot referenced by the README" {
+        $script:BuildReleaseText | Should -Match 'Copy-Item -LiteralPath \$screenshotPath'
+    }
+}

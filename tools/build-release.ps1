@@ -1,7 +1,6 @@
 param(
     [string]$Version = "",
-    [string]$OutputRoot = "",
-    [string]$CertificateThumbprint = ""
+    [string]$OutputRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -11,8 +10,9 @@ $scriptPath = Join-Path $repoRoot "MonitorControlPro.ps1"
 $readmePath = Join-Path $repoRoot "README.md"
 $licensePath = Join-Path $repoRoot "LICENSE"
 $iconPath = Join-Path $repoRoot "icon.ico"
+$screenshotPath = Join-Path $repoRoot "screenshot.png"
 
-foreach ($required in @($scriptPath, $readmePath, $licensePath, $iconPath)) {
+foreach ($required in @($scriptPath, $readmePath, $licensePath, $iconPath, $screenshotPath)) {
     if (-not (Test-Path -LiteralPath $required)) { throw "Missing release input: $required" }
 }
 
@@ -51,42 +51,9 @@ Copy-Item -LiteralPath $scriptPath -Destination $releaseScript -Force
 Copy-Item -LiteralPath $readmePath -Destination (Join-Path $stageRoot "README.md") -Force
 Copy-Item -LiteralPath $licensePath -Destination (Join-Path $stageRoot "LICENSE") -Force
 Copy-Item -LiteralPath $iconPath -Destination (Join-Path $stageRoot "icon.ico") -Force
+Copy-Item -LiteralPath $screenshotPath -Destination (Join-Path $stageRoot "screenshot.png") -Force
 
-$signStatus = "Unsigned: no usable code-signing certificate was found."
-$cert = $null
-function Get-CodeSigningCertificates {
-    param([string]$StorePath)
-    Get-ChildItem -Path $StorePath -ErrorAction SilentlyContinue | Where-Object {
-        $_.HasPrivateKey -and
-        $_.NotAfter -gt (Get-Date) -and
-        @($_.EnhancedKeyUsageList | Where-Object {
-            $_.ObjectId.Value -eq "1.3.6.1.5.5.7.3.3" -or $_.FriendlyName -eq "Code Signing"
-        }).Count -gt 0
-    }
-}
-
-if (-not [string]::IsNullOrWhiteSpace($CertificateThumbprint)) {
-    foreach ($store in @("Cert:\CurrentUser\My", "Cert:\LocalMachine\My")) {
-        $cert = Get-CodeSigningCertificates -StorePath $store |
-            Where-Object { $_.Thumbprint -eq $CertificateThumbprint } |
-            Select-Object -First 1
-        if ($cert) { break }
-    }
-    if (-not $cert) { throw "Code-signing certificate not found: $CertificateThumbprint" }
-} else {
-    foreach ($store in @("Cert:\CurrentUser\My", "Cert:\LocalMachine\My")) {
-        $cert = Get-CodeSigningCertificates -StorePath $store |
-            Sort-Object NotAfter -Descending |
-            Select-Object -First 1
-        if ($cert) { break }
-    }
-}
-
-if ($cert) {
-    $signature = Set-AuthenticodeSignature -FilePath $releaseScript -Certificate $cert
-    if ($signature.Status -ne "Valid") { throw "Authenticode signing failed: $($signature.StatusMessage)" }
-    $signStatus = "Signed: $($cert.Subject) [$($cert.Thumbprint)]"
-}
+$signStatus = "Unsigned: MonitorControl Pro release artifacts are intentionally not code signed."
 
 $signingText = @(
     "MonitorControl Pro v$Version"
