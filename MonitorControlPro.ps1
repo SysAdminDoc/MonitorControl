@@ -608,13 +608,24 @@ function Move-CorruptJsonFile {
 }
 
 function Read-JsonFileSafely {
-    param([string]$Path, [string]$Label = "JSON")
+    param([string]$Path, [string]$Label = "JSON", [switch]$ReadOnly)
     if (-not (Test-Path -LiteralPath $Path)) { return $null }
     try {
         return (Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json)
     } catch {
-        $quarantinePath = Move-CorruptJsonFile -Path $Path
         $backupPath = "$Path.bak"
+        if ($ReadOnly) {
+            if (Test-Path -LiteralPath $backupPath) {
+                try {
+                    $backup = Get-Content -LiteralPath $backupPath -Raw | ConvertFrom-Json
+                    Set-DeferredStatus "$Label JSON corrupt; read-only fallback left untouched and backup loaded"
+                    return $backup
+                } catch { $null = $_ }
+            }
+            Set-DeferredStatus "$Label JSON corrupt; read-only fallback left untouched"
+            return $null
+        }
+        $quarantinePath = Move-CorruptJsonFile -Path $Path
         $leaf = if ($quarantinePath) { Split-Path -Path $quarantinePath -Leaf } else { "quarantine failed" }
         if (Test-Path -LiteralPath $backupPath) {
             try {
@@ -655,6 +666,59 @@ function Write-JsonFileSafely {
         if (Test-Path -LiteralPath $tempPath) { Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue }
         Set-DeferredStatus "JSON write failed: $($_.Exception.Message)"
         return $false
+    }
+}
+
+function Resolve-ProfileStorageRootState {
+    param(
+        $Settings,
+        [string]$DefaultPath,
+        [int]$CurrentSchemaVersion = 2
+    )
+    $defaultFullPath = [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($DefaultPath))
+    $configuredPath = $defaultFullPath
+    $fallbackPath = $defaultFullPath
+    $previousPath = ""
+    $mode = "Local"
+    $offline = $false
+    $message = ""
+    if ($null -ne $Settings) {
+        $schemaVersion = if ($Settings.PSObject.Properties.Name -contains "SchemaVersion") { [int]$Settings.SchemaVersion } else { 1 }
+        if ($schemaVersion -gt $CurrentSchemaVersion) {
+            $offline = $true
+            $message = "Profile storage settings are newer than this app; showing the local library read-only"
+        } else {
+            if ($Settings.PSObject.Properties.Name -contains "ProfilePath" -and -not [string]::IsNullOrWhiteSpace([string]$Settings.ProfilePath)) {
+                $configuredPath = [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables([string]$Settings.ProfilePath))
+            }
+            if ($Settings.PSObject.Properties.Name -contains "FallbackPath" -and -not [string]::IsNullOrWhiteSpace([string]$Settings.FallbackPath)) {
+                $fallbackPath = [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables([string]$Settings.FallbackPath))
+            }
+            if ($Settings.PSObject.Properties.Name -contains "PreviousPath") { $previousPath = [string]$Settings.PreviousPath }
+            if ($Settings.PSObject.Properties.Name -contains "Mode" -and -not [string]::IsNullOrWhiteSpace([string]$Settings.Mode)) {
+                $mode = [string]$Settings.Mode
+            }
+            if (-not (Test-Path -LiteralPath $configuredPath -PathType Container)) {
+                $offline = $true
+                $message = "Profile storage is offline; showing the last available library read-only"
+            }
+        }
+    }
+    $activePath = if (-not $offline) {
+        $configuredPath
+    } elseif (Test-Path -LiteralPath $fallbackPath -PathType Container) {
+        $fallbackPath
+    } else {
+        $defaultFullPath
+    }
+    return [PSCustomObject]@{
+        ProfilesPath = [string]$activePath
+        ConfiguredPath = [string]$configuredPath
+        FallbackPath = [string]$fallbackPath
+        PreviousPath = [string]$previousPath
+        Mode = [string]$mode
+        Offline = [bool]$offline
+        Message = [string]$message
     }
 }
 
@@ -793,18 +857,30 @@ $script:CapabilitiesProbeSentinelPath = Join-Path $script:DefaultProfilesPath "c
 $script:VcpWriteSafetySettingsPath = Join-Path $script:DefaultProfilesPath "vcp-write-safety.json"
 $script:ProfilesPath = $script:DefaultProfilesPath
 $script:ProfileStorageMode = "Local"
+$script:ProfileStorageSchemaVersion = 2
+$script:ProfileStorageOffline = $false
+$script:ProfileStorageConfiguredPath = $script:DefaultProfilesPath
+$script:ProfileStorageFallbackPath = $script:DefaultProfilesPath
+$script:ProfileStoragePreviousPath = ""
 if (-not (Test-Path -LiteralPath $script:DefaultProfilesPath)) { New-Item -ItemType Directory -Path $script:DefaultProfilesPath -Force | Out-Null }
 if (Test-Path -LiteralPath $script:ProfileStorageSettingsPath) {
     try {
         $profileStorage = Read-JsonFileSafely -Path $script:ProfileStorageSettingsPath -Label "Profile storage"
-        $configuredPath = [string]$profileStorage.ProfilePath
-        if (-not [string]::IsNullOrWhiteSpace($configuredPath)) {
-            $script:ProfilesPath = [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($configuredPath))
-            $script:ProfileStorageMode = if ($profileStorage.Mode) { [string]$profileStorage.Mode } else { "Sync" }
+        $storageState = Resolve-ProfileStorageRootState -Settings $profileStorage -DefaultPath $script:DefaultProfilesPath -CurrentSchemaVersion $script:ProfileStorageSchemaVersion
+        $script:ProfilesPath = $storageState.ProfilesPath
+        $script:ProfileStorageConfiguredPath = $storageState.ConfiguredPath
+        $script:ProfileStorageFallbackPath = $storageState.FallbackPath
+        $script:ProfileStoragePreviousPath = $storageState.PreviousPath
+        $script:ProfileStorageMode = $storageState.Mode
+        $script:ProfileStorageOffline = $storageState.Offline
+        if ($storageState.Message) {
+            Set-DeferredStatus $storageState.Message
         }
     } catch {
         $script:ProfilesPath = $script:DefaultProfilesPath
-        $script:ProfileStorageMode = "Local"
+        $script:ProfileStorageConfiguredPath = $script:DefaultProfilesPath
+        $script:ProfileStorageFallbackPath = $script:DefaultProfilesPath
+        $script:ProfileStorageOffline = $true
     }
 }
 $script:AppProfileRulesPath = Join-Path $script:ProfilesPath "app-profile-rules.json"
@@ -1334,7 +1410,7 @@ function Load-MonitorIdentitySettings {
     $script:MonitorIdentityRecords = @{}
     if (-not (Test-Path -LiteralPath $script:MonitorIdentitySettingsPath)) { return }
     try {
-        $data = Read-JsonFileSafely -Path $script:MonitorIdentitySettingsPath -Label "Monitor identities"
+        $data = Read-JsonFileSafely -Path $script:MonitorIdentitySettingsPath -Label "Monitor identities" -ReadOnly:$script:ProfileStorageOffline
         if ($null -eq $data) { return }
         foreach ($entry in @($data.Monitors)) {
             if ($null -eq $entry -or [string]::IsNullOrWhiteSpace([string]$entry.Key)) { continue }
@@ -1358,6 +1434,7 @@ function Load-MonitorIdentitySettings {
 }
 
 function Save-MonitorIdentitySettings {
+    if (-not (Test-ProfileStorageWriteAllowed -Operation "monitor label changes")) { return $false }
     $entries = @($script:MonitorIdentityRecords.Values | Sort-Object -Property Label, Key)
     $payload = [PSCustomObject]@{
         SchemaVersion = 1
@@ -4678,11 +4755,13 @@ try {
     if (-not (Test-Path -LiteralPath $script:ProfilesPath)) { New-Item -ItemType Directory -Path $script:ProfilesPath -Force | Out-Null }
 } catch {
     $script:ProfilesPath = $script:DefaultProfilesPath
-    $script:ProfileStorageMode = "Local"
+    $script:ProfileStorageOffline = $true
+    $script:ProfileStorageFallbackPath = $script:DefaultProfilesPath
     $script:AppProfileRulesPath = Join-Path $script:ProfilesPath "app-profile-rules.json"
     $script:ProfileScheduleRulesPath = Join-Path $script:ProfilesPath "profile-schedules.json"
     $script:IdleDimSettingsPath = Join-Path $script:ProfilesPath "idle-dim.json"
     $script:BatteryProfileSettingsPath = Join-Path $script:ProfilesPath "battery-profile.json"
+    $script:MonitorIdentitySettingsPath = Join-Path $script:ProfilesPath "monitor-identities.json"
     $script:ProfileExportsPath = Join-Path $script:ProfilesPath "exports"
     if (-not (Test-Path -LiteralPath $script:ProfilesPath)) { New-Item -ItemType Directory -Path $script:ProfilesPath -Force | Out-Null }
 }
@@ -5899,6 +5978,7 @@ function ConvertTo-CurrentProfileSchema {
 
 function Save-ProfileObject {
     param($Profile)
+    if (-not (Test-ProfileStorageWriteAllowed -Operation "profile saves")) { return $false }
     $safeName = Get-SafeProfileName -Name ([string]$Profile.Name)
     if ([string]::IsNullOrWhiteSpace($safeName)) {
         Update-Status "Invalid profile name"
@@ -5918,23 +5998,31 @@ function Read-ProfileObject {
     }
     $path = Join-Path $script:ProfilesPath "$safeName.json"
     if (-not (Test-Path -LiteralPath $path)) { return $null }
-    $profile = Read-JsonFileSafely -Path $path -Label "Profile '$safeName'"
+    $profile = Read-JsonFileSafely -Path $path -Label "Profile '$safeName'" -ReadOnly:$script:ProfileStorageOffline
     if ($null -eq $profile) { return $null }
     try {
         $schema = if ($profile.PSObject.Properties.Name -contains "SchemaVersion") { [int]$profile.SchemaVersion } else { 1 }
         $converted = ConvertTo-CurrentProfileSchema -Profile $profile -FallbackName $safeName
         if ($schema -lt $script:ProfileSchemaVersion) {
-            Save-ProfileObject -Profile $converted | Out-Null
-            Update-Status "Migrated profile '$safeName' to schema v$script:ProfileSchemaVersion"
+            if ($script:ProfileStorageOffline) {
+                Update-Status "Profile '$safeName' uses schema v$schema; converted in memory while storage is offline"
+            } else {
+                Save-ProfileObject -Profile $converted | Out-Null
+                Update-Status "Migrated profile '$safeName' to schema v$script:ProfileSchemaVersion"
+            }
         }
         return $converted
     } catch {
-        $quarantinePath = Move-CorruptJsonFile -Path $path
-        $leaf = if ($quarantinePath) { Split-Path -Path $quarantinePath -Leaf } else { "quarantine failed" }
-        Update-Status "Profile '$safeName' invalid; quarantined to $leaf"
+        if ($script:ProfileStorageOffline) {
+            Update-Status "Profile '$safeName' is invalid; read-only fallback left untouched"
+        } else {
+            $quarantinePath = Move-CorruptJsonFile -Path $path
+            $leaf = if ($quarantinePath) { Split-Path -Path $quarantinePath -Leaf } else { "quarantine failed" }
+            Update-Status "Profile '$safeName' invalid; quarantined to $leaf"
+        }
         $backupPath = "$path.bak"
         if (Test-Path -LiteralPath $backupPath) {
-            $backupProfile = Read-JsonFileSafely -Path $backupPath -Label "Profile '$safeName' backup"
+            $backupProfile = Read-JsonFileSafely -Path $backupPath -Label "Profile '$safeName' backup" -ReadOnly:$script:ProfileStorageOffline
             if ($null -ne $backupProfile) {
                 try { return (ConvertTo-CurrentProfileSchema -Profile $backupProfile -FallbackName $safeName) } catch {}
             }
@@ -6387,6 +6475,9 @@ function Invoke-ProfileBundleImportCommit {
     if ($null -eq $Plan -or -not $Plan.Valid) {
         return [PSCustomObject]@{ Success = $false; Count = 0; Skipped = 0; ErrorCode = "invalid_plan" }
     }
+    if (-not (Test-ProfileStorageWriteAllowed -Operation "profile imports")) {
+        return [PSCustomObject]@{ Success = $false; Count = 0; Skipped = 0; ErrorCode = "storage_offline" }
+    }
     $accepted = @($Plan.Items | Where-Object { $_.Action -eq "Create" -or ($_.Action -eq "Replace" -and $ConflictMode -eq "Replace") })
     $skipped = @($Plan.Items | Where-Object { $_.Action -eq "Replace" -and $ConflictMode -eq "Skip" }).Count
     if ($accepted.Count -eq 0) {
@@ -6657,24 +6748,43 @@ All accepted profiles are staged and committed together.
     return [int]$result.Count
 }
 
+function Set-ProfileStoragePathBinding {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Updates process-local path bindings after a transactional cutover.')]
+    param(
+        [string]$Path,
+        [string]$Mode,
+        [string]$FallbackPath,
+        [string]$PreviousPath,
+        [switch]$Offline
+    )
+    $script:ProfilesPath = [System.IO.Path]::GetFullPath($Path)
+    $script:ProfileStorageConfiguredPath = if ($Offline) { [System.IO.Path]::GetFullPath($script:ProfileStorageConfiguredPath) } else { $script:ProfilesPath }
+    $script:ProfileStorageFallbackPath = if ([string]::IsNullOrWhiteSpace($FallbackPath)) { $script:ProfilesPath } else { [System.IO.Path]::GetFullPath($FallbackPath) }
+    $script:ProfileStoragePreviousPath = [string]$PreviousPath
+    $script:ProfileStorageMode = [string]$Mode
+    $script:ProfileStorageOffline = [bool]$Offline
+    $script:AppProfileRulesPath = Join-Path $script:ProfilesPath "app-profile-rules.json"
+    $script:ProfileScheduleRulesPath = Join-Path $script:ProfilesPath "profile-schedules.json"
+    $script:IdleDimSettingsPath = Join-Path $script:ProfilesPath "idle-dim.json"
+    $script:BatteryProfileSettingsPath = Join-Path $script:ProfilesPath "battery-profile.json"
+    $script:MonitorIdentitySettingsPath = Join-Path $script:ProfilesPath "monitor-identities.json"
+    $script:ProfileExportsPath = Join-Path $script:ProfilesPath "exports"
+}
+
 function Set-ProfileStorageRoot {
-    param([string]$Path, [string]$Mode = "Sync")
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Updates path bindings only after callers validate storage.')]
+    param([string]$Path, [string]$Mode = "Sync", [string]$FallbackPath = "", [string]$PreviousPath = "")
     if ([string]::IsNullOrWhiteSpace($Path)) {
         Update-Status "Profile storage path is empty"
         return $false
     }
     try {
-        $expandedPath = [Environment]::ExpandEnvironmentVariables($Path)
-        $fullPath = [System.IO.Path]::GetFullPath($expandedPath)
-        if (-not (Test-Path -LiteralPath $fullPath)) { New-Item -ItemType Directory -Path $fullPath -Force | Out-Null }
-        $script:ProfilesPath = $fullPath
-        $script:ProfileStorageMode = $Mode
-        $script:AppProfileRulesPath = Join-Path $script:ProfilesPath "app-profile-rules.json"
-        $script:ProfileScheduleRulesPath = Join-Path $script:ProfilesPath "profile-schedules.json"
-        $script:IdleDimSettingsPath = Join-Path $script:ProfilesPath "idle-dim.json"
-        $script:BatteryProfileSettingsPath = Join-Path $script:ProfilesPath "battery-profile.json"
-        $script:MonitorIdentitySettingsPath = Join-Path $script:ProfilesPath "monitor-identities.json"
-        $script:ProfileExportsPath = Join-Path $script:ProfilesPath "exports"
+        $fullPath = [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($Path))
+        if (-not (Test-Path -LiteralPath $fullPath -PathType Container)) {
+            Update-Status "Profile storage is unavailable: $fullPath"
+            return $false
+        }
+        Set-ProfileStoragePathBinding -Path $fullPath -Mode $Mode -FallbackPath $FallbackPath -PreviousPath $PreviousPath
         return $true
     } catch {
         Update-Status "Profile storage failed: $($_.Exception.Message)"
@@ -6682,14 +6792,424 @@ function Set-ProfileStorageRoot {
     }
 }
 
-function Save-ProfileStorageSettings {
-    if (-not (Test-Path -LiteralPath $script:DefaultProfilesPath)) { New-Item -ItemType Directory -Path $script:DefaultProfilesPath -Force | Out-Null }
-    $payload = [PSCustomObject]@{
-        Mode = $script:ProfileStorageMode
-        ProfilePath = $script:ProfilesPath
-        UpdatedAt = (Get-Date).ToString("o")
+function Get-ProfileStoragePointer {
+    param(
+        [string]$Mode,
+        [string]$ProfilePath,
+        [string]$FallbackPath,
+        [string]$PreviousPath
+    )
+    return [PSCustomObject]@{
+        SchemaVersion = [int]$script:ProfileStorageSchemaVersion
+        Mode = [string]$Mode
+        ProfilePath = [System.IO.Path]::GetFullPath($ProfilePath)
+        FallbackPath = [System.IO.Path]::GetFullPath($FallbackPath)
+        PreviousPath = [string]$PreviousPath
+        UpdatedAt = [DateTime]::UtcNow.ToString("o")
     }
-    Write-JsonFileSafely -Path $script:ProfileStorageSettingsPath -Data $payload -Depth 4 | Out-Null
+}
+
+function Write-ProfileStoragePointer {
+    param(
+        [string]$Mode,
+        [string]$ProfilePath,
+        [string]$FallbackPath,
+        [string]$PreviousPath
+    )
+    if (-not (Test-Path -LiteralPath $script:DefaultProfilesPath)) {
+        New-Item -ItemType Directory -Path $script:DefaultProfilesPath -Force | Out-Null
+    }
+    $pointer = Get-ProfileStoragePointer -Mode $Mode -ProfilePath $ProfilePath -FallbackPath $FallbackPath -PreviousPath $PreviousPath
+    return (Write-JsonFileSafely -Path $script:ProfileStorageSettingsPath -Data $pointer -Depth 4)
+}
+
+function Save-ProfileStorageSettings {
+    $configuredPath = if ($script:ProfileStorageOffline) { $script:ProfileStorageConfiguredPath } else { $script:ProfilesPath }
+    return (Write-ProfileStoragePointer -Mode $script:ProfileStorageMode -ProfilePath $configuredPath -FallbackPath $script:ProfileStorageFallbackPath -PreviousPath $script:ProfileStoragePreviousPath)
+}
+
+function Test-ProfileStorageWriteAllowed {
+    param([string]$Operation = "change profile storage", [switch]$SuppressStatus)
+    if (-not $script:ProfileStorageOffline) { return $true }
+    if (-not $SuppressStatus) {
+        Update-Status "Profile storage is offline; $Operation is read-only until storage is reconnected or migrated"
+    }
+    return $false
+}
+
+function Get-ProfileStorageMigrationPlan {
+    param(
+        [string]$SourceRoot,
+        [string]$DestinationRoot,
+        [ValidateSet("Copy", "Merge")] [string]$ConflictMode,
+        [string]$MigrationId = ""
+    )
+    $failure = {
+        param([string]$Code, [string]$Message)
+        return [PSCustomObject]@{
+            Valid = $false
+            ErrorCode = $Code
+            Message = $Message
+            Items = @()
+            Conflicts = @()
+        }
+    }
+    try {
+        if ([string]::IsNullOrWhiteSpace($SourceRoot) -or [string]::IsNullOrWhiteSpace($DestinationRoot)) {
+            return (& $failure "invalid_path" "Source and destination storage paths are required")
+        }
+        $sourceFullPath = [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($SourceRoot))
+        $destinationFullPath = [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($DestinationRoot))
+        if (-not (Test-Path -LiteralPath $sourceFullPath -PathType Container)) {
+            return (& $failure "source_unavailable" "Source profile storage is unavailable")
+        }
+        if (-not (Test-Path -LiteralPath $destinationFullPath -PathType Container)) {
+            return (& $failure "destination_unavailable" "Destination profile storage is unavailable")
+        }
+        if ([string]::IsNullOrWhiteSpace($MigrationId)) {
+            $MigrationId = "{0}-{1}" -f [DateTime]::UtcNow.ToString("yyyyMMdd-HHmmss"), [guid]::NewGuid().ToString("N").Substring(0, 8)
+        }
+        $sourceFiles = @(Get-ChildItem -LiteralPath $sourceFullPath -File -Filter "*.json" -ErrorAction Stop |
+            Where-Object { $_.Name -ne "profile-storage.json" } |
+            Sort-Object -Property Name)
+        $destinationFiles = @(Get-ChildItem -LiteralPath $destinationFullPath -File -Filter "*.json" -ErrorAction Stop |
+            Where-Object { $_.Name -ne "profile-storage.json" } |
+            Sort-Object -Property Name)
+        if ($sourceFiles.Count -gt 500 -or $destinationFiles.Count -gt 500) {
+            return (& $failure "too_many_files" "Profile storage exceeds the 500-file migration limit")
+        }
+        $sourceBytes = [int64](($sourceFiles | Measure-Object -Property Length -Sum).Sum)
+        $destinationBytes = [int64](($destinationFiles | Measure-Object -Property Length -Sum).Sum)
+        if ($sourceBytes -gt 67108864 -or $destinationBytes -gt 67108864) {
+            return (& $failure "storage_too_large" "Profile storage exceeds the 64 MiB migration limit")
+        }
+        $sourceByName = @{}
+        $destinationByName = @{}
+        foreach ($sourceFile in $sourceFiles) { $sourceByName[[string]$sourceFile.Name] = $sourceFile }
+        foreach ($destinationFile in $destinationFiles) { $destinationByName[[string]$destinationFile.Name] = $destinationFile }
+        $items = @()
+        foreach ($sourceFile in $sourceFiles) {
+            $relativePath = [string]$sourceFile.Name
+            $sourceHash = Get-FileSha256Hex -Path $sourceFile.FullName
+            $destinationFile = if ($destinationByName.ContainsKey($relativePath)) { $destinationByName[$relativePath] } else { $null }
+            if ($null -eq $destinationFile) {
+                $items += [PSCustomObject]@{
+                    RelativePath = $relativePath; Action = "Copy"; SourcePath = $sourceFile.FullName
+                    DestinationPath = Join-Path $destinationFullPath $relativePath; SourceHash = $sourceHash
+                    DestinationHash = ""; DestinationExists = $false; ConflictCopyRelativePath = ""
+                }
+                continue
+            }
+            $destinationHash = Get-FileSha256Hex -Path $destinationFile.FullName
+            if ($sourceHash -ceq $destinationHash) {
+                $items += [PSCustomObject]@{
+                    RelativePath = $relativePath; Action = "Same"; SourcePath = $sourceFile.FullName
+                    DestinationPath = $destinationFile.FullName; SourceHash = $sourceHash
+                    DestinationHash = $destinationHash; DestinationExists = $true; ConflictCopyRelativePath = ""
+                }
+                continue
+            }
+            $conflictRole = if ($ConflictMode -eq "Copy") { "destination" } else { "source" }
+            $conflictRelativePath = Join-Path (Join-Path (Join-Path "conflicts" $MigrationId) $conflictRole) $relativePath
+            $items += [PSCustomObject]@{
+                RelativePath = $relativePath; Action = "Conflict"; SourcePath = $sourceFile.FullName
+                DestinationPath = $destinationFile.FullName; SourceHash = $sourceHash
+                DestinationHash = $destinationHash; DestinationExists = $true
+                ConflictCopyRelativePath = $conflictRelativePath
+            }
+        }
+        foreach ($destinationFile in $destinationFiles) {
+            if ($sourceByName.ContainsKey([string]$destinationFile.Name)) { continue }
+            $items += [PSCustomObject]@{
+                RelativePath = [string]$destinationFile.Name; Action = "Keep"; SourcePath = ""
+                DestinationPath = $destinationFile.FullName; SourceHash = ""
+                DestinationHash = Get-FileSha256Hex -Path $destinationFile.FullName
+                DestinationExists = $true; ConflictCopyRelativePath = ""
+            }
+        }
+        return [PSCustomObject]@{
+            Valid = $true
+            ErrorCode = ""
+            Message = ""
+            SourceRoot = $sourceFullPath
+            DestinationRoot = $destinationFullPath
+            ConflictMode = $ConflictMode
+            MigrationId = $MigrationId
+            Items = @($items)
+            Conflicts = @($items | Where-Object Action -eq "Conflict")
+        }
+    } catch {
+        return (& $failure "inspection_failed" "Profile storage could not be inspected safely")
+    }
+}
+
+function Format-ProfileStorageMigrationPreview {
+    param($Plan)
+    if ($null -eq $Plan -or -not $Plan.Valid) {
+        return "Migration unavailable: $(if ($Plan) { $Plan.Message } else { 'invalid plan' })"
+    }
+    $copies = @($Plan.Items | Where-Object Action -eq "Copy")
+    $same = @($Plan.Items | Where-Object Action -eq "Same")
+    $kept = @($Plan.Items | Where-Object Action -eq "Keep")
+    $conflicts = @($Plan.Conflicts)
+    $modeText = if ($Plan.ConflictMode -eq "Copy") {
+        "COPY: source files become canonical; conflicting destination files are preserved."
+    } else {
+        "MERGE: destination files stay canonical; conflicting source files are preserved."
+    }
+    $lines = @(
+        $modeText,
+        "Copy missing: $($copies.Count)",
+        "Identical: $($same.Count)",
+        "Destination-only kept: $($kept.Count)",
+        "Conflicts: $($conflicts.Count)"
+    )
+    foreach ($conflict in $conflicts) {
+        $lines += "  $($conflict.RelativePath) -> $($conflict.ConflictCopyRelativePath)"
+    }
+    return ($lines -join [Environment]::NewLine)
+}
+
+function Invoke-ProfileStorageMigrationCommit {
+    param(
+        $Plan,
+        [string]$DestinationMode,
+        [scriptblock]$AfterDataCommit,
+        [scriptblock]$AfterPointerWrite
+    )
+    if ($null -eq $Plan -or -not $Plan.Valid) {
+        return [PSCustomObject]@{ Success = $false; ErrorCode = "invalid_plan"; ConflictCount = 0; RecoveryPath = "" }
+    }
+    $previousBinding = [PSCustomObject]@{
+        ProfilesPath = [string]$script:ProfilesPath
+        ConfiguredPath = [string]$script:ProfileStorageConfiguredPath
+        FallbackPath = [string]$script:ProfileStorageFallbackPath
+        PreviousPath = [string]$script:ProfileStoragePreviousPath
+        Mode = [string]$script:ProfileStorageMode
+        Offline = [bool]$script:ProfileStorageOffline
+    }
+    $stageRoot = Join-Path $Plan.DestinationRoot (".monitorcontrol-storage-" + [guid]::NewGuid().ToString("N"))
+    $payloadRoot = Join-Path $stageRoot "payload"
+    $rollbackRoot = Join-Path $stageRoot "rollback"
+    $committed = New-Object System.Collections.Generic.List[object]
+    $rollbackFailed = $false
+    $preserveStage = $false
+    $pointerPath = [string]$script:ProfileStorageSettingsPath
+    $pointerBackupPath = "$pointerPath.bak"
+    $pointerSnapshot = [PSCustomObject]@{
+        Path = $pointerPath
+        Existed = Test-Path -LiteralPath $pointerPath -PathType Leaf
+        Bytes = if (Test-Path -LiteralPath $pointerPath -PathType Leaf) { [System.IO.File]::ReadAllBytes($pointerPath) } else { [byte[]]@() }
+    }
+    $pointerBackupSnapshot = [PSCustomObject]@{
+        Path = $pointerBackupPath
+        Existed = Test-Path -LiteralPath $pointerBackupPath -PathType Leaf
+        Bytes = if (Test-Path -LiteralPath $pointerBackupPath -PathType Leaf) { [System.IO.File]::ReadAllBytes($pointerBackupPath) } else { [byte[]]@() }
+    }
+    $restoreSnapshot = {
+        param($Snapshot)
+        if ([bool]$Snapshot.Existed) {
+            $restoreTemp = "$($Snapshot.Path).restore-$([guid]::NewGuid().ToString('N')).tmp"
+            [System.IO.File]::WriteAllBytes($restoreTemp, [byte[]]$Snapshot.Bytes)
+            if (Test-Path -LiteralPath $Snapshot.Path -PathType Leaf) {
+                $replacedBytesPath = "$($Snapshot.Path).replaced-$([guid]::NewGuid().ToString('N')).tmp"
+                [System.IO.File]::Replace($restoreTemp, $Snapshot.Path, $replacedBytesPath, $true)
+                if (Test-Path -LiteralPath $replacedBytesPath) { Remove-Item -LiteralPath $replacedBytesPath -Force }
+            } else {
+                [System.IO.File]::Move($restoreTemp, $Snapshot.Path)
+            }
+        } elseif (Test-Path -LiteralPath $Snapshot.Path -PathType Leaf) {
+            Remove-Item -LiteralPath $Snapshot.Path -Force
+        }
+    }
+    try {
+        if (-not (Test-Path -LiteralPath $Plan.SourceRoot -PathType Container) -or -not (Test-Path -LiteralPath $Plan.DestinationRoot -PathType Container)) {
+            throw "storage_unavailable"
+        }
+        foreach ($item in @($Plan.Items)) {
+            if ($item.SourcePath) {
+                if (-not (Test-Path -LiteralPath $item.SourcePath -PathType Leaf) -or (Get-FileSha256Hex -Path $item.SourcePath) -cne [string]$item.SourceHash) {
+                    throw "source_changed"
+                }
+            }
+            $destinationExists = Test-Path -LiteralPath $item.DestinationPath -PathType Leaf
+            if ([bool]$item.DestinationExists -ne $destinationExists) { throw "destination_changed" }
+            if ($destinationExists -and (Get-FileSha256Hex -Path $item.DestinationPath) -cne [string]$item.DestinationHash) {
+                throw "destination_changed"
+            }
+        }
+        New-Item -ItemType Directory -Path $payloadRoot -Force | Out-Null
+        New-Item -ItemType Directory -Path $rollbackRoot -Force | Out-Null
+        $payloads = New-Object System.Collections.Generic.List[object]
+        foreach ($item in @($Plan.Items)) {
+            if ($item.Action -eq "Copy" -or ($item.Action -eq "Conflict" -and $Plan.ConflictMode -eq "Copy")) {
+                $payloads.Add([PSCustomObject]@{
+                    SourcePath = [string]$item.SourcePath
+                    DestinationPath = [string]$item.DestinationPath
+                    SourceHash = [string]$item.SourceHash
+                    ExpectedDestinationHash = [string]$item.DestinationHash
+                    ExpectedDestinationExists = [bool]$item.DestinationExists
+                    RelativePath = [string]$item.RelativePath
+                })
+            }
+            if ($item.Action -eq "Conflict") {
+                $conflictSourcePath = if ($Plan.ConflictMode -eq "Copy") { [string]$item.DestinationPath } else { [string]$item.SourcePath }
+                $conflictSourceHash = if ($Plan.ConflictMode -eq "Copy") { [string]$item.DestinationHash } else { [string]$item.SourceHash }
+                $payloads.Add([PSCustomObject]@{
+                    SourcePath = $conflictSourcePath
+                    DestinationPath = Join-Path $Plan.DestinationRoot ([string]$item.ConflictCopyRelativePath)
+                    SourceHash = $conflictSourceHash
+                    ExpectedDestinationHash = ""
+                    ExpectedDestinationExists = $false
+                    RelativePath = [string]$item.ConflictCopyRelativePath
+                })
+            }
+        }
+        $stageIndex = 0
+        foreach ($payload in $payloads) {
+            $stageIndex++
+            $stagePath = Join-Path $payloadRoot ("{0:D4}.payload" -f $stageIndex)
+            [System.IO.File]::Copy($payload.SourcePath, $stagePath, $false)
+            if ((Get-FileSha256Hex -Path $stagePath) -cne [string]$payload.SourceHash) { throw "stage_verification_failed" }
+            $payload | Add-Member -NotePropertyName StagePath -NotePropertyValue $stagePath -Force
+        }
+        $commitIndex = 0
+        foreach ($payload in $payloads) {
+            $commitIndex++
+            $destinationDirectory = Split-Path -Path $payload.DestinationPath -Parent
+            if (-not (Test-Path -LiteralPath $destinationDirectory -PathType Container)) {
+                New-Item -ItemType Directory -Path $destinationDirectory -Force | Out-Null
+            }
+            $adjacentTemp = Join-Path $destinationDirectory (".$([System.IO.Path]::GetFileName($payload.DestinationPath)).$([guid]::NewGuid().ToString('N')).tmp")
+            [System.IO.File]::Copy($payload.StagePath, $adjacentTemp, $false)
+            $rollbackPath = Join-Path $rollbackRoot ("{0:D4}.rollback" -f $commitIndex)
+            if ([bool]$payload.ExpectedDestinationExists) {
+                if (-not (Test-Path -LiteralPath $payload.DestinationPath -PathType Leaf) -or
+                    (Get-FileSha256Hex -Path $payload.DestinationPath) -cne [string]$payload.ExpectedDestinationHash) {
+                    Remove-Item -LiteralPath $adjacentTemp -Force -ErrorAction SilentlyContinue
+                    throw "destination_changed"
+                }
+                [System.IO.File]::Replace($adjacentTemp, $payload.DestinationPath, $rollbackPath, $true)
+                $journalAction = "Replace"
+            } else {
+                if (Test-Path -LiteralPath $payload.DestinationPath) {
+                    Remove-Item -LiteralPath $adjacentTemp -Force -ErrorAction SilentlyContinue
+                    throw "destination_changed"
+                }
+                [System.IO.File]::Move($adjacentTemp, $payload.DestinationPath)
+                $journalAction = "Create"
+            }
+            $committed.Add([PSCustomObject]@{
+                Action = $journalAction
+                DestinationPath = [string]$payload.DestinationPath
+                RollbackPath = $rollbackPath
+                ExistingHash = [string]$payload.ExpectedDestinationHash
+            })
+            if ($AfterDataCommit) { & $AfterDataCommit $committed.Count $payload }
+        }
+        if (-not (Write-ProfileStoragePointer -Mode $DestinationMode -ProfilePath $Plan.DestinationRoot -FallbackPath $Plan.SourceRoot -PreviousPath $Plan.SourceRoot)) {
+            throw "pointer_write_failed"
+        }
+        if ($AfterPointerWrite) { & $AfterPointerWrite }
+        if (-not (Set-ProfileStorageRoot -Path $Plan.DestinationRoot -Mode $DestinationMode -FallbackPath $Plan.SourceRoot -PreviousPath $Plan.SourceRoot)) {
+            throw "binding_failed"
+        }
+        return [PSCustomObject]@{
+            Success = $true
+            ErrorCode = ""
+            ConflictCount = @($Plan.Conflicts).Count
+            CopiedCount = $payloads.Count
+            RecoveryPath = ""
+        }
+    } catch {
+        try { & $restoreSnapshot $pointerSnapshot } catch { $rollbackFailed = $true }
+        try { & $restoreSnapshot $pointerBackupSnapshot } catch { $rollbackFailed = $true }
+        for ($index = $committed.Count - 1; $index -ge 0; $index--) {
+            $entry = $committed[$index]
+            try {
+                if ($entry.Action -eq "Replace") {
+                    if (-not (Test-Path -LiteralPath $entry.RollbackPath -PathType Leaf)) { throw "rollback_missing" }
+                    $failedPath = "$($entry.RollbackPath).failed"
+                    try {
+                        [System.IO.File]::Replace($entry.RollbackPath, $entry.DestinationPath, $failedPath, $true)
+                        if (Test-Path -LiteralPath $failedPath) { Remove-Item -LiteralPath $failedPath -Force }
+                    } catch {
+                        [System.IO.File]::Copy($entry.RollbackPath, $entry.DestinationPath, $true)
+                    }
+                } elseif (Test-Path -LiteralPath $entry.DestinationPath -PathType Leaf) {
+                    Remove-Item -LiteralPath $entry.DestinationPath -Force
+                }
+            } catch {
+                $rollbackFailed = $true
+            }
+        }
+        Set-ProfileStoragePathBinding -Path $previousBinding.ProfilesPath -Mode $previousBinding.Mode -FallbackPath $previousBinding.FallbackPath -PreviousPath $previousBinding.PreviousPath -Offline:$previousBinding.Offline
+        $script:ProfileStorageConfiguredPath = $previousBinding.ConfiguredPath
+        foreach ($entry in $committed) {
+            if ($entry.Action -eq "Replace") {
+                if (-not (Test-Path -LiteralPath $entry.DestinationPath -PathType Leaf) -or
+                    (Get-FileSha256Hex -Path $entry.DestinationPath) -cne [string]$entry.ExistingHash) {
+                    $rollbackFailed = $true
+                }
+            } elseif (Test-Path -LiteralPath $entry.DestinationPath -PathType Leaf) {
+                $rollbackFailed = $true
+            }
+        }
+        $preserveStage = $rollbackFailed
+        return [PSCustomObject]@{
+            Success = $false
+            ErrorCode = if ($rollbackFailed) { "rollback_failed" } else { "commit_failed" }
+            ConflictCount = @($Plan.Conflicts).Count
+            CopiedCount = 0
+            RecoveryPath = if ($rollbackFailed) { $stageRoot } else { "" }
+        }
+    } finally {
+        if (-not $preserveStage -and (Test-Path -LiteralPath $stageRoot -PathType Container)) {
+            Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Invoke-ProfileStorageMigration {
+    param(
+        [string]$DestinationRoot,
+        [string]$DestinationMode,
+        [ValidateSet("Prompt", "Copy", "Merge")] [string]$ConflictMode = "Prompt"
+    )
+    $migrationId = "{0}-{1}" -f [DateTime]::UtcNow.ToString("yyyyMMdd-HHmmss"), [guid]::NewGuid().ToString("N").Substring(0, 8)
+    $copyPlan = Get-ProfileStorageMigrationPlan -SourceRoot $script:ProfilesPath -DestinationRoot $DestinationRoot -ConflictMode "Copy" -MigrationId $migrationId
+    $mergePlan = Get-ProfileStorageMigrationPlan -SourceRoot $script:ProfilesPath -DestinationRoot $DestinationRoot -ConflictMode "Merge" -MigrationId $migrationId
+    if (-not $copyPlan.Valid -or -not $mergePlan.Valid) {
+        $message = if (-not $copyPlan.Valid) { $copyPlan.Message } else { $mergePlan.Message }
+        Update-Status "Profile storage migration unavailable: $message"
+        return [PSCustomObject]@{ Success = $false; ErrorCode = "invalid_plan"; Cancelled = $false }
+    }
+    if ($ConflictMode -eq "Prompt") {
+        $copyPreview = Format-ProfileStorageMigrationPreview -Plan $copyPlan
+        $mergePreview = Format-ProfileStorageMigrationPreview -Plan $mergePlan
+        $choice = [System.Windows.MessageBox]::Show(
+            "Source: $($copyPlan.SourceRoot)`nDestination: $($copyPlan.DestinationRoot)`n`n$copyPreview`n`n$mergePreview`n`nYes: Copy`nNo: Merge`nCancel: no changes",
+            "Preview profile storage migration",
+            [System.Windows.MessageBoxButton]::YesNoCancel,
+            [System.Windows.MessageBoxImage]::Question
+        )
+        if ($choice -eq [System.Windows.MessageBoxResult]::Cancel) {
+            Update-Status "Profile storage migration cancelled"
+            return [PSCustomObject]@{ Success = $false; ErrorCode = "cancelled"; Cancelled = $true }
+        }
+        $ConflictMode = if ($choice -eq [System.Windows.MessageBoxResult]::Yes) { "Copy" } else { "Merge" }
+    }
+    $selectedPlan = if ($ConflictMode -eq "Copy") { $copyPlan } else { $mergePlan }
+    $result = Invoke-ProfileStorageMigrationCommit -Plan $selectedPlan -DestinationMode $DestinationMode
+    if ($result.Success) {
+        Reload-ProfileStorageState
+        Update-Status "Profile storage migrated ($($result.CopiedCount) files, $($result.ConflictCount) conflict copies)"
+    } elseif ($result.ErrorCode -eq "rollback_failed") {
+        Update-Status "Profile storage migration failed; rollback needs manual recovery at $($result.RecoveryPath)"
+    } else {
+        Update-Status "Profile storage migration failed; the previous library was restored"
+    }
+    return $result
 }
 
 function Reset-ProfileBackedAutomationState {
@@ -6717,8 +7237,26 @@ function Reset-ProfileBackedAutomationState {
 function Update-ProfileStorageControls {
     if ($null -eq $profileStorageStatusText) { return }
     $mode = if ($script:ProfileStorageMode -eq "Local") { "Local" } else { "Sync" }
-    $profileStorageStatusText.Text = "$mode - $script:ProfilesPath"
-    $profileStorageStatusText.ToolTip = $script:ProfilesPath
+    if ($script:ProfileStorageOffline) {
+        $profileStorageStatusText.Text = "Offline - $script:ProfileStorageConfiguredPath"
+        $profileStorageStatusText.ToolTip = "Configured: $script:ProfileStorageConfiguredPath`nShowing read-only fallback: $script:ProfilesPath"
+        $profileStorageStatusText.Foreground = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb(244, 105, 105))
+    } else {
+        $profileStorageStatusText.Text = "$mode - $script:ProfilesPath"
+        $profileStorageStatusText.ToolTip = $script:ProfilesPath
+        $profileStorageStatusText.Foreground = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb(142, 157, 177))
+    }
+    $writeEnabled = -not $script:ProfileStorageOffline
+    foreach ($control in @(
+        $profileNameBox, $saveProfileBtn, $deleteProfileBtn, $importProfilesBtn,
+        $monitorLabelBox, $monitorLabelSaveBtn, $monitorLabelResetBtn,
+        $appProfileEnabledCheckbox, $appProfileExeBox, $appProfileCaptureBtn, $appProfileProfileCombo, $appProfileRiskyConsentCheckbox, $appProfileAddBtn, $appProfileRemoveBtn,
+        $scheduleEnabledCheckbox, $scheduleTimeBox, $scheduleProfileCombo, $scheduleRiskyConsentCheckbox, $scheduleAddBtn, $scheduleRemoveBtn,
+        $idleDimEnabledCheckbox, $idleDimMinutesBox, $idleDimBrightnessBox, $idleDimRestoreCheckbox, $idleDimSaveBtn,
+        $batteryProfileEnabledCheckbox, $batteryBrightnessBox, $acBrightnessBox, $batteryProfileSaveBtn
+    )) {
+        if ($null -ne $control) { $control.IsEnabled = $writeEnabled }
+    }
 }
 
 function Reload-ProfileStorageState {
@@ -6771,7 +7309,7 @@ function Load-AppProfileRules {
     $script:AppProfileRules = @()
     if (-not (Test-Path -LiteralPath $script:AppProfileRulesPath)) { return }
     try {
-        $data = Read-JsonFileSafely -Path $script:AppProfileRulesPath -Label "App profile rules"
+        $data = Read-JsonFileSafely -Path $script:AppProfileRulesPath -Label "App profile rules" -ReadOnly:$script:ProfileStorageOffline
         if ($null -eq $data) { return }
         $script:AppProfileEnabled = [bool]$data.Enabled
         foreach ($rule in @($data.Rules)) {
@@ -6786,11 +7324,12 @@ function Load-AppProfileRules {
 }
 
 function Save-AppProfileRules {
+    if (-not (Test-ProfileStorageWriteAllowed -Operation "application rule changes")) { return $false }
     $payload = [PSCustomObject]@{
         Enabled = [bool]$script:AppProfileEnabled
         Rules = @($script:AppProfileRules)
     }
-    Write-JsonFileSafely -Path $script:AppProfileRulesPath -Data $payload -Depth 4 | Out-Null
+    return (Write-JsonFileSafely -Path $script:AppProfileRulesPath -Data $payload -Depth 4)
 }
 
 function Update-ProfileCombo {
@@ -7100,7 +7639,7 @@ function Load-ProfileSchedules {
     $script:ProfileSchedules = @()
     if (-not (Test-Path -LiteralPath $script:ProfileScheduleRulesPath)) { return }
     try {
-        $data = Read-JsonFileSafely -Path $script:ProfileScheduleRulesPath -Label "Profile schedule"
+        $data = Read-JsonFileSafely -Path $script:ProfileScheduleRulesPath -Label "Profile schedule" -ReadOnly:$script:ProfileStorageOffline
         if ($null -eq $data) { return }
         $script:ProfileScheduleEnabled = [bool]$data.Enabled
         foreach ($rule in @($data.Rules)) {
@@ -7115,11 +7654,12 @@ function Load-ProfileSchedules {
 }
 
 function Save-ProfileSchedules {
+    if (-not (Test-ProfileStorageWriteAllowed -Operation "schedule changes")) { return $false }
     $payload = [PSCustomObject]@{
         Enabled = [bool]$script:ProfileScheduleEnabled
         Rules = @($script:ProfileSchedules | Sort-Object -Property Time)
     }
-    Write-JsonFileSafely -Path $script:ProfileScheduleRulesPath -Data $payload -Depth 4 | Out-Null
+    return (Write-JsonFileSafely -Path $script:ProfileScheduleRulesPath -Data $payload -Depth 4)
 }
 
 function Update-ScheduleControls {
@@ -7182,7 +7722,7 @@ function Start-ProfileScheduleWatcher {
 function Load-IdleDimSettings {
     if (-not (Test-Path -LiteralPath $script:IdleDimSettingsPath)) { return }
     try {
-        $data = Read-JsonFileSafely -Path $script:IdleDimSettingsPath -Label "Idle dim settings"
+        $data = Read-JsonFileSafely -Path $script:IdleDimSettingsPath -Label "Idle dim settings" -ReadOnly:$script:ProfileStorageOffline
         if ($null -eq $data) { return }
         $script:IdleDimEnabled = [bool]$data.Enabled
         $script:IdleDimMinutes = [Math]::Max(1, [Math]::Min(240, [int]$data.Minutes))
@@ -7194,13 +7734,14 @@ function Load-IdleDimSettings {
 }
 
 function Save-IdleDimSettings {
+    if (-not (Test-ProfileStorageWriteAllowed -Operation "idle dim changes")) { return $false }
     $payload = [PSCustomObject]@{
         Enabled = [bool]$script:IdleDimEnabled
         Minutes = [int]$script:IdleDimMinutes
         Brightness = [int]$script:IdleDimBrightness
         RestoreOnActivity = [bool]$script:IdleDimRestoreOnActivity
     }
-    Write-JsonFileSafely -Path $script:IdleDimSettingsPath -Data $payload -Depth 4 | Out-Null
+    return (Write-JsonFileSafely -Path $script:IdleDimSettingsPath -Data $payload -Depth 4)
 }
 
 function Update-IdleDimControls {
@@ -7299,7 +7840,7 @@ function Start-IdleDimWatcher {
 function Load-BatteryProfileSettings {
     if (-not (Test-Path -LiteralPath $script:BatteryProfileSettingsPath)) { return }
     try {
-        $data = Read-JsonFileSafely -Path $script:BatteryProfileSettingsPath -Label "Battery profile settings"
+        $data = Read-JsonFileSafely -Path $script:BatteryProfileSettingsPath -Label "Battery profile settings" -ReadOnly:$script:ProfileStorageOffline
         if ($null -eq $data) { return }
         $script:BatteryProfileEnabled = [bool]$data.Enabled
         $script:BatteryBrightness = [Math]::Max(0, [Math]::Min(100, [int]$data.BatteryBrightness))
@@ -7310,12 +7851,13 @@ function Load-BatteryProfileSettings {
 }
 
 function Save-BatteryProfileSettings {
+    if (-not (Test-ProfileStorageWriteAllowed -Operation "battery profile changes")) { return $false }
     $payload = @{
         Enabled = [bool]$script:BatteryProfileEnabled
         BatteryBrightness = [int]$script:BatteryBrightness
         AcBrightness = [int]$script:AcBrightness
     }
-    Write-JsonFileSafely -Path $script:BatteryProfileSettingsPath -Data $payload -Depth 4 | Out-Null
+    return (Write-JsonFileSafely -Path $script:BatteryProfileSettingsPath -Data $payload -Depth 4)
 }
 
 function Read-BatteryProfileSettingsFromUI {
@@ -7876,6 +8418,7 @@ $loadProfileBtn.Add_Click({
     Apply-ProfileByName -Name ([string]$profilesList.SelectedItem) | Out-Null
 })
 $deleteProfileBtn.Add_Click({
+    if (-not (Test-ProfileStorageWriteAllowed -Operation "profile deletion")) { return }
     if ($profilesList.SelectedItem -ne $null -and [System.Windows.MessageBox]::Show("Delete '$($profilesList.SelectedItem)'?", "Delete", "YesNo", "Question") -eq "Yes") {
         $deletedProfile = [string]$profilesList.SelectedItem
         $safeDeletedProfile = Get-SafeProfileName -Name $deletedProfile
@@ -7909,21 +8452,13 @@ $profileSyncFolderBtn.Add_Click({
     $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
     $dialog.Description = "Select a OneDrive or Dropbox folder for MonitorControl profiles"
     $dialog.ShowNewFolderButton = $true
-    $dialog.SelectedPath = if (Test-Path $script:ProfilesPath) { $script:ProfilesPath } else { $script:DefaultProfilesPath }
+    $dialog.SelectedPath = if (Test-Path $script:ProfileStorageConfiguredPath) { $script:ProfileStorageConfiguredPath } elseif (Test-Path $script:ProfilesPath) { $script:ProfilesPath } else { $script:DefaultProfilesPath }
     if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-        if (Set-ProfileStorageRoot -Path $dialog.SelectedPath -Mode "Sync") {
-            Save-ProfileStorageSettings
-            Reload-ProfileStorageState
-            Update-Status "Profile sync folder: $(Split-Path -Path $script:ProfilesPath -Leaf)"
-        }
+        Invoke-ProfileStorageMigration -DestinationRoot $dialog.SelectedPath -DestinationMode "Sync" | Out-Null
     }
 })
 $profileLocalFolderBtn.Add_Click({
-    if (Set-ProfileStorageRoot -Path $script:DefaultProfilesPath -Mode "Local") {
-        Save-ProfileStorageSettings
-        Reload-ProfileStorageState
-        Update-Status "Profile storage: local"
-    }
+    Invoke-ProfileStorageMigration -DestinationRoot $script:DefaultProfilesPath -DestinationMode "Local" | Out-Null
 })
 
 $appProfileEnabledCheckbox.Add_Checked({

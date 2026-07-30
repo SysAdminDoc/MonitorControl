@@ -30,6 +30,7 @@ BeforeAll {
         "Move-CorruptJsonFile",
         "Read-JsonFileSafely",
         "Write-JsonFileSafely",
+        "Resolve-ProfileStorageRootState",
         "Get-SafeProfileName",
         "Get-UserProfileFiles",
         "Get-ProfilePropertyValue",
@@ -50,6 +51,15 @@ BeforeAll {
         "Invoke-ProfileBundleImportCommit",
         "Export-ProfileBundle",
         "Import-ProfileBundle",
+        "Set-ProfileStoragePathBinding",
+        "Set-ProfileStorageRoot",
+        "Get-ProfileStoragePointer",
+        "Write-ProfileStoragePointer",
+        "Save-ProfileStorageSettings",
+        "Test-ProfileStorageWriteAllowed",
+        "Get-ProfileStorageMigrationPlan",
+        "Format-ProfileStorageMigrationPreview",
+        "Invoke-ProfileStorageMigrationCommit",
         "Get-CapabilitiesSection",
         "Get-HexTokens",
         "ConvertFrom-MonitorCapabilities",
@@ -369,6 +379,19 @@ Describe "Safe JSON storage" {
         $saved.Contrast | Should -Be 48
         @(Get-ChildItem -LiteralPath $TestDrive -Filter "profile.json.corrupt-*").Count | Should -Be 1
     }
+
+    It "loads a backup without mutating a corrupt read-only fallback" {
+        $path = Join-Path $TestDrive "read-only.json"
+        Set-Content -LiteralPath $path -Value "{broken" -Encoding UTF8
+        Set-Content -LiteralPath "$path.bak" -Value '{"source":"backup"}' -Encoding UTF8
+        $beforeHash = Get-FileSha256Hex -Path $path
+
+        $data = Read-JsonFileSafely -Path $path -Label "Read-only fixture" -ReadOnly
+
+        $data.source | Should -Be "backup"
+        (Get-FileSha256Hex -Path $path) | Should -Be $beforeHash
+        @(Get-ChildItem -LiteralPath $TestDrive -Filter "read-only.json.corrupt-*").Count | Should -Be 0
+    }
 }
 
 Describe "Transactional profile bundle import" {
@@ -529,6 +552,112 @@ Describe "Transactional profile bundle import" {
         [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($alphaPath)) | Should -Be ([Convert]::ToBase64String($alphaBefore))
         [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($betaPath)) | Should -Be ([Convert]::ToBase64String($betaBefore))
         @(Get-ChildItem -LiteralPath $script:ProfilesPath -Directory -Filter ".profile-import-*").Count | Should -Be 0
+    }
+}
+
+Describe "Transactional alternate profile storage" {
+    BeforeEach {
+        $script:StorageTestRoot = Join-Path $TestDrive ([guid]::NewGuid().ToString("N"))
+        $script:DefaultProfilesPath = Join-Path $script:StorageTestRoot "default"
+        $script:StorageSourceRoot = Join-Path $script:StorageTestRoot "source"
+        $script:StorageDestinationRoot = Join-Path $script:StorageTestRoot "destination"
+        New-Item -ItemType Directory -Path $script:DefaultProfilesPath, $script:StorageSourceRoot, $script:StorageDestinationRoot -Force | Out-Null
+        $script:ProfileStorageSettingsPath = Join-Path $script:DefaultProfilesPath "profile-storage.json"
+        $script:ProfileStorageSchemaVersion = 2
+        $script:ProfilesPath = $script:StorageSourceRoot
+        $script:ProfileStorageConfiguredPath = $script:StorageSourceRoot
+        $script:ProfileStorageFallbackPath = $script:StorageSourceRoot
+        $script:ProfileStoragePreviousPath = ""
+        $script:ProfileStorageMode = "Local"
+        $script:ProfileStorageOffline = $false
+        Set-ProfileStoragePathBinding -Path $script:StorageSourceRoot -Mode "Local" -FallbackPath $script:StorageSourceRoot -PreviousPath ""
+    }
+
+    It "uses an available fallback as a read-only library when configured storage is offline" {
+        '{"Name":"cached"}' | Set-Content -LiteralPath (Join-Path $script:StorageSourceRoot "cached.json") -Encoding UTF8
+        $missingRoot = Join-Path $script:StorageTestRoot "missing-sync-root"
+        $settings = [PSCustomObject]@{
+            SchemaVersion = 2
+            Mode = "Sync"
+            ProfilePath = $missingRoot
+            FallbackPath = $script:StorageSourceRoot
+            PreviousPath = $script:DefaultProfilesPath
+        }
+        $state = Resolve-ProfileStorageRootState -Settings $settings -DefaultPath $script:DefaultProfilesPath -CurrentSchemaVersion 2
+        $state.Offline | Should -BeTrue
+        $state.ProfilesPath | Should -Be $script:StorageSourceRoot
+        (Test-Path -LiteralPath (Join-Path $state.ProfilesPath "cached.json")) | Should -BeTrue
+
+        $script:ProfileStorageOffline = $true
+        (Test-ProfileStorageWriteAllowed -Operation "test write" -SuppressStatus) | Should -BeFalse
+    }
+
+    It "previews every conflict and copy-migrates without losing either version" {
+        '{"Name":"source-alpha","Value":1}' | Set-Content -LiteralPath (Join-Path $script:StorageSourceRoot "alpha.json") -Encoding UTF8
+        '{"Name":"same"}' | Set-Content -LiteralPath (Join-Path $script:StorageSourceRoot "same.json") -Encoding UTF8
+        '{"Enabled":true,"Rules":[]}' | Set-Content -LiteralPath (Join-Path $script:StorageSourceRoot "app-profile-rules.json") -Encoding UTF8
+        '{"Name":"destination-alpha","Value":2}' | Set-Content -LiteralPath (Join-Path $script:StorageDestinationRoot "alpha.json") -Encoding UTF8
+        '{"Name":"same"}' | Set-Content -LiteralPath (Join-Path $script:StorageDestinationRoot "same.json") -Encoding UTF8
+        '{"Name":"destination-only"}' | Set-Content -LiteralPath (Join-Path $script:StorageDestinationRoot "destination-only.json") -Encoding UTF8
+
+        $plan = Get-ProfileStorageMigrationPlan -SourceRoot $script:StorageSourceRoot -DestinationRoot $script:StorageDestinationRoot -ConflictMode "Copy" -MigrationId "test-copy"
+        $plan.Valid | Should -BeTrue
+        @($plan.Conflicts).Count | Should -Be 1
+        $plan.Conflicts[0].RelativePath | Should -Be "alpha.json"
+        $plan.Conflicts[0].ConflictCopyRelativePath | Should -Be (Join-Path "conflicts\test-copy\destination" "alpha.json")
+        $preview = Format-ProfileStorageMigrationPreview -Plan $plan
+        $preview | Should -Match 'alpha\.json'
+        $preview | Should -Match 'conflicts'
+
+        $destinationAlphaBefore = Get-Content -LiteralPath (Join-Path $script:StorageDestinationRoot "alpha.json") -Raw
+        $sourceAlpha = Get-Content -LiteralPath (Join-Path $script:StorageSourceRoot "alpha.json") -Raw
+        $result = Invoke-ProfileStorageMigrationCommit -Plan $plan -DestinationMode "Sync"
+        $result.Success | Should -BeTrue
+        (Get-Content -LiteralPath (Join-Path $script:StorageDestinationRoot "alpha.json") -Raw) | Should -BeExactly $sourceAlpha
+        (Get-Content -LiteralPath (Join-Path $script:StorageDestinationRoot $plan.Conflicts[0].ConflictCopyRelativePath) -Raw) | Should -BeExactly $destinationAlphaBefore
+        (Test-Path -LiteralPath (Join-Path $script:StorageDestinationRoot "destination-only.json")) | Should -BeTrue
+        (Test-Path -LiteralPath (Join-Path $script:StorageDestinationRoot "app-profile-rules.json")) | Should -BeTrue
+        $script:ProfilesPath | Should -Be $script:StorageDestinationRoot
+        $script:ProfileStorageOffline | Should -BeFalse
+
+        $pointer = Get-Content -LiteralPath $script:ProfileStorageSettingsPath -Raw | ConvertFrom-Json
+        $pointer.SchemaVersion | Should -Be 2
+        $pointer.ProfilePath | Should -Be $script:StorageDestinationRoot
+        $pointer.FallbackPath | Should -Be $script:StorageSourceRoot
+    }
+
+    It "merge-preserves the destination and writes the source as an explicit conflict copy" {
+        '{"Name":"source-alpha"}' | Set-Content -LiteralPath (Join-Path $script:StorageSourceRoot "alpha.json") -Encoding UTF8
+        '{"Name":"destination-alpha"}' | Set-Content -LiteralPath (Join-Path $script:StorageDestinationRoot "alpha.json") -Encoding UTF8
+        $destinationAlphaBefore = Get-Content -LiteralPath (Join-Path $script:StorageDestinationRoot "alpha.json") -Raw
+        $sourceAlpha = Get-Content -LiteralPath (Join-Path $script:StorageSourceRoot "alpha.json") -Raw
+        $plan = Get-ProfileStorageMigrationPlan -SourceRoot $script:StorageSourceRoot -DestinationRoot $script:StorageDestinationRoot -ConflictMode "Merge" -MigrationId "test-merge"
+
+        $result = Invoke-ProfileStorageMigrationCommit -Plan $plan -DestinationMode "Sync"
+        $result.Success | Should -BeTrue
+        (Get-Content -LiteralPath (Join-Path $script:StorageDestinationRoot "alpha.json") -Raw) | Should -BeExactly $destinationAlphaBefore
+        (Get-Content -LiteralPath (Join-Path $script:StorageDestinationRoot $plan.Conflicts[0].ConflictCopyRelativePath) -Raw) | Should -BeExactly $sourceAlpha
+    }
+
+    It "restores destination files pointer bytes metadata backup and path bindings after a late failure" {
+        '{"Name":"source-alpha"}' | Set-Content -LiteralPath (Join-Path $script:StorageSourceRoot "alpha.json") -Encoding UTF8
+        '{"Name":"destination-alpha"}' | Set-Content -LiteralPath (Join-Path $script:StorageDestinationRoot "alpha.json") -Encoding UTF8
+        '{"SchemaVersion":1,"Mode":"Local","ProfilePath":"old"}' | Set-Content -LiteralPath $script:ProfileStorageSettingsPath -Encoding UTF8
+        'old-backup' | Set-Content -LiteralPath "$script:ProfileStorageSettingsPath.bak" -Encoding UTF8
+        $pointerHash = Get-FileSha256Hex -Path $script:ProfileStorageSettingsPath
+        $pointerBackupHash = Get-FileSha256Hex -Path "$script:ProfileStorageSettingsPath.bak"
+        $destinationHash = Get-FileSha256Hex -Path (Join-Path $script:StorageDestinationRoot "alpha.json")
+        $plan = Get-ProfileStorageMigrationPlan -SourceRoot $script:StorageSourceRoot -DestinationRoot $script:StorageDestinationRoot -ConflictMode "Copy" -MigrationId "test-rollback"
+
+        $result = Invoke-ProfileStorageMigrationCommit -Plan $plan -DestinationMode "Sync" -AfterPointerWrite { throw "injected late failure" }
+        $result.Success | Should -BeFalse
+        $result.ErrorCode | Should -Be "commit_failed"
+        (Get-FileSha256Hex -Path $script:ProfileStorageSettingsPath) | Should -Be $pointerHash
+        (Get-FileSha256Hex -Path "$script:ProfileStorageSettingsPath.bak") | Should -Be $pointerBackupHash
+        (Get-FileSha256Hex -Path (Join-Path $script:StorageDestinationRoot "alpha.json")) | Should -Be $destinationHash
+        (Test-Path -LiteralPath (Join-Path $script:StorageDestinationRoot $plan.Conflicts[0].ConflictCopyRelativePath)) | Should -BeFalse
+        $script:ProfilesPath | Should -Be $script:StorageSourceRoot
+        $script:ProfileStorageMode | Should -Be "Local"
     }
 }
 
