@@ -722,6 +722,11 @@ $script:CapabilitiesLastIncidentIdentityKey = ""
 $script:CapabilitiesLastIncidentAt = ""
 $script:UpdatingCapabilitiesSafetyUI = $false
 $script:CapabilitiesConsentPromptHandled = $false
+$script:VcpWriteSafetySettingsPath = ""
+$script:VcpWriteSafetySchemaVersion = 1
+$script:RiskyVcpEnabledIdentityKeys = @{}
+$script:RiskyVcpCodes = @(0x04, 0x08, 0x60, 0xD6, 0xE8, 0xE9)
+$script:UpdatingVcpWriteSafetyUI = $false
 $script:DdcReportWorker = $null
 $script:DdcReportWorkerInput = $null
 $script:DdcReportWorkerOutput = $null
@@ -776,6 +781,7 @@ $script:AutomationBridgeSettingsPath = Join-Path $script:DefaultProfilesPath "au
 $script:AutomationBridgeWriteLogPath = Join-Path $script:DefaultProfilesPath "automation-bridge-writes.jsonl"
 $script:CapabilitiesSafetySettingsPath = Join-Path $script:DefaultProfilesPath "capabilities-safety.json"
 $script:CapabilitiesProbeSentinelPath = Join-Path $script:DefaultProfilesPath "capabilities-probe-pending.json"
+$script:VcpWriteSafetySettingsPath = Join-Path $script:DefaultProfilesPath "vcp-write-safety.json"
 $script:ProfilesPath = $script:DefaultProfilesPath
 $script:ProfileStorageMode = "Local"
 if (-not (Test-Path -LiteralPath $script:DefaultProfilesPath)) { New-Item -ItemType Directory -Path $script:DefaultProfilesPath -Force | Out-Null }
@@ -807,7 +813,7 @@ $script:ProfileBundleMaxTotalBytes = 10485760
 $script:ProfileBundleMaxCompressionRatio = 100
 $script:ProfileBundleMaxMonitorSettings = 32
 $script:ProfileExportsPath = Join-Path $script:ProfilesPath "exports"
-$script:ProfileMetadataFiles = @("app-profile-rules.json", "profile-schedules.json", "idle-dim.json", "battery-profile.json", "profile-storage.json", "monitor-identities.json", "automation-bridge.json", "capabilities-safety.json", "capabilities-probe-pending.json")
+$script:ProfileMetadataFiles = @("app-profile-rules.json", "profile-schedules.json", "idle-dim.json", "battery-profile.json", "profile-storage.json", "monitor-identities.json", "automation-bridge.json", "capabilities-safety.json", "capabilities-probe-pending.json", "vcp-write-safety.json")
 $script:MonitorIdentityRecords = @{}
 $script:UpdatingMonitorLabelUI = $false
 $script:UiCulture = "en-US"
@@ -867,14 +873,17 @@ $script:UiStrings = @{
     "A11y.CapabilitiesCompatibility" = "Maximum compatibility mode"
     "A11y.CapabilitiesExclude" = "Exclude the selected monitor from capability discovery"
     "A11y.CapabilitiesClearExclusions" = "Clear capability discovery exclusions"
+    "A11y.RiskyVcp" = "Enable risky VCP writes for the selected monitor identity"
     "A11y.DdcReport" = "DDC compatibility report"
     "A11y.AutomationBridge" = "Local automation bridge"
     "A11y.Status" = "Status"
     "A11y.AppProfileExe" = "Application executable"
     "A11y.AppProfileProfile" = "Application profile"
+    "A11y.AppProfileRisky" = "Allow risky VCP writes for this application rule"
     "A11y.AppProfileRules" = "Application profile rules"
     "A11y.ScheduleTime" = "Schedule time"
     "A11y.ScheduleProfile" = "Schedule profile"
+    "A11y.ScheduleRisky" = "Allow risky VCP writes for this schedule rule"
     "A11y.ScheduleRules" = "Schedule rules"
     "A11y.IdleMinutes" = "Idle minutes"
     "A11y.IdleBrightness" = "Idle brightness"
@@ -1043,16 +1052,23 @@ function ConvertTo-VcpValue {
 }
 
 function Set-ControlVcpSupport {
-    param($Control, $Monitor, [int]$Code, $Value = $null)
+    param($Control, $Monitor, [int]$Code, $Value = $null, [switch]$Risky)
     if ($null -eq $Control) { return }
     $supported = if ($null -eq $Value) {
         Test-MonitorSupportsVcp -Monitor $Monitor -Code $Code
     } else {
         Test-MonitorSupportsVcpValue -Monitor $Monitor -Code $Code -Value ([int]$Value)
     }
-    $Control.IsEnabled = [bool]$supported
+    $safetyEnabled = -not $Risky -or (Test-VcpWriteEnabledForMonitor -Monitor $Monitor)
+    $Control.IsEnabled = [bool]($supported -and $safetyEnabled)
     $desc = Get-VcpDescription -Code $Code
-    $Control.ToolTip = if ($supported) { $null } else { "VCP 0x$("{0:X2}" -f $Code) ($desc) is not reported in this monitor's capabilities." }
+    $Control.ToolTip = if (-not $supported) {
+        "VCP 0x$("{0:X2}" -f $Code) ($desc) is not reported in this monitor's capabilities."
+    } elseif (-not $safetyEnabled) {
+        "Enable risky VCP writes for this stable monitor identity in System."
+    } else {
+        $null
+    }
 }
 
 function Update-VcpPresetItems {
@@ -1097,13 +1113,13 @@ function Update-CapabilityControls {
     Set-ControlVcpSupport -Control $volumeSlider -Monitor $Monitor -Code ([MonitorAPI]::VCP_VOLUME)
     Set-ControlVcpSupport -Control $muteCheckbox -Monitor $Monitor -Code ([MonitorAPI]::VCP_MUTE)
     Set-ControlVcpSupport -Control $sharpnessSlider -Monitor $Monitor -Code ([MonitorAPI]::VCP_SHARPNESS)
-    Set-ControlVcpSupport -Control $inputSourceCombo -Monitor $Monitor -Code ([MonitorAPI]::VCP_INPUT_SOURCE)
-    Set-ControlVcpSupport -Control $powerOffBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_POWER_MODE) -Value ([MonitorAPI]::POWER_OFF)
-    Set-ControlVcpSupport -Control $powerStandbyBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_POWER_MODE) -Value ([MonitorAPI]::POWER_STANDBY)
-    Set-ControlVcpSupport -Control $powerOnBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_POWER_MODE) -Value ([MonitorAPI]::POWER_ON)
-    Set-ControlVcpSupport -Control $resetColorBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_RESTORE_FACTORY_COLOR) -Value 1
-    Set-ControlVcpSupport -Control $factoryResetBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_RESTORE_FACTORY_DEFAULTS) -Value 1
-    Set-ControlVcpSupport -Control $allMonitorsStandbyBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_POWER_MODE) -Value ([MonitorAPI]::POWER_STANDBY)
+    Set-ControlVcpSupport -Control $inputSourceCombo -Monitor $Monitor -Code ([MonitorAPI]::VCP_INPUT_SOURCE) -Risky
+    Set-ControlVcpSupport -Control $powerOffBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_POWER_MODE) -Value ([MonitorAPI]::POWER_OFF) -Risky
+    Set-ControlVcpSupport -Control $powerStandbyBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_POWER_MODE) -Value ([MonitorAPI]::POWER_STANDBY) -Risky
+    Set-ControlVcpSupport -Control $powerOnBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_POWER_MODE) -Value ([MonitorAPI]::POWER_ON) -Risky
+    Set-ControlVcpSupport -Control $resetColorBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_RESTORE_FACTORY_COLOR) -Value 1 -Risky
+    Set-ControlVcpSupport -Control $factoryResetBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_RESTORE_FACTORY_DEFAULTS) -Value 1 -Risky
+    Set-ControlVcpSupport -Control $allMonitorsStandbyBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_POWER_MODE) -Value ([MonitorAPI]::POWER_STANDBY) -Risky
     Set-ControlVcpSupport -Control $colorTempWarm -Monitor $Monitor -Code ([MonitorAPI]::VCP_COLOR_PRESET) -Value ([MonitorAPI]::COLOR_PRESET_5000K)
     Set-ControlVcpSupport -Control $colorTemp6500 -Monitor $Monitor -Code ([MonitorAPI]::VCP_COLOR_PRESET) -Value ([MonitorAPI]::COLOR_PRESET_6500K)
     Set-ControlVcpSupport -Control $colorTempCool -Monitor $Monitor -Code ([MonitorAPI]::VCP_COLOR_PRESET) -Value ([MonitorAPI]::COLOR_PRESET_9300K)
@@ -1113,12 +1129,12 @@ function Update-CapabilityControls {
     Set-ControlVcpSupport -Control $pictureModeWeb -Monitor $Monitor -Code ([MonitorAPI]::VCP_DISPLAY_MODE) -Value ([MonitorAPI]::DISPLAY_MODE_PRODUCTIVITY)
     Set-ControlVcpSupport -Control $pictureModeCinema -Monitor $Monitor -Code ([MonitorAPI]::VCP_DISPLAY_MODE) -Value ([MonitorAPI]::DISPLAY_MODE_MOVIE)
     Set-ControlVcpSupport -Control $pictureModeGame -Monitor $Monitor -Code ([MonitorAPI]::VCP_DISPLAY_MODE) -Value ([MonitorAPI]::DISPLAY_MODE_GAMES)
-    Set-ControlVcpSupport -Control $pipPbpOffBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_PIP_MODE) -Value ([MonitorAPI]::PIP_MODE_OFF)
-    Set-ControlVcpSupport -Control $pipModeBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_PIP_MODE) -Value ([MonitorAPI]::PIP_MODE_UPPER_RIGHT)
-    Set-ControlVcpSupport -Control $pbpModeBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_PIP_MODE) -Value ([MonitorAPI]::PIP_MODE_PBP_SPLIT)
-    Set-ControlVcpSupport -Control $pipSecondaryDpBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_PIP_SECONDARY_SOURCE) -Value ([MonitorAPI]::PIP_SECONDARY_DISPLAYPORT)
-    Set-ControlVcpSupport -Control $pipSecondaryHdmi1Btn -Monitor $Monitor -Code ([MonitorAPI]::VCP_PIP_SECONDARY_SOURCE) -Value ([MonitorAPI]::PIP_SECONDARY_HDMI1)
-    Set-ControlVcpSupport -Control $pipSecondaryHdmi2Btn -Monitor $Monitor -Code ([MonitorAPI]::VCP_PIP_SECONDARY_SOURCE) -Value ([MonitorAPI]::PIP_SECONDARY_HDMI2)
+    Set-ControlVcpSupport -Control $pipPbpOffBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_PIP_MODE) -Value ([MonitorAPI]::PIP_MODE_OFF) -Risky
+    Set-ControlVcpSupport -Control $pipModeBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_PIP_MODE) -Value ([MonitorAPI]::PIP_MODE_UPPER_RIGHT) -Risky
+    Set-ControlVcpSupport -Control $pbpModeBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_PIP_MODE) -Value ([MonitorAPI]::PIP_MODE_PBP_SPLIT) -Risky
+    Set-ControlVcpSupport -Control $pipSecondaryDpBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_PIP_SECONDARY_SOURCE) -Value ([MonitorAPI]::PIP_SECONDARY_DISPLAYPORT) -Risky
+    Set-ControlVcpSupport -Control $pipSecondaryHdmi1Btn -Monitor $Monitor -Code ([MonitorAPI]::VCP_PIP_SECONDARY_SOURCE) -Value ([MonitorAPI]::PIP_SECONDARY_HDMI1) -Risky
+    Set-ControlVcpSupport -Control $pipSecondaryHdmi2Btn -Monitor $Monitor -Code ([MonitorAPI]::VCP_PIP_SECONDARY_SOURCE) -Value ([MonitorAPI]::PIP_SECONDARY_HDMI2) -Risky
     $brightnessSupported = Test-MonitorSupportsVcp -Monitor $Monitor -Code ([MonitorAPI]::VCP_BRIGHTNESS)
     foreach ($control in @($presetDay, $presetNight, $presetAutoMode, $presetAmbientMode, $presetReset)) {
         if ($control) {
@@ -1147,6 +1163,20 @@ function Get-StableHash {
     } finally {
         $sha.Dispose()
     }
+    if ($vcpSetBtn) {
+        $vcpSetBtn.IsEnabled = Test-VcpWriteEnabledForMonitor -Monitor $Monitor
+        $vcpSetBtn.ToolTip = if ($vcpSetBtn.IsEnabled) { "Every direct write requires an exact code/value confirmation." } else { "Arbitrary VCP writes require the selected stable monitor identity to be enabled in System." }
+    }
+    if ($allMonitorsStandbyBtn -and $allMonitorsStandbyBtn.IsEnabled) {
+        foreach ($candidate in @($script:PhysicalMonitors)) {
+            if ($candidate.Handle -ne [IntPtr]::Zero -and -not (Test-VcpWriteEnabledForMonitor -Monitor $candidate)) {
+                $allMonitorsStandbyBtn.IsEnabled = $false
+                $allMonitorsStandbyBtn.ToolTip = "Enable risky VCP writes separately for every connected DDC/CI monitor."
+                break
+            }
+        }
+    }
+    if (Get-Command Sync-VcpWriteSafetyUi -ErrorAction SilentlyContinue) { Sync-VcpWriteSafetyUi }
 }
 
 function Convert-EdidManufacturerId {
@@ -1522,14 +1552,17 @@ function Initialize-LocalizationAndAccessibility {
     Set-AccessibleName -Control $capabilitiesMaximumCompatibilityCheckbox -Key "A11y.CapabilitiesCompatibility"
     Set-AccessibleName -Control $capabilitiesExcludeCurrentBtn -Key "A11y.CapabilitiesExclude"
     Set-AccessibleName -Control $capabilitiesClearExclusionsBtn -Key "A11y.CapabilitiesClearExclusions"
+    Set-AccessibleName -Control $riskyVcpEnabledCheckbox -Key "A11y.RiskyVcp"
     Set-AccessibleName -Control $ddcReportBox -Key "A11y.DdcReport"
     Set-AccessibleName -Control $automationBridgeEnabledCheckbox -Key "A11y.AutomationBridge"
     Set-AccessibleName -Control $statusText -Key "A11y.Status"
     Set-AccessibleName -Control $appProfileExeBox -Key "A11y.AppProfileExe"
     Set-AccessibleName -Control $appProfileProfileCombo -Key "A11y.AppProfileProfile"
+    Set-AccessibleName -Control $appProfileRiskyConsentCheckbox -Key "A11y.AppProfileRisky"
     Set-AccessibleName -Control $appProfileRulesList -Key "A11y.AppProfileRules"
     Set-AccessibleName -Control $scheduleTimeBox -Key "A11y.ScheduleTime"
     Set-AccessibleName -Control $scheduleProfileCombo -Key "A11y.ScheduleProfile"
+    Set-AccessibleName -Control $scheduleRiskyConsentCheckbox -Key "A11y.ScheduleRisky"
     Set-AccessibleName -Control $scheduleRulesList -Key "A11y.ScheduleRules"
     Set-AccessibleName -Control $idleDimMinutesBox -Key "A11y.IdleMinutes"
     Set-AccessibleName -Control $idleDimBrightnessBox -Key "A11y.IdleBrightness"
@@ -1543,12 +1576,12 @@ function Initialize-LocalizationAndAccessibility {
         $inputSourceCombo,$powerOffBtn,$powerStandbyBtn,$powerOnBtn,$volumeSlider,$muteCheckbox,$sharpnessSlider,$resetColorBtn,$factoryResetBtn,$allMonitorsStandbyBtn,
         $vcpCodeBox,$vcpPresetCombo,$vcpQueryBtn,$vcpSetValueBox,$vcpSetBtn,$vcpScanBtn,$vcpScanCapabilitiesOnlyCheckbox,$vcpResultBox,
         $profileNameBox,$saveProfileBtn,$loadProfileBtn,$deleteProfileBtn,$profilesList,$exportProfilesBtn,$importProfilesBtn,$profileSyncFolderBtn,$profileLocalFolderBtn,
-        $appProfileEnabledCheckbox,$appProfileExeBox,$appProfileCaptureBtn,$appProfileProfileCombo,$appProfileAddBtn,$appProfileRemoveBtn,$appProfileRulesList,
-        $scheduleEnabledCheckbox,$scheduleTimeBox,$scheduleProfileCombo,$scheduleAddBtn,$scheduleRemoveBtn,$scheduleRulesList,
+        $appProfileEnabledCheckbox,$appProfileExeBox,$appProfileCaptureBtn,$appProfileProfileCombo,$appProfileRiskyConsentCheckbox,$appProfileAddBtn,$appProfileRemoveBtn,$appProfileRulesList,
+        $scheduleEnabledCheckbox,$scheduleTimeBox,$scheduleProfileCombo,$scheduleRiskyConsentCheckbox,$scheduleAddBtn,$scheduleRemoveBtn,$scheduleRulesList,
         $idleDimEnabledCheckbox,$idleDimMinutesBox,$idleDimBrightnessBox,$idleDimRestoreCheckbox,$idleDimSaveBtn,
         $batteryProfileEnabledCheckbox,$batteryBrightnessBox,$acBrightnessBox,$batteryProfileSaveBtn,
         $displaySettingsBtn,$colorMgmtBtn,$gpuControlPanelBtn,$gammaRedSlider,$gammaGreenSlider,$gammaBlueSlider,$resetGammaBtn,$capabilitiesBox,
-        $capabilitiesDiscoveryEnabledCheckbox,$capabilitiesMaximumCompatibilityCheckbox,$capabilitiesExcludeCurrentBtn,$capabilitiesClearExclusionsBtn,
+        $capabilitiesDiscoveryEnabledCheckbox,$capabilitiesMaximumCompatibilityCheckbox,$capabilitiesExcludeCurrentBtn,$capabilitiesClearExclusionsBtn,$riskyVcpEnabledCheckbox,
         $automationBridgeEnabledCheckbox,$automationBridgeBindBox,$automationBridgePortBox,$automationBridgeKeyBox,$automationBridgeSaveBtn,
         $ddcReportGenerateBtn,$ddcReportCopyBtn,$ddcReportBox
     )
@@ -1654,6 +1687,98 @@ function Import-CapabilitySafetyState {
         }
         Write-CapabilitySafetyState | Out-Null
     }
+}
+
+function Test-VcpWriteRequiresSafetyConsent {
+    param([int]$Code, [switch]$Arbitrary)
+    if ($Arbitrary) { return $true }
+    return $script:RiskyVcpCodes -contains $Code
+}
+
+function Get-VcpWriteSafetySettingsObject {
+    return [PSCustomObject]@{
+        SchemaVersion = [int]$script:VcpWriteSafetySchemaVersion
+        EnabledIdentityKeys = @($script:RiskyVcpEnabledIdentityKeys.Keys | Sort-Object)
+    }
+}
+
+function Write-VcpWriteSafetyState {
+    return (Write-JsonFileSafely -Path $script:VcpWriteSafetySettingsPath -Data (Get-VcpWriteSafetySettingsObject) -Depth 4)
+}
+
+function Import-VcpWriteSafetyState {
+    $script:RiskyVcpEnabledIdentityKeys = @{}
+    if (-not (Test-Path -LiteralPath $script:VcpWriteSafetySettingsPath)) { return }
+    try {
+        $data = Read-JsonFileSafely -Path $script:VcpWriteSafetySettingsPath -Label "Risky VCP write settings"
+        if ($null -eq $data) { return }
+        $schema = if ($data.PSObject.Properties.Name -contains "SchemaVersion") { [int]$data.SchemaVersion } else { 1 }
+        if ($schema -gt $script:VcpWriteSafetySchemaVersion) {
+            Set-DeferredStatus "Risky VCP write settings are newer than this app; dangerous writes remain disabled"
+            return
+        }
+        if ($schema -lt 1) {
+            Set-DeferredStatus "Risky VCP write settings were invalid; dangerous writes remain disabled"
+            return
+        }
+        foreach ($identityKey in @($data.EnabledIdentityKeys)) {
+            $key = [string]$identityKey
+            if (-not [string]::IsNullOrWhiteSpace($key) -and $key.Length -le 512) {
+                $script:RiskyVcpEnabledIdentityKeys[$key] = $true
+            }
+        }
+    } catch {
+        $script:RiskyVcpEnabledIdentityKeys = @{}
+        Set-DeferredStatus "Risky VCP write settings were invalid; dangerous writes remain disabled"
+    }
+}
+
+function Test-VcpWriteEnabledForMonitor {
+    param($Monitor)
+    if ($null -eq $Monitor) { return $false }
+    $identityKey = [string]$Monitor.IdentityKey
+    if ([string]::IsNullOrWhiteSpace($identityKey) -or $identityKey.Length -gt 512) { return $false }
+    return $script:RiskyVcpEnabledIdentityKeys.ContainsKey($identityKey)
+}
+
+function Set-VcpWriteEnabledForMonitor {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute("PSUseShouldProcessForStateChangingFunctions", "", Justification = "The calling UI owns explicit confirmation and this helper persists only that confirmed choice.")]
+    param($Monitor, [bool]$Enabled)
+    if ($null -eq $Monitor) { return $false }
+    $identityKey = [string]$Monitor.IdentityKey
+    if ([string]::IsNullOrWhiteSpace($identityKey) -or $identityKey.Length -gt 512) { return $false }
+    if ($Enabled) {
+        $script:RiskyVcpEnabledIdentityKeys[$identityKey] = $true
+    } else {
+        $null = $script:RiskyVcpEnabledIdentityKeys.Remove($identityKey)
+    }
+    return (Write-VcpWriteSafetyState)
+}
+
+function Get-VcpWriteSafetyStatusText {
+    param($Monitor)
+    if ($null -eq $Monitor) { return "No display selected" }
+    if ([string]::IsNullOrWhiteSpace([string]$Monitor.IdentityKey) -or ([string]$Monitor.IdentityKey).Length -gt 512) { return "Unavailable: stable identity required" }
+    if (Test-VcpWriteEnabledForMonitor -Monitor $Monitor) { return "Enabled for selected identity" }
+    return "Disabled for selected identity"
+}
+
+function Confirm-AutomationRuleRiskyWriteConsent {
+    param([string]$RuleLabel)
+    $message = @"
+This rule-level permission allows '$RuleLabel' to use risky VCP values if a profile supports them in the future.
+
+Power, input, reset, and arbitrary VCP writes can blank the display, change its input, or erase monitor settings. The target monitor must also be unlocked separately in System. Each write is still verified when the monitor supports readback.
+
+Allow risky writes for this automation rule?
+"@
+    $result = [System.Windows.MessageBox]::Show(
+        $message,
+        "Automation risky-write consent",
+        [System.Windows.MessageBoxButton]::YesNo,
+        [System.Windows.MessageBoxImage]::Warning
+    )
+    return $result -eq [System.Windows.MessageBoxResult]::Yes
 }
 
 function Test-CapabilityProbeAllowed {
@@ -2031,6 +2156,12 @@ function Queue-VCPValue {
 
 function Set-VCPValueWithSync {
     param([byte]$VCPCode, [uint32]$Value, [switch]$Force)
+    if (Test-VcpWriteRequiresSafetyConsent -Code ([int]$VCPCode)) {
+        if (Get-Command Update-Status -ErrorAction SilentlyContinue) {
+            Update-Status "Risky VCP 0x$("{0:X2}" -f $VCPCode) requires the verified manual or consented automation path"
+        }
+        return $false
+    }
     $queued = 0
     if ($script:ApplyToAll -or $Force) {
         for ($i = 0; $i -lt $script:PhysicalMonitors.Count; $i++) {
@@ -2045,6 +2176,220 @@ function Set-VCPValueWithSync {
     }
     if ($queued -gt 0) { return $true }
     return ($VCPCode -eq [MonitorAPI]::VCP_BRIGHTNESS -and $script:WmiBrightnessAvailable)
+}
+
+function Get-VcpWriteOperation {
+    param($Monitor, [int]$Code, [uint32]$Value, [string]$Backend = "DDC")
+    return [PSCustomObject]@{
+        Monitor = $Monitor
+        MonitorName = if ($Monitor) { [string]$Monitor.Name } else { "Integrated display" }
+        IdentityKey = if ($Monitor) { [string]$Monitor.IdentityKey } else { "wmi:integrated" }
+        Handle = if ($Monitor) { [IntPtr]$Monitor.Handle } else { [IntPtr]::Zero }
+        Code = [int]$Code
+        Value = [uint32]$Value
+        Backend = $Backend
+    }
+}
+
+function Invoke-VerifiedVcpTransaction {
+    param(
+        [object[]]$Operations,
+        [scriptblock]$ReadValue,
+        [scriptblock]$WriteValue,
+        [switch]$RollbackOnFailure,
+        [int]$VerificationDelayMs = 75
+    )
+    $items = @($Operations | Where-Object { $null -ne $_ })
+    if ($items.Count -eq 0) {
+        return [PSCustomObject]@{ Success = $false; Outcome = "NoTargets"; Results = @(); Rollback = "NotNeeded" }
+    }
+    if ($null -eq $ReadValue) {
+        $ReadValue = {
+            param($Operation)
+            if ([string]$Operation.Backend -eq "WMI") {
+                $current = Get-WmiBrightness
+                return [PSCustomObject]@{ Success = $null -ne $current; Current = if ($null -ne $current) { [uint32]$current } else { [uint32]0 } }
+            }
+            return Get-VCPValue -Handle ([IntPtr]$Operation.Handle) -VCPCode ([byte]$Operation.Code) -MonitorName ([string]$Operation.MonitorName)
+        }
+    }
+    if ($null -eq $WriteValue) {
+        $WriteValue = {
+            param($Operation, [uint32]$TargetValue)
+            if ([string]$Operation.Backend -eq "WMI") {
+                return (Set-WmiBrightness -Value $TargetValue)
+            }
+            return (Set-VCPValue -Handle ([IntPtr]$Operation.Handle) -VCPCode ([byte]$Operation.Code) -Value $TargetValue -MonitorName ([string]$Operation.MonitorName))
+        }
+    }
+
+    $results = New-Object System.Collections.Generic.List[object]
+    $applied = New-Object System.Collections.Generic.List[object]
+    $failureOutcome = ""
+    foreach ($operation in $items) {
+        $snapshot = $null
+        try { $snapshot = & $ReadValue $operation } catch { $snapshot = $null }
+        $snapshotReadable = $null -ne $snapshot -and [bool]$snapshot.Success
+        $previousValue = if ($snapshotReadable) { [uint32]$snapshot.Current } else { [uint32]0 }
+        $writeSucceeded = $false
+        try { $writeSucceeded = [bool](& $WriteValue $operation ([uint32]$operation.Value)) } catch { $writeSucceeded = $false }
+        $verification = "WriteFailed"
+        $readbackValue = [uint32]0
+        if ($writeSucceeded) {
+            if ($VerificationDelayMs -gt 0) { Start-Sleep -Milliseconds ([Math]::Min(1000, $VerificationDelayMs)) }
+            $readback = $null
+            try { $readback = & $ReadValue $operation } catch { $readback = $null }
+            if ($null -eq $readback -or -not [bool]$readback.Success) {
+                $verification = "Unverified"
+            } else {
+                $readbackValue = [uint32]$readback.Current
+                $verification = if ($readbackValue -eq [uint32]$operation.Value) { "Verified" } else { "Mismatched" }
+            }
+        }
+        $record = [PSCustomObject]@{
+            Operation = $operation
+            PreviousReadable = [bool]$snapshotReadable
+            PreviousValue = $previousValue
+            WriteSuccess = [bool]$writeSucceeded
+            Verification = $verification
+            ReadbackValue = $readbackValue
+            Rollback = "NotNeeded"
+        }
+        $results.Add($record)
+        if ($writeSucceeded -or $snapshotReadable) { $applied.Add($record) }
+        if (-not $writeSucceeded) {
+            $failureOutcome = "WriteFailed"
+            break
+        }
+        if ($verification -eq "Mismatched") {
+            $failureOutcome = "Mismatched"
+            break
+        }
+    }
+
+    $rollbackStatus = "NotNeeded"
+    if ($failureOutcome -and $RollbackOnFailure) {
+        $rollbackStatus = "Restored"
+        for ($index = $applied.Count - 1; $index -ge 0; $index--) {
+            $record = $applied[$index]
+            if (-not [bool]$record.PreviousReadable) {
+                $record.Rollback = "Unavailable"
+                $rollbackStatus = "Partial"
+                continue
+            }
+            $restored = $false
+            try { $restored = [bool](& $WriteValue $record.Operation ([uint32]$record.PreviousValue)) } catch { $restored = $false }
+            if (-not $restored) {
+                $record.Rollback = "WriteFailed"
+                $rollbackStatus = "Partial"
+                continue
+            }
+            if ($VerificationDelayMs -gt 0) { Start-Sleep -Milliseconds ([Math]::Min(1000, $VerificationDelayMs)) }
+            $rollbackRead = $null
+            try { $rollbackRead = & $ReadValue $record.Operation } catch { $rollbackRead = $null }
+            if ($null -eq $rollbackRead -or -not [bool]$rollbackRead.Success) {
+                $record.Rollback = "Unverified"
+                $rollbackStatus = "Partial"
+            } elseif ([uint32]$rollbackRead.Current -ne [uint32]$record.PreviousValue) {
+                $record.Rollback = "Mismatched"
+                $rollbackStatus = "Partial"
+            } else {
+                $record.Rollback = "Restored"
+            }
+        }
+    }
+
+    if ($failureOutcome) {
+        return [PSCustomObject]@{
+            Success = $false
+            Outcome = $failureOutcome
+            Results = $results.ToArray()
+            Rollback = $rollbackStatus
+        }
+    }
+    $unverifiedCount = @($results | Where-Object Verification -eq "Unverified").Count
+    return [PSCustomObject]@{
+        Success = $true
+        Outcome = if ($unverifiedCount -gt 0) { "Unverified" } else { "Verified" }
+        Results = $results.ToArray()
+        Rollback = "NotNeeded"
+    }
+}
+
+function Format-VcpWriteConfirmation {
+    param([object[]]$Operations, [string]$ActionLabel = "Direct VCP write")
+    $items = @($Operations)
+    $code = if ($items.Count -gt 0) { [int]$items[0].Code } else { 0 }
+    $value = if ($items.Count -gt 0) { [uint32]$items[0].Value } else { 0 }
+    $targets = @($items | ForEach-Object { [string]$_.MonitorName } | Sort-Object -Unique)
+    return @"
+$ActionLabel
+
+VCP code: 0x$("{0:X2}" -f $code) ($(Get-VcpDescription -Code $code))
+Value: $value
+Target: $($targets -join ", ")
+
+This write may blank the display, change its input, remove access to the current desktop, or reset monitor settings. MonitorControl Pro will attempt an immediate readback, but some commands cannot be verified after the display changes state.
+
+Apply this exact code and value?
+"@
+}
+
+function Invoke-ManualVcpWrite {
+    param(
+        [int]$Code,
+        [uint32]$Value,
+        [string]$ActionLabel = "Direct VCP write",
+        [switch]$AllMonitors,
+        [switch]$Arbitrary
+    )
+    $monitors = if ($AllMonitors) {
+        @($script:PhysicalMonitors | Where-Object { $_.Handle -ne [IntPtr]::Zero })
+    } elseif ($script:CurrentMonitorIndex -ge 0 -and $script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) {
+        @($script:PhysicalMonitors[$script:CurrentMonitorIndex])
+    } else {
+        @()
+    }
+    if ($monitors.Count -eq 0) {
+        Update-Status "No DDC/CI write target"
+        return [PSCustomObject]@{ Success = $false; Outcome = "NoTargets"; Results = @() }
+    }
+    $requiresSafety = Test-VcpWriteRequiresSafetyConsent -Code $Code -Arbitrary:$Arbitrary
+    foreach ($monitor in $monitors) {
+        if ($requiresSafety -and -not (Test-VcpWriteEnabledForMonitor -Monitor $monitor)) {
+            Update-Status "Risky VCP writes are disabled for $(Get-MonitorDisplayLabel -Monitor $monitor)"
+            return [PSCustomObject]@{ Success = $false; Outcome = "SafetyLocked"; Results = @() }
+        }
+        if (-not (Test-MonitorSupportsVcpValue -Monitor $monitor -Code $Code -Value ([int]$Value))) {
+            Update-Status "VCP 0x$("{0:X2}" -f $Code) value $Value is not reported for $(Get-MonitorDisplayLabel -Monitor $monitor)"
+            return [PSCustomObject]@{ Success = $false; Outcome = "Unsupported"; Results = @() }
+        }
+    }
+    $operations = @($monitors | ForEach-Object { Get-VcpWriteOperation -Monitor $_ -Code $Code -Value $Value })
+    $confirmation = Format-VcpWriteConfirmation -Operations $operations -ActionLabel $ActionLabel
+    $choice = [System.Windows.MessageBox]::Show(
+        $confirmation,
+        "Confirm exact VCP write",
+        [System.Windows.MessageBoxButton]::YesNo,
+        [System.Windows.MessageBoxImage]::Warning
+    )
+    if ($choice -ne [System.Windows.MessageBoxResult]::Yes) {
+        Update-Status "VCP write canceled"
+        return [PSCustomObject]@{ Success = $false; Outcome = "Canceled"; Results = @() }
+    }
+    if (-not (Wait-DdcWriteQueueIdle -TimeoutMs 2000)) {
+        Update-Status "VCP write queue is busy; try again"
+        return [PSCustomObject]@{ Success = $false; Outcome = "Busy"; Results = @() }
+    }
+    $result = Invoke-VerifiedVcpTransaction -Operations $operations
+    $codeText = "0x{0:X2} = {1}" -f $Code, $Value
+    switch ($result.Outcome) {
+        "Verified" { Update-Status "Verified VCP $codeText" }
+        "Unverified" { Update-Status "VCP $codeText applied; readback unavailable" }
+        "Mismatched" { Update-Status "VCP $codeText mismatched its readback" }
+        default { Update-Status "VCP $codeText failed" }
+    }
+    return $result
 }
 
 function Get-VcpDescription {
@@ -2194,12 +2539,10 @@ function Get-DdcReportProbeCodes {
         [int][MonitorAPI]::VCP_RED_GAIN,
         [int][MonitorAPI]::VCP_GREEN_GAIN,
         [int][MonitorAPI]::VCP_BLUE_GAIN,
-        [int][MonitorAPI]::VCP_INPUT_SOURCE,
         [int][MonitorAPI]::VCP_VOLUME,
         [int][MonitorAPI]::VCP_MUTE,
         [int][MonitorAPI]::VCP_SHARPNESS,
         [int][MonitorAPI]::VCP_DISPLAY_USAGE_TIME,
-        [int][MonitorAPI]::VCP_POWER_MODE,
         [int][MonitorAPI]::VCP_DISPLAY_MODE,
         [int][MonitorAPI]::VCP_VERSION
     )
@@ -2256,6 +2599,7 @@ function Get-DdcReportTargets {
             SupportedCodes = [object[]]$supportedCodes
             ProbeCodes = [object[]]$probeCodes
             SkippedProbeCodes = [object[]]$skippedCodes
+            RiskyWritesEnabled = Test-VcpWriteEnabledForMonitor -Monitor $mon
             Handle = $mon.Handle
             HandleValue = [int64]$mon.Handle.ToInt64()
         }
@@ -2310,6 +2654,7 @@ function New-DdcCompatibilityReport {
     [void]$sb.AppendLine("App version: 3.34.0")
     [void]$sb.AppendLine("OS: $($system.OS)")
     [void]$sb.AppendLine("PowerShell: $($system.PowerShell)")
+    [void]$sb.AppendLine("Probe safety: power, input, reset, PiP/PbP, and arbitrary VCP codes are not automatically queried")
     [void]$sb.AppendLine("")
     [void]$sb.AppendLine("GPU drivers:")
     foreach ($gpu in @($system.GPUs)) { [void]$sb.AppendLine("- $gpu") }
@@ -2333,6 +2678,7 @@ function New-DdcCompatibilityReport {
         if ($edidParts.Count -gt 0) { [void]$sb.AppendLine("  EDID: $($edidParts -join "; ")") }
         [void]$sb.AppendLine("  Capabilities: $($target.CapabilityStatus), length=$($target.CapabilitiesLength), parsed codes=$(@($target.SupportedCodes).Count)")
         [void]$sb.AppendLine("  Parsed VCP list: $(Format-DdcReportCodeList -Codes $target.SupportedCodes)")
+        [void]$sb.AppendLine("  Risky VCP writes: $(if ([bool]$target.RiskyWritesEnabled) { 'identity unlocked; direct confirmation still required' } else { 'disabled' })")
         if (@($target.SkippedProbeCodes).Count -gt 0) {
             [void]$sb.AppendLine("  Common probes skipped by capabilities: $(Format-DdcReportCodeList -Codes $target.SkippedProbeCodes)")
         }
@@ -3069,7 +3415,7 @@ function Invoke-AutomationBridgeRequest {
     if (($path -eq "/profile" -or $path -eq "/api/profile") -and $Request.Method -eq "POST") {
         $name = Get-AutomationBridgeInputValue -Request $Request -Body $body -Name "name"
         if ([string]::IsNullOrWhiteSpace($name)) { return New-AutomationBridgeResponse -Status 400 -Body @{ error = "Profile name required" } }
-        $ok = Apply-ProfileByName -Name $name -Reason "Bridge profile"
+        $ok = Apply-ProfileByName -Name $name -Reason "Bridge profile" -AutomationRuleId "bridge:profile:$name"
         Write-AutomationBridgeWriteLog -Action "loadProfile" -Target $name -Value "" -Success $ok -Remote ([string]$Request.Remote) -Message $(if ($ok) { "Loaded" } else { "Failed" })
         if (-not $ok) { return New-AutomationBridgeResponse -Status 404 -Body @{ error = "Profile not found or failed" } }
         return New-AutomationBridgeResponse -Status 202 -Body @{ profile = $name; queued = $true }
@@ -4506,10 +4852,11 @@ try {
                         <TextBox x:Name="AppProfileExeBox" Text="app.exe"/>
                         <Button x:Name="AppProfileCaptureBtn" Grid.Column="2" Content="Capture" Style="{StaticResource Btn}" Padding="8,4" FontSize="9"/>
                     </Grid>
-                    <Grid Grid.Row="4"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <Grid Grid.Row="4"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                         <ComboBox x:Name="AppProfileProfileCombo"/>
-                        <Button x:Name="AppProfileAddBtn" Grid.Column="2" Content="Add" Style="{StaticResource GreenBtn}" Padding="10,4" FontSize="9"/>
-                        <Button x:Name="AppProfileRemoveBtn" Grid.Column="4" Content="Remove" Style="{StaticResource WarnBtn}" Padding="10,4" FontSize="9"/>
+                        <CheckBox x:Name="AppProfileRiskyConsentCheckbox" Grid.Column="2" Content="Risky writes" VerticalAlignment="Center" FontSize="9" ToolTip="Separate rule-level consent; the target monitor identity must also be unlocked."/>
+                        <Button x:Name="AppProfileAddBtn" Grid.Column="4" Content="Add" Style="{StaticResource GreenBtn}" Padding="10,4" FontSize="9"/>
+                        <Button x:Name="AppProfileRemoveBtn" Grid.Column="6" Content="Remove" Style="{StaticResource WarnBtn}" Padding="10,4" FontSize="9"/>
                     </Grid>
                     <ListBox x:Name="AppProfileRulesList" Grid.Row="6" Height="76" Background="#0c1725" BorderThickness="0" Foreground="#e8eef7" FontSize="11"/>
                 </Grid></Border>
@@ -4523,11 +4870,12 @@ try {
                     <TextBlock x:Name="ScheduleStatusText" Text="Off" FontSize="9" Foreground="#707070" HorizontalAlignment="Right" VerticalAlignment="Center"/>
                 </Grid></Border>
                 <Border Grid.Row="2" Background="#101b2b" BorderBrush="#26384f" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
-                    <Grid.ColumnDefinitions><ColumnDefinition Width="76"/><ColumnDefinition Width="6"/><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="76"/><ColumnDefinition Width="6"/><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                     <TextBox x:Name="ScheduleTimeBox" Text="21:00" VerticalAlignment="Center"/>
                     <ComboBox x:Name="ScheduleProfileCombo" Grid.Column="2"/>
-                    <Button x:Name="ScheduleAddBtn" Grid.Column="4" Content="Add" Style="{StaticResource GreenBtn}" Padding="10,4" FontSize="9"/>
-                    <Button x:Name="ScheduleRemoveBtn" Grid.Column="6" Content="Remove" Style="{StaticResource WarnBtn}" Padding="10,4" FontSize="9"/>
+                    <CheckBox x:Name="ScheduleRiskyConsentCheckbox" Grid.Column="4" Content="Risky writes" VerticalAlignment="Center" FontSize="9" ToolTip="Separate rule-level consent; the target monitor identity must also be unlocked."/>
+                    <Button x:Name="ScheduleAddBtn" Grid.Column="6" Content="Add" Style="{StaticResource GreenBtn}" Padding="10,4" FontSize="9"/>
+                    <Button x:Name="ScheduleRemoveBtn" Grid.Column="8" Content="Remove" Style="{StaticResource WarnBtn}" Padding="10,4" FontSize="9"/>
                 </Grid></Border>
                 <Border Grid.Row="4" Background="#101b2b" BorderBrush="#26384f" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="*"/></Grid.RowDefinitions>
@@ -4562,7 +4910,7 @@ try {
         </TabItem>
         <TabItem x:Name="SystemTab" Header="System" Tag="&#xE713;">
             <Border Background="Transparent" Padding="0"><ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><Grid>
-                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Border Background="#101b2b" BorderBrush="#26384f" BorderThickness="1" CornerRadius="10" Padding="14"><StackPanel><TextBlock Text="Quick links" FontSize="12" Foreground="#dce6f3" FontWeight="SemiBold" Margin="0,0,0,8"/>
                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                         <Button x:Name="DisplaySettingsBtn" Content="Display" Style="{StaticResource Btn}" Padding="5,4" FontSize="9"/>
@@ -4595,7 +4943,13 @@ try {
                         <Button x:Name="CapabilitiesClearExclusionsBtn" Grid.Column="4" Content="Clear exclusions" Style="{StaticResource Btn}" Padding="10,4" FontSize="9"/>
                     </Grid>
                 </Grid></Border>
-                <Border Grid.Row="8" Background="#101b2b" BorderBrush="#26384f" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
+                <Border Grid.Row="8" Background="#101b2b" BorderBrush="#6b4b2b" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <Grid><CheckBox x:Name="RiskyVcpEnabledCheckbox" Content="Enable risky VCP writes for selected display" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="RiskyVcpStatusText" Text="Disabled" FontSize="9" Foreground="#ffd18a" HorizontalAlignment="Right" VerticalAlignment="Center"/></Grid>
+                    <TextBlock Grid.Row="2" Text="Power, input, reset, PiP/PbP, and arbitrary writes require this per-identity unlock plus confirmation for every direct command." TextWrapping="Wrap" Foreground="#aebbd0" FontSize="9"/>
+                </Grid></Border>
+                <Border Grid.Row="10" Background="#101b2b" BorderBrush="#26384f" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                     <Grid><CheckBox x:Name="AutomationBridgeEnabledCheckbox" Content="Local Automation Bridge" VerticalAlignment="Center"/>
                         <TextBlock x:Name="AutomationBridgeStatusText" Text="Off" FontSize="9" Foreground="#707070" HorizontalAlignment="Right" VerticalAlignment="Center"/></Grid>
@@ -4606,7 +4960,7 @@ try {
                         <Button x:Name="AutomationBridgeSaveBtn" Grid.Column="6" Content="Save" Style="{StaticResource GreenBtn}" Padding="10,4" FontSize="9"/>
                     </Grid>
                 </Grid></Border>
-                <Border Grid.Row="10" Background="#101b2b" BorderBrush="#26384f" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
+                <Border Grid.Row="12" Background="#101b2b" BorderBrush="#26384f" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                         <TextBlock Text="DDC Compatibility Report" FontSize="10" Foreground="#909090" VerticalAlignment="Center"/>
@@ -4685,10 +5039,10 @@ $profileStorageStatusText = $window.FindName("ProfileStorageStatusText"); $profi
 $appProfileEnabledCheckbox = $window.FindName("AppProfileEnabledCheckbox"); $appProfileStatusText = $window.FindName("AppProfileStatusText")
 $appProfileExeBox = $window.FindName("AppProfileExeBox"); $appProfileCaptureBtn = $window.FindName("AppProfileCaptureBtn")
 $appProfileProfileCombo = $window.FindName("AppProfileProfileCombo"); $appProfileAddBtn = $window.FindName("AppProfileAddBtn")
-$appProfileRemoveBtn = $window.FindName("AppProfileRemoveBtn"); $appProfileRulesList = $window.FindName("AppProfileRulesList")
+$appProfileRemoveBtn = $window.FindName("AppProfileRemoveBtn"); $appProfileRulesList = $window.FindName("AppProfileRulesList"); $appProfileRiskyConsentCheckbox = $window.FindName("AppProfileRiskyConsentCheckbox")
 $scheduleEnabledCheckbox = $window.FindName("ScheduleEnabledCheckbox"); $scheduleStatusText = $window.FindName("ScheduleStatusText")
 $scheduleTimeBox = $window.FindName("ScheduleTimeBox"); $scheduleProfileCombo = $window.FindName("ScheduleProfileCombo")
-$scheduleAddBtn = $window.FindName("ScheduleAddBtn"); $scheduleRemoveBtn = $window.FindName("ScheduleRemoveBtn"); $scheduleRulesList = $window.FindName("ScheduleRulesList")
+$scheduleAddBtn = $window.FindName("ScheduleAddBtn"); $scheduleRemoveBtn = $window.FindName("ScheduleRemoveBtn"); $scheduleRulesList = $window.FindName("ScheduleRulesList"); $scheduleRiskyConsentCheckbox = $window.FindName("ScheduleRiskyConsentCheckbox")
 $scheduleTimelineCanvas = $window.FindName("ScheduleTimelineCanvas")
 $idleDimEnabledCheckbox = $window.FindName("IdleDimEnabledCheckbox"); $idleDimStatusText = $window.FindName("IdleDimStatusText")
 $idleDimMinutesBox = $window.FindName("IdleDimMinutesBox"); $idleDimBrightnessBox = $window.FindName("IdleDimBrightnessBox")
@@ -4703,6 +5057,7 @@ $gammaBlueSlider = $window.FindName("GammaBlueSlider"); $gammaBlueValue = $windo
 $capabilitiesBox = $window.FindName("CapabilitiesBox"); $ddcReportBox = $window.FindName("DdcReportBox")
 $capabilitiesDiscoveryEnabledCheckbox = $window.FindName("CapabilitiesDiscoveryEnabledCheckbox"); $capabilitiesMaximumCompatibilityCheckbox = $window.FindName("CapabilitiesMaximumCompatibilityCheckbox")
 $capabilitiesSafetyStatusText = $window.FindName("CapabilitiesSafetyStatusText"); $capabilitiesExcludeCurrentBtn = $window.FindName("CapabilitiesExcludeCurrentBtn"); $capabilitiesClearExclusionsBtn = $window.FindName("CapabilitiesClearExclusionsBtn")
+$riskyVcpEnabledCheckbox = $window.FindName("RiskyVcpEnabledCheckbox"); $riskyVcpStatusText = $window.FindName("RiskyVcpStatusText")
 $automationBridgeEnabledCheckbox = $window.FindName("AutomationBridgeEnabledCheckbox"); $automationBridgeStatusText = $window.FindName("AutomationBridgeStatusText")
 $automationBridgeBindBox = $window.FindName("AutomationBridgeBindBox"); $automationBridgePortBox = $window.FindName("AutomationBridgePortBox")
 $automationBridgeKeyBox = $window.FindName("AutomationBridgeKeyBox"); $automationBridgeSaveBtn = $window.FindName("AutomationBridgeSaveBtn")
@@ -4731,6 +5086,24 @@ function Sync-CapabilitySafetyUi {
         $capabilitiesExcludeCurrentBtn.IsEnabled = $canExclude
     } finally {
         $script:UpdatingCapabilitiesSafetyUI = $false
+    }
+}
+
+function Sync-VcpWriteSafetyUi {
+    if ($null -eq $riskyVcpEnabledCheckbox) { return }
+    $monitor = if ($script:CurrentMonitorIndex -ge 0 -and $script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) {
+        $script:PhysicalMonitors[$script:CurrentMonitorIndex]
+    } else {
+        $null
+    }
+    $script:UpdatingVcpWriteSafetyUI = $true
+    try {
+        $hasStableIdentity = $null -ne $monitor -and -not [string]::IsNullOrWhiteSpace([string]$monitor.IdentityKey) -and ([string]$monitor.IdentityKey).Length -le 512
+        $riskyVcpEnabledCheckbox.IsEnabled = $hasStableIdentity
+        $riskyVcpEnabledCheckbox.IsChecked = $hasStableIdentity -and (Test-VcpWriteEnabledForMonitor -Monitor $monitor)
+        $riskyVcpStatusText.Text = Get-VcpWriteSafetyStatusText -Monitor $monitor
+    } finally {
+        $script:UpdatingVcpWriteSafetyUI = $false
     }
 }
 
@@ -5884,7 +6257,8 @@ function Load-AppProfileRules {
         foreach ($rule in @($data.Rules)) {
             $exe = Normalize-AppExeName -ExeName ([string]$rule.Exe)
             $profile = ([string]$rule.Profile).Trim()
-            if ($exe -and $profile) { $script:AppProfileRules += [PSCustomObject]@{ Exe = $exe; Profile = $profile } }
+            $allowRiskyVcp = $rule.PSObject.Properties.Name -contains "AllowRiskyVcp" -and [bool]$rule.AllowRiskyVcp
+            if ($exe -and $profile) { $script:AppProfileRules += [PSCustomObject]@{ Exe = $exe; Profile = $profile; AllowRiskyVcp = $allowRiskyVcp } }
         }
     } catch {
         Update-Status "App profile rules could not be loaded"
@@ -5924,7 +6298,8 @@ function Update-AppProfileControls {
         $appProfileRulesList.Items.Clear()
         foreach ($rule in ($script:AppProfileRules | Sort-Object -Property Exe)) {
             $item = New-Object System.Windows.Controls.ListBoxItem
-            $item.Content = "$($rule.Exe) -> $($rule.Profile)"
+            $consentSuffix = if ([bool]$rule.AllowRiskyVcp) { " [risky writes allowed]" } else { "" }
+            $item.Content = "$($rule.Exe) -> $($rule.Profile)$consentSuffix"
             $item.Tag = $rule.Exe
             $appProfileRulesList.Items.Add($item) | Out-Null
         }
@@ -5936,8 +6311,66 @@ function Update-AppProfileControls {
     }
 }
 
+function Get-ProfileVcpWritePlan {
+    param($ProfileData, $ActiveProfile)
+    $values = [PSCustomObject]@{
+        Brightness = Get-ProfileIntValue -Object $ActiveProfile -Property "Brightness" -Default $ProfileData.Brightness
+        Contrast = Get-ProfileIntValue -Object $ActiveProfile -Property "Contrast" -Default $ProfileData.Contrast
+        Red = Get-ProfileIntValue -Object $ActiveProfile -Property "Red" -Default $ProfileData.Red
+        Green = Get-ProfileIntValue -Object $ActiveProfile -Property "Green" -Default $ProfileData.Green
+        Blue = Get-ProfileIntValue -Object $ActiveProfile -Property "Blue" -Default $ProfileData.Blue
+        Gamma = Get-ProfileIntValue -Object $ActiveProfile -Property "Gamma" -Default $ProfileData.Gamma
+        GammaRed = Get-ProfileIntValue -Object $ActiveProfile -Property "GammaRed" -Default $ProfileData.GammaRed
+        GammaGreen = Get-ProfileIntValue -Object $ActiveProfile -Property "GammaGreen" -Default $ProfileData.GammaGreen
+        GammaBlue = Get-ProfileIntValue -Object $ActiveProfile -Property "GammaBlue" -Default $ProfileData.GammaBlue
+    }
+    $codeValues = @(
+        [PSCustomObject]@{ Code = [int][MonitorAPI]::VCP_BRIGHTNESS; Value = [uint32]$values.Brightness },
+        [PSCustomObject]@{ Code = [int][MonitorAPI]::VCP_CONTRAST; Value = [uint32]$values.Contrast },
+        [PSCustomObject]@{ Code = [int][MonitorAPI]::VCP_RED_GAIN; Value = [uint32]$values.Red },
+        [PSCustomObject]@{ Code = [int][MonitorAPI]::VCP_GREEN_GAIN; Value = [uint32]$values.Green },
+        [PSCustomObject]@{ Code = [int][MonitorAPI]::VCP_BLUE_GAIN; Value = [uint32]$values.Blue }
+    )
+    $targets = if ($script:ApplyToAll) {
+        @($script:PhysicalMonitors)
+    } elseif ($script:CurrentMonitorIndex -ge 0 -and $script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) {
+        @($script:PhysicalMonitors[$script:CurrentMonitorIndex])
+    } else {
+        @()
+    }
+    $operations = @()
+    $skippedUnsupported = 0
+    $wmiIncluded = $false
+    foreach ($monitor in $targets) {
+        if ($monitor.Handle -eq [IntPtr]::Zero) {
+            if (-not $wmiIncluded -and $script:WmiBrightnessAvailable) {
+                $operations += Get-VcpWriteOperation -Monitor $monitor -Code ([MonitorAPI]::VCP_BRIGHTNESS) -Value ([uint32]$values.Brightness) -Backend "WMI"
+                $wmiIncluded = $true
+            }
+            continue
+        }
+        foreach ($codeValue in $codeValues) {
+            if (Test-MonitorSupportsVcpValue -Monitor $monitor -Code ([int]$codeValue.Code) -Value ([int]$codeValue.Value)) {
+                $operations += Get-VcpWriteOperation -Monitor $monitor -Code ([int]$codeValue.Code) -Value ([uint32]$codeValue.Value)
+            } else {
+                $skippedUnsupported++
+            }
+        }
+    }
+    return [PSCustomObject]@{
+        Values = $values
+        Operations = @($operations)
+        SkippedUnsupported = $skippedUnsupported
+    }
+}
+
 function Apply-ProfileByName {
-    param([string]$Name, [string]$Reason = "Loaded")
+    param(
+        [string]$Name,
+        [string]$Reason = "Loaded",
+        [string]$AutomationRuleId = "",
+        [switch]$AllowRiskyAutomation
+    )
     if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
     $p = Read-ProfileObject -Name $Name
     if (-not $p) {
@@ -5960,35 +6393,49 @@ function Apply-ProfileByName {
         if ($targetIndex -ge 0 -and $targetIndex -ne $script:CurrentMonitorIndex) {
             $script:CurrentMonitorIndex = $targetIndex
             Draw-MonitorLayout
+            Update-CapabilityControls -Monitor $script:PhysicalMonitors[$targetIndex]
         }
+    }
+    $plan = Get-ProfileVcpWritePlan -ProfileData $p -ActiveProfile $active
+    $riskyOperations = @($plan.Operations | Where-Object { Test-VcpWriteRequiresSafetyConsent -Code ([int]$_.Code) })
+    if ($riskyOperations.Count -gt 0) {
+        if (-not [string]::IsNullOrWhiteSpace($AutomationRuleId) -and -not $AllowRiskyAutomation) {
+            Update-Status "Automation rule '$AutomationRuleId' has no risky-write consent"
+            return $false
+        }
+        foreach ($operation in $riskyOperations) {
+            if (-not (Test-VcpWriteEnabledForMonitor -Monitor $operation.Monitor)) {
+                Update-Status "Risky profile write blocked for $($operation.MonitorName)"
+                return $false
+            }
+        }
+    }
+    if ($plan.Operations.Count -eq 0) {
+        Update-Status "Profile '$Name' has no compatible hardware write target"
+        return $false
+    }
+    if (-not (Wait-DdcWriteQueueIdle -TimeoutMs 2000)) {
+        Update-Status "Profile '$Name' is waiting for the DDC write queue"
+        return $false
+    }
+    $transaction = Invoke-VerifiedVcpTransaction -Operations $plan.Operations -RollbackOnFailure
+    if (-not $transaction.Success) {
+        Update-Status "Profile '$Name' failed ($($transaction.Outcome)); rollback: $($transaction.Rollback)"
+        return $false
     }
     try {
         $script:UpdatingUI = $true
-        $brightness = Get-ProfileIntValue -Object $active -Property "Brightness" -Default $p.Brightness
-        $contrast = Get-ProfileIntValue -Object $active -Property "Contrast" -Default $p.Contrast
-        $red = Get-ProfileIntValue -Object $active -Property "Red" -Default $p.Red
-        $green = Get-ProfileIntValue -Object $active -Property "Green" -Default $p.Green
-        $blue = Get-ProfileIntValue -Object $active -Property "Blue" -Default $p.Blue
-        $gamma = Get-ProfileIntValue -Object $active -Property "Gamma" -Default $p.Gamma
-        $gammaRed = Get-ProfileIntValue -Object $active -Property "GammaRed" -Default $p.GammaRed
-        $gammaGreen = Get-ProfileIntValue -Object $active -Property "GammaGreen" -Default $p.GammaGreen
-        $gammaBlue = Get-ProfileIntValue -Object $active -Property "GammaBlue" -Default $p.GammaBlue
-        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value $brightness
-        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_CONTRAST) -Value $contrast
-        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_RED_GAIN) -Value $red
-        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_GREEN_GAIN) -Value $green
-        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BLUE_GAIN) -Value $blue
-        $brightnessSlider.Value = $brightness; $brightnessValue.Text = $brightness
-        $contrastSlider.Value = $contrast; $contrastValue.Text = $contrast
-        $redSlider.Value = $red; $redValue.Text = $red
-        $greenSlider.Value = $green; $greenValue.Text = $green
-        $blueSlider.Value = $blue; $blueValue.Text = $blue
-        if ($gamma) { $gammaSlider.Value = $gamma; $gammaValue.Text = ($gamma / 100).ToString("F2") }
-        if ($gammaRed) {
-            $gammaRedSlider.Value = $gammaRed
-            $gammaGreenSlider.Value = $gammaGreen
-            $gammaBlueSlider.Value = $gammaBlue
-            Set-GammaRamp -Gamma ($gamma/100) -RedMult ($gammaRed/100) -GreenMult ($gammaGreen/100) -BlueMult ($gammaBlue/100)
+        $brightnessSlider.Value = $plan.Values.Brightness; $brightnessValue.Text = $plan.Values.Brightness
+        $contrastSlider.Value = $plan.Values.Contrast; $contrastValue.Text = $plan.Values.Contrast
+        $redSlider.Value = $plan.Values.Red; $redValue.Text = $plan.Values.Red
+        $greenSlider.Value = $plan.Values.Green; $greenValue.Text = $plan.Values.Green
+        $blueSlider.Value = $plan.Values.Blue; $blueValue.Text = $plan.Values.Blue
+        if ($plan.Values.Gamma) { $gammaSlider.Value = $plan.Values.Gamma; $gammaValue.Text = ($plan.Values.Gamma / 100).ToString("F2") }
+        if ($plan.Values.GammaRed) {
+            $gammaRedSlider.Value = $plan.Values.GammaRed
+            $gammaGreenSlider.Value = $plan.Values.GammaGreen
+            $gammaBlueSlider.Value = $plan.Values.GammaBlue
+            Set-GammaRamp -Gamma ($plan.Values.Gamma/100) -RedMult ($plan.Values.GammaRed/100) -GreenMult ($plan.Values.GammaGreen/100) -BlueMult ($plan.Values.GammaBlue/100)
         }
     } catch {
         Update-Status "Profile '$Name' failed"
@@ -5997,12 +6444,14 @@ function Apply-ProfileByName {
         $script:UpdatingUI = $false
     }
     $profilesList.SelectedItem = $Name
+    $verificationSuffix = if ($transaction.Outcome -eq "Unverified") { " (write applied; some readbacks unavailable)" } else { " (verified)" }
+    $capabilitySuffix = if ($plan.SkippedUnsupported -gt 0) { "; $($plan.SkippedUnsupported) unsupported values skipped" } else { "" }
     if ($targetIndex -ge 0) {
-        Update-Status "$Reason '$Name' -> $(Get-MonitorDisplayLabel -Monitor $script:PhysicalMonitors[$targetIndex])"
+        Update-Status "$Reason '$Name' -> $(Get-MonitorDisplayLabel -Monitor $script:PhysicalMonitors[$targetIndex])$verificationSuffix$capabilitySuffix"
     } elseif ($targetMissing) {
-        Update-Status "$Reason '$Name' (saved monitor missing; current monitor used)"
+        Update-Status "$Reason '$Name' (saved monitor missing; current monitor used)$verificationSuffix$capabilitySuffix"
     } else {
-        Update-Status "$Reason '$Name'"
+        Update-Status "$Reason '$Name'$verificationSuffix$capabilitySuffix"
     }
     Update-TrayPopupState
     Update-TrayIconText
@@ -6019,7 +6468,7 @@ function Invoke-AppProfileCheck {
     if ($null -eq $rule) { return }
     $key = "$($rule.Exe)|$($rule.Profile)"
     if ($script:LastAppliedAppProfileKey -eq $key) { return }
-    if (Apply-ProfileByName -Name $rule.Profile -Reason "App profile $exe ->") {
+    if (Apply-ProfileByName -Name $rule.Profile -Reason "App profile $exe ->" -AutomationRuleId "app:$key" -AllowRiskyAutomation:([bool]$rule.AllowRiskyVcp)) {
         $script:LastAppliedAppProfileKey = $key
     }
 }
@@ -6137,7 +6586,8 @@ function Load-ProfileSchedules {
         foreach ($rule in @($data.Rules)) {
             $time = Normalize-ScheduleTime -TimeText ([string]$rule.Time)
             $profile = ([string]$rule.Profile).Trim()
-            if ($time -and $profile) { $script:ProfileSchedules += [PSCustomObject]@{ Time = $time; Profile = $profile } }
+            $allowRiskyVcp = $rule.PSObject.Properties.Name -contains "AllowRiskyVcp" -and [bool]$rule.AllowRiskyVcp
+            if ($time -and $profile) { $script:ProfileSchedules += [PSCustomObject]@{ Time = $time; Profile = $profile; AllowRiskyVcp = $allowRiskyVcp } }
         }
     } catch {
         Update-Status "Profile schedule could not be loaded"
@@ -6159,7 +6609,8 @@ function Update-ScheduleControls {
         $scheduleRulesList.Items.Clear()
         foreach ($rule in ($script:ProfileSchedules | Sort-Object -Property Time)) {
             $item = New-Object System.Windows.Controls.ListBoxItem
-            $item.Content = "$($rule.Time) -> $($rule.Profile)"
+            $consentSuffix = if ([bool]$rule.AllowRiskyVcp) { " [risky writes allowed]" } else { "" }
+            $item.Content = "$($rule.Time) -> $($rule.Profile)$consentSuffix"
             $item.Tag = $rule.Time
             $scheduleRulesList.Items.Add($item) | Out-Null
         }
@@ -6189,7 +6640,7 @@ function Invoke-ScheduleCheck {
     $active = Get-ActiveScheduleRule
     if ($null -eq $active -or $null -eq $active.Rule) { return }
     if ($script:LastAppliedScheduleKey -eq $active.Key) { return }
-    if (Apply-ProfileByName -Name $active.Rule.Profile -Reason "Schedule $($active.Rule.Time) ->") {
+    if (Apply-ProfileByName -Name $active.Rule.Profile -Reason "Schedule $($active.Rule.Time) ->" -AutomationRuleId "schedule:$($active.Rule.Time)|$($active.Rule.Profile)" -AllowRiskyAutomation:([bool]$active.Rule.AllowRiskyVcp)) {
         $script:LastAppliedScheduleKey = $active.Key
     }
 }
@@ -6833,29 +7284,33 @@ $presetAmbientMode.Add_Click({
 })
 $presetReset.Add_Click({ $script:AutoModeEnabled = $false; $script:AmbientLightEnabled = $false; Start-AmbientLightWatcher; $autoModeText.Text = ""; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value 50 -Force; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_CONTRAST) -Value 50 -Force; Set-GammaRamp -Gamma 1.0; Load-MonitorSettings; Update-Status "Reset" })
 
-$inputSourceCombo.Add_SelectionChanged({ if ($script:UpdatingUI -or $inputSourceCombo.SelectedItem -eq $null) { return }; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_INPUT_SOURCE) -Value ([uint32]$inputSourceCombo.SelectedItem.Tag); Update-Status "Input: $($inputSourceCombo.SelectedItem.Content)" })
-$powerOffBtn.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_POWER_MODE) -Value ([MonitorAPI]::POWER_OFF); Update-Status "Monitor Off" })
-$powerStandbyBtn.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_POWER_MODE) -Value ([MonitorAPI]::POWER_STANDBY); Update-Status "Monitor Standby" })
-$powerOnBtn.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_POWER_MODE) -Value ([MonitorAPI]::POWER_ON); Update-Status "Monitor On" })
-$pipPbpOffBtn.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_PIP_MODE) -Value ([MonitorAPI]::PIP_MODE_OFF); Update-Status "PiP/PbP off" })
-$pipModeBtn.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_PIP_MODE) -Value ([MonitorAPI]::PIP_MODE_UPPER_RIGHT); Update-Status "PiP mode" })
-$pbpModeBtn.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_PIP_MODE) -Value ([MonitorAPI]::PIP_MODE_PBP_SPLIT); Update-Status "PbP split mode" })
-$pipSecondaryDpBtn.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_PIP_SECONDARY_SOURCE) -Value ([MonitorAPI]::PIP_SECONDARY_DISPLAYPORT); Update-Status "PiP/PbP secondary: DisplayPort" })
-$pipSecondaryHdmi1Btn.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_PIP_SECONDARY_SOURCE) -Value ([MonitorAPI]::PIP_SECONDARY_HDMI1); Update-Status "PiP/PbP secondary: HDMI 1" })
-$pipSecondaryHdmi2Btn.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_PIP_SECONDARY_SOURCE) -Value ([MonitorAPI]::PIP_SECONDARY_HDMI2); Update-Status "PiP/PbP secondary: HDMI 2" })
+$inputSourceCombo.Add_SelectionChanged({
+    if ($script:UpdatingUI -or $inputSourceCombo.SelectedItem -eq $null) { return }
+    $result = Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_INPUT_SOURCE) -Value ([uint32]$inputSourceCombo.SelectedItem.Tag) -ActionLabel "Change monitor input to $($inputSourceCombo.SelectedItem.Content)"
+    if (-not $result.Success) { Load-MonitorSettings }
+})
+$powerOffBtn.Add_Click({ Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_POWER_MODE) -Value ([MonitorAPI]::POWER_OFF) -ActionLabel "Power off the selected monitor" | Out-Null })
+$powerStandbyBtn.Add_Click({ Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_POWER_MODE) -Value ([MonitorAPI]::POWER_STANDBY) -ActionLabel "Put the selected monitor in standby" | Out-Null })
+$powerOnBtn.Add_Click({ Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_POWER_MODE) -Value ([MonitorAPI]::POWER_ON) -ActionLabel "Power on the selected monitor" | Out-Null })
+$pipPbpOffBtn.Add_Click({ Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_PIP_MODE) -Value ([MonitorAPI]::PIP_MODE_OFF) -ActionLabel "Disable PiP/PbP" | Out-Null })
+$pipModeBtn.Add_Click({ Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_PIP_MODE) -Value ([MonitorAPI]::PIP_MODE_UPPER_RIGHT) -ActionLabel "Enable PiP mode" | Out-Null })
+$pbpModeBtn.Add_Click({ Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_PIP_MODE) -Value ([MonitorAPI]::PIP_MODE_PBP_SPLIT) -ActionLabel "Enable PbP split mode" | Out-Null })
+$pipSecondaryDpBtn.Add_Click({ Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_PIP_SECONDARY_SOURCE) -Value ([MonitorAPI]::PIP_SECONDARY_DISPLAYPORT) -ActionLabel "Set the PiP/PbP secondary input to DisplayPort" | Out-Null })
+$pipSecondaryHdmi1Btn.Add_Click({ Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_PIP_SECONDARY_SOURCE) -Value ([MonitorAPI]::PIP_SECONDARY_HDMI1) -ActionLabel "Set the PiP/PbP secondary input to HDMI 1" | Out-Null })
+$pipSecondaryHdmi2Btn.Add_Click({ Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_PIP_SECONDARY_SOURCE) -Value ([MonitorAPI]::PIP_SECONDARY_HDMI2) -ActionLabel "Set the PiP/PbP secondary input to HDMI 2" | Out-Null })
 $resetColorBtn.Add_Click({
-    if (Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_RESTORE_FACTORY_COLOR) -Value 1) {
+    $result = Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_RESTORE_FACTORY_COLOR) -Value 1 -ActionLabel "Reset the selected monitor's color settings"
+    if ($result.Success) {
         Invoke-DelayedMonitorSettingsRefresh -DelayMs 700
-        Update-Status "Color reset queued"
     }
 })
 $factoryResetBtn.Add_Click({
-    if (Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_RESTORE_FACTORY_DEFAULTS) -Value 1) {
+    $result = Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_RESTORE_FACTORY_DEFAULTS) -Value 1 -ActionLabel "Restore the selected monitor to factory defaults"
+    if ($result.Success) {
         Invoke-DelayedMonitorSettingsRefresh -DelayMs 1500
-        Update-Status "Factory reset queued"
     }
 })
-$allMonitorsStandbyBtn.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_POWER_MODE) -Value ([MonitorAPI]::POWER_STANDBY) -Force | Out-Null; Update-Status "All Standby queued" })
+$allMonitorsStandbyBtn.Add_Click({ Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_POWER_MODE) -Value ([MonitorAPI]::POWER_STANDBY) -ActionLabel "Put every DDC/CI monitor in standby" -AllMonitors | Out-Null })
 
 $vcpPresetCombo.Add_SelectionChanged({ if ($vcpPresetCombo.SelectedItem -ne $null) { $vcpCodeBox.Text = "0x{0:X2}" -f $vcpPresetCombo.SelectedItem.Tag } })
 $vcpQueryBtn.Add_Click({
@@ -6872,9 +7327,7 @@ $vcpSetBtn.Add_Click({
         $code = ConvertTo-VcpCode -Text $vcpCodeBox.Text
         $value = ConvertTo-VcpValue -Text $vcpSetValueBox.Text
         if ($null -eq $code -or $null -eq $value) { Update-Status "VCP code/value invalid"; return }
-        if (-not (Test-MonitorSupportsVcp -Monitor $mon -Code $code)) { Update-Status "VCP 0x$("{0:X2}" -f $code) is not in capabilities"; return }
-        if (Set-VCPValueWithSync -VCPCode ([byte]$code) -Value $value) { Update-Status "Queued VCP 0x$("{0:X2}" -f $code) = $value" }
-        else { Update-Status "No DDC/CI write target" }
+        Invoke-ManualVcpWrite -Code $code -Value $value -ActionLabel "VCP Explorer direct write" -Arbitrary | Out-Null
     } catch { Update-Status "Error: $_" }
 })
 $vcpScanBtn.Add_Click({
@@ -6991,11 +7444,16 @@ $appProfileAddBtn.Add_Click({
     $exe = Normalize-AppExeName -ExeName $appProfileExeBox.Text
     $profile = if ($appProfileProfileCombo.SelectedItem) { [string]$appProfileProfileCombo.SelectedItem } else { "" }
     if (-not $exe -or -not $profile) { Update-Status "Choose an app and profile"; return }
+    $allowRiskyVcp = [bool]$appProfileRiskyConsentCheckbox.IsChecked
+    if ($allowRiskyVcp -and -not (Confirm-AutomationRuleRiskyWriteConsent -RuleLabel "$exe -> $profile")) {
+        Update-Status "Application rule not added"
+        return
+    }
     $script:AppProfileRules = @($script:AppProfileRules | Where-Object { $_.Exe -ne $exe })
-    $script:AppProfileRules += [PSCustomObject]@{ Exe = $exe; Profile = $profile }
+    $script:AppProfileRules += [PSCustomObject]@{ Exe = $exe; Profile = $profile; AllowRiskyVcp = $allowRiskyVcp }
     Save-AppProfileRules
     Update-AppProfileControls
-    Update-Status "Mapped $exe to '$profile'"
+    Update-Status "Mapped $exe to '$profile'$(if ($allowRiskyVcp) { ' with risky-write consent' } else { '' })"
 })
 $appProfileRemoveBtn.Add_Click({
     if ($appProfileRulesList.SelectedItem -eq $null) { return }
@@ -7029,11 +7487,16 @@ $scheduleAddBtn.Add_Click({
     $time = Normalize-ScheduleTime -TimeText $scheduleTimeBox.Text
     $profile = if ($scheduleProfileCombo.SelectedItem) { [string]$scheduleProfileCombo.SelectedItem } else { "" }
     if (-not $time -or -not $profile) { Update-Status "Use HH:mm and choose a profile"; return }
+    $allowRiskyVcp = [bool]$scheduleRiskyConsentCheckbox.IsChecked
+    if ($allowRiskyVcp -and -not (Confirm-AutomationRuleRiskyWriteConsent -RuleLabel "$time -> $profile")) {
+        Update-Status "Schedule rule not added"
+        return
+    }
     $script:ProfileSchedules = @($script:ProfileSchedules | Where-Object { $_.Time -ne $time })
-    $script:ProfileSchedules += [PSCustomObject]@{ Time = $time; Profile = $profile }
+    $script:ProfileSchedules += [PSCustomObject]@{ Time = $time; Profile = $profile; AllowRiskyVcp = $allowRiskyVcp }
     Save-ProfileSchedules
     Update-ScheduleControls
-    Update-Status "Scheduled $profile at $time"
+    Update-Status "Scheduled $profile at $time$(if ($allowRiskyVcp) { ' with risky-write consent' } else { '' })"
     Invoke-ScheduleCheck
 })
 $scheduleRemoveBtn.Add_Click({
@@ -7155,6 +7618,52 @@ $capabilitiesClearExclusionsBtn.Add_Click({
     Invoke-CapabilityDiscovery
     Update-Status "Capability exclusions cleared"
 })
+$riskyVcpEnabledCheckbox.Add_Checked({
+    if ($script:UpdatingVcpWriteSafetyUI) { return }
+    if ($script:CurrentMonitorIndex -lt 0 -or $script:CurrentMonitorIndex -ge $script:PhysicalMonitors.Count) { Sync-VcpWriteSafetyUi; return }
+    $monitor = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
+    if ([string]::IsNullOrWhiteSpace([string]$monitor.IdentityKey)) { Sync-VcpWriteSafetyUi; return }
+    $message = @"
+Enable risky VCP writes for $(Get-MonitorDisplayLabel -Monitor $monitor)?
+
+This unlock is stored only for this stable monitor identity. Power, input, reset, PiP/PbP, and arbitrary writes can blank the display, switch away from this computer, or erase monitor settings.
+
+Every direct command will still show its exact VCP code and value for confirmation. Automation rules require separate rule-level consent.
+"@
+    $choice = [System.Windows.MessageBox]::Show(
+        $message,
+        "Enable risky VCP writes",
+        [System.Windows.MessageBoxButton]::YesNo,
+        [System.Windows.MessageBoxImage]::Warning
+    )
+    if ($choice -ne [System.Windows.MessageBoxResult]::Yes) {
+        Sync-VcpWriteSafetyUi
+        Update-Status "Risky VCP writes remain disabled"
+        return
+    }
+    if (-not (Set-VcpWriteEnabledForMonitor -Monitor $monitor -Enabled $true)) {
+        $null = $script:RiskyVcpEnabledIdentityKeys.Remove([string]$monitor.IdentityKey)
+        Sync-VcpWriteSafetyUi
+        Update-Status "Risky VCP write permission could not be saved"
+        return
+    }
+    Update-CapabilityControls -Monitor $monitor
+    Update-Status "Risky VCP writes enabled for $(Get-MonitorDisplayLabel -Monitor $monitor)"
+})
+$riskyVcpEnabledCheckbox.Add_Unchecked({
+    if ($script:UpdatingVcpWriteSafetyUI) { return }
+    if ($script:CurrentMonitorIndex -lt 0 -or $script:CurrentMonitorIndex -ge $script:PhysicalMonitors.Count) { Sync-VcpWriteSafetyUi; return }
+    $monitor = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
+    $wasEnabled = Test-VcpWriteEnabledForMonitor -Monitor $monitor
+    if (-not (Set-VcpWriteEnabledForMonitor -Monitor $monitor -Enabled $false)) {
+        if ($wasEnabled) { $script:RiskyVcpEnabledIdentityKeys[[string]$monitor.IdentityKey] = $true }
+        Sync-VcpWriteSafetyUi
+        Update-Status "Risky VCP write permission could not be disabled"
+        return
+    }
+    Update-CapabilityControls -Monitor $monitor
+    Update-Status "Risky VCP writes disabled for $(Get-MonitorDisplayLabel -Monitor $monitor)"
+})
 $automationBridgeEnabledCheckbox.Add_Checked({
     if ($script:UpdatingAutomationBridgeUI) { return }
     if (-not (Read-AutomationBridgeSettingsFromUI)) { $automationBridgeEnabledCheckbox.IsChecked = $false; return }
@@ -7222,7 +7731,7 @@ function Update-GpuStats {
 }
 
 # Initialize
-Initialize-WmiBrightness; Load-MonitorIdentitySettings; Import-CapabilitySafetyState; Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList
+Initialize-WmiBrightness; Load-MonitorIdentitySettings; Import-CapabilitySafetyState; Import-VcpWriteSafetyState; Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList
 Load-AppProfileRules; Update-AppProfileControls; Start-AppProfileWatcher
 Load-ProfileSchedules; Update-ScheduleControls; Start-ProfileScheduleWatcher
 Load-IdleDimSettings; Update-IdleDimControls; Start-IdleDimWatcher
@@ -7230,6 +7739,7 @@ Load-BatteryProfileSettings; Update-BatteryProfileControls; Start-BatteryProfile
 Load-AutomationBridgeSettings; Update-AutomationBridgeControls; Start-AutomationBridge
 Update-ProfileStorageControls
 Sync-CapabilitySafetyUi
+Sync-VcpWriteSafetyUi
 if (-not ($script:HasNvidia -or $script:HasAmd -or $script:HasCpuTempMonitor)) { $gpuTab.Visibility = "Collapsed" } else {
     $script:GpuTimer = New-Object System.Windows.Threading.DispatcherTimer; $script:GpuTimer.Interval = [TimeSpan]::FromSeconds(2)
     $script:GpuTimer.Add_Tick({ Update-GpuStats }); $script:GpuTimer.Start(); Update-GpuStats

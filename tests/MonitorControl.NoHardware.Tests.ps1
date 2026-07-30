@@ -63,6 +63,17 @@ BeforeAll {
         "Test-CapabilityProbeAllowed",
         "Get-CapabilitiesSafetyStatusText",
         "Start-CapabilitiesWorker",
+        "Test-VcpWriteRequiresSafetyConsent",
+        "Get-VcpWriteSafetySettingsObject",
+        "Write-VcpWriteSafetyState",
+        "Import-VcpWriteSafetyState",
+        "Test-VcpWriteEnabledForMonitor",
+        "Set-VcpWriteEnabledForMonitor",
+        "Set-ControlVcpSupport",
+        "Get-VcpWriteOperation",
+        "Invoke-VerifiedVcpTransaction",
+        "Get-VcpDescription",
+        "Format-VcpWriteConfirmation",
         "New-AutomationBridgeApiKey",
         "Protect-AutomationBridgeApiKey",
         "Unprotect-AutomationBridgeApiKey",
@@ -306,7 +317,7 @@ BeforeAll {
 
 Describe "Profile filename validation" {
     BeforeEach {
-        $script:ProfileMetadataFiles = @("profile-storage.json", "automation-bridge.json")
+        $script:ProfileMetadataFiles = @("profile-storage.json", "automation-bridge.json", "vcp-write-safety.json")
     }
 
     It "accepts plain profile names and strips the .json extension" {
@@ -319,6 +330,7 @@ Describe "Profile filename validation" {
         Get-SafeProfileName -Name "Night." | Should -Be ""
         Get-SafeProfileName -Name "CON.json" | Should -Be ""
         Get-SafeProfileName -Name "automation-bridge.json" | Should -Be ""
+        Get-SafeProfileName -Name "vcp-write-safety.json" | Should -Be ""
     }
 }
 
@@ -370,7 +382,7 @@ Describe "Transactional profile bundle import" {
         $script:ProfileBundleMaxTotalBytes = 10485760
         $script:ProfileBundleMaxCompressionRatio = 100
         $script:ProfileBundleMaxMonitorSettings = 32
-        $script:ProfileMetadataFiles = @("profile-storage.json", "automation-bridge.json")
+        $script:ProfileMetadataFiles = @("profile-storage.json", "automation-bridge.json", "vcp-write-safety.json")
         $script:LastStatusMessage = ""
     }
 
@@ -606,6 +618,150 @@ Describe "Capability discovery safety" {
         $firmwareIndex | Should -BeGreaterThan $markerIndex
         $definition | Should -Match 'finally\s*\{'
         $definition | Should -Match 'Remove-Item -LiteralPath \$SentinelPath'
+    }
+}
+
+Describe "Verified risky VCP write safety" {
+    BeforeEach {
+        Get-ChildItem -LiteralPath $TestDrive -Force | Remove-Item -Recurse -Force
+        $script:VcpWriteSafetySettingsPath = Join-Path $TestDrive "vcp-write-safety.json"
+        $script:VcpWriteSafetySchemaVersion = 1
+        $script:RiskyVcpCodes = @(0x04, 0x08, 0x60, 0xD6, 0xE8, 0xE9)
+        $script:RiskyVcpEnabledIdentityKeys = @{}
+        $script:VCPCodeDescriptions = @{ 0x10 = "Brightness"; 0x12 = "Contrast"; 0x60 = "Input Source" }
+        $script:PendingStatusMessage = ""
+    }
+
+    It "persists unlocks only for stable identities and fails closed on future settings" {
+        $stable = [pscustomobject]@{ IdentityKey = "edid:stable"; Name = "Stable monitor" }
+        $unstable = [pscustomobject]@{ IdentityKey = ""; Name = "Unknown monitor" }
+
+        Test-VcpWriteEnabledForMonitor -Monitor $stable | Should -BeFalse
+        Set-VcpWriteEnabledForMonitor -Monitor $unstable -Enabled $true | Should -BeFalse
+        Set-VcpWriteEnabledForMonitor -Monitor $stable -Enabled $true | Should -BeTrue
+        Test-VcpWriteEnabledForMonitor -Monitor $stable | Should -BeTrue
+        $script:RiskyVcpEnabledIdentityKeys = @{}
+        Import-VcpWriteSafetyState
+        Test-VcpWriteEnabledForMonitor -Monitor $stable | Should -BeTrue
+
+        $futureJson = '{"SchemaVersion":99,"EnabledIdentityKeys":["edid:future"]}'
+        Set-Content -LiteralPath $script:VcpWriteSafetySettingsPath -Encoding UTF8 -Value $futureJson
+        Import-VcpWriteSafetyState
+
+        $script:RiskyVcpEnabledIdentityKeys.Count | Should -Be 0
+        (Get-Content -LiteralPath $script:VcpWriteSafetySettingsPath -Raw) | Should -Match "edid:future"
+        $script:PendingStatusMessage | Should -Match "dangerous writes remain disabled"
+    }
+
+    It "classifies power, input, reset, PiP, and arbitrary commands as risky" {
+        foreach ($code in @(0x04, 0x08, 0x60, 0xD6, 0xE8, 0xE9)) {
+            Test-VcpWriteRequiresSafetyConsent -Code $code | Should -BeTrue
+        }
+        Test-VcpWriteRequiresSafetyConsent -Code 0x10 | Should -BeFalse
+        Test-VcpWriteRequiresSafetyConsent -Code 0x10 -Arbitrary | Should -BeTrue
+
+        $monitor = [pscustomobject]@{ IdentityKey = "edid:locked"; CapabilitiesKnown = $false; SupportedVcpCodes = @{} }
+        $control = [pscustomobject]@{ IsEnabled = $true; ToolTip = $null }
+        Set-ControlVcpSupport -Control $control -Monitor $monitor -Code 0xD6 -Value 4 -Risky
+        $control.IsEnabled | Should -BeFalse
+        $control.ToolTip | Should -Match "Enable risky VCP writes"
+        $script:RiskyVcpEnabledIdentityKeys[$monitor.IdentityKey] = $true
+        Set-ControlVcpSupport -Control $control -Monitor $monitor -Code 0xD6 -Value 4 -Risky
+        $control.IsEnabled | Should -BeTrue
+    }
+
+    It "snapshots and verifies every readable value in a successful transaction" {
+        $monitor = [pscustomobject]@{ Handle = [IntPtr]1; IdentityKey = "edid:test"; Name = "Test monitor" }
+        $operations = @(
+            Get-VcpWriteOperation -Monitor $monitor -Code 0x10 -Value 70
+            Get-VcpWriteOperation -Monitor $monitor -Code 0x12 -Value 60
+        )
+        $state = @{ 0x10 = [uint32]20; 0x12 = [uint32]30 }
+        $read = { param($operation) [pscustomobject]@{ Success = $true; Current = [uint32]$state[[int]$operation.Code] } }
+        $write = { param($operation, [uint32]$value) $state[[int]$operation.Code] = $value; return $true }
+
+        $result = Invoke-VerifiedVcpTransaction -Operations $operations -ReadValue $read -WriteValue $write -RollbackOnFailure -VerificationDelayMs 0
+
+        $result.Success | Should -BeTrue
+        $result.Outcome | Should -Be "Verified"
+        @($result.Results | Where-Object PreviousReadable).Count | Should -Be 2
+        @($result.Results).PreviousValue | Should -Be @(20, 30)
+        $state[0x10] | Should -Be 70
+        $state[0x12] | Should -Be 60
+    }
+
+    It "reports a mismatch distinctly and restores readable snapshots in reverse order" {
+        $monitor = [pscustomobject]@{ Handle = [IntPtr]1; IdentityKey = "edid:test"; Name = "Test monitor" }
+        $operations = @(
+            Get-VcpWriteOperation -Monitor $monitor -Code 0x10 -Value 70
+            Get-VcpWriteOperation -Monitor $monitor -Code 0x12 -Value 60
+        )
+        $state = @{ 0x10 = [uint32]20; 0x12 = [uint32]30 }
+        $writes = New-Object System.Collections.Generic.List[string]
+        $read = { param($operation) [pscustomobject]@{ Success = $true; Current = [uint32]$state[[int]$operation.Code] } }
+        $write = {
+            param($operation, [uint32]$value)
+            $writes.Add("$([int]$operation.Code):$value")
+            if ([int]$operation.Code -eq 0x12 -and $value -eq [uint32]$operation.Value) {
+                $state[[int]$operation.Code] = $value - 1
+            } else {
+                $state[[int]$operation.Code] = $value
+            }
+            return $true
+        }
+
+        $result = Invoke-VerifiedVcpTransaction -Operations $operations -ReadValue $read -WriteValue $write -RollbackOnFailure -VerificationDelayMs 0
+
+        $result.Success | Should -BeFalse
+        $result.Outcome | Should -Be "Mismatched"
+        $result.Rollback | Should -Be "Restored"
+        $state[0x10] | Should -Be 20
+        $state[0x12] | Should -Be 30
+        @($writes)[-2..-1] | Should -Be @("18:30", "16:20")
+    }
+
+    It "distinguishes an applied write when readback becomes unavailable" {
+        $monitor = [pscustomobject]@{ Handle = [IntPtr]1; IdentityKey = "edid:test"; Name = "Test monitor" }
+        $operation = Get-VcpWriteOperation -Monitor $monitor -Code 0x60 -Value 0x11
+        $readState = @{ Count = 0 }
+        $read = {
+            param($ignoredOperation)
+            $readState.Count++
+            return [pscustomobject]@{ Success = $readState.Count -eq 1; Current = [uint32]0x0F }
+        }
+        $write = { param($ignoredOperation, [uint32]$ignoredValue) return $true }
+
+        $result = Invoke-VerifiedVcpTransaction -Operations @($operation) -ReadValue $read -WriteValue $write -VerificationDelayMs 0
+
+        $result.Success | Should -BeTrue
+        $result.Outcome | Should -Be "Unverified"
+        $result.Results[0].PreviousReadable | Should -BeTrue
+        $result.Results[0].Verification | Should -Be "Unverified"
+    }
+
+    It "shows the exact code and value and keeps risky codes out of automatic reports" {
+        $monitor = [pscustomobject]@{ Handle = [IntPtr]1; IdentityKey = "edid:test"; Name = "Test monitor" }
+        $operation = Get-VcpWriteOperation -Monitor $monitor -Code 0x60 -Value 17
+        $confirmation = Format-VcpWriteConfirmation -Operations @($operation) -ActionLabel "Change input"
+
+        $confirmation | Should -Match "VCP code: 0x60"
+        $confirmation | Should -Match "Value: 17"
+        $confirmation | Should -Match "blank the display"
+
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:AppPath, [ref]$tokens, [ref]$errors)
+        $reportFunction = @($ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq "Get-DdcReportProbeCodes" }, $true))[0]
+        $reportFunction.Extent.Text | Should -Not -Match "VCP_INPUT_SOURCE|VCP_POWER_MODE|VCP_RESTORE|VCP_PIP"
+    }
+
+    It "wires separate risky-write consent into application and schedule rules" {
+        $source = Get-Content -LiteralPath $script:AppPath -Raw
+
+        $source | Should -Match 'x:Name="AppProfileRiskyConsentCheckbox"'
+        $source | Should -Match 'x:Name="ScheduleRiskyConsentCheckbox"'
+        $source | Should -Match 'AllowRiskyAutomation:\(\[bool\]\$rule\.AllowRiskyVcp\)'
+        $source | Should -Match 'AllowRiskyAutomation:\(\[bool\]\$active\.Rule\.AllowRiskyVcp\)'
     }
 }
 

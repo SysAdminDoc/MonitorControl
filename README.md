@@ -59,13 +59,14 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 - **Stable Monitor Identity** — Stores EDID/device-path backed monitor identities, supports custom display labels, and targets saved profiles by identity after reordering
 - **Accessibility & Localization Baseline** — Applies English UI string keys, explicit automation names, and stable tab order for screen-reader friendly control surfaces
 - **Portable Release ZIP** — Local release builds package the script, icon, README, LICENSE, signature status, and SHA256 checksums
-- **Nonblocking Advanced Writes** — VCP Explorer Set, color reset, and factory reset actions use queued DDC writes with deferred refresh instead of UI-thread sleeps
+- **Verified Risky Writes** — Power, input, reset, PiP/PbP, and arbitrary commands require a per-monitor identity unlock plus an exact code/value confirmation; readback reports verified, mismatched, or unavailable outcomes
 - **Async Capabilities Reads** — Monitor `vcp(...)` capabilities load from a background worker after enumeration, keeping refresh responsive
 - **DDC Compatibility Report** — Builds a copyable diagnostics report with monitor identities, capability status, common VCP probe results, OS/GPU driver data, and recent DDC errors
-- **No-Hardware Regression Tests** — Pester tests cover schedule rollover, idle tick wraparound, profile JSON quarantine, filename validation, capabilities parsing, and VCP input parsing
+- **No-Hardware Regression Tests** — Pester tests cover schedule rollover, idle tick wraparound, profile transactions, hostile bundles, capability safety, risky-write rollback, bridge framing/auth, and VCP input parsing
 - **Async VCP Reads** — VCP Explorer query and scan operations run in a background worker with live scan progress
 - **Async Monitor Refresh** — Monitor brightness, contrast, color gain, volume, and sharpness reads refresh from a background worker
-- **Coalesced DDC Writes** — Slider, profile, preset, and all-monitor writes queue on a background worker so rapid UI changes do not block the WPF thread
+- **Coalesced Routine Writes** — Sliders, presets, and brightness automation queue on a background worker so rapid routine changes do not block the WPF thread
+- **Recoverable Profile Apply** — Profile loads snapshot every readable hardware value, verify writes, and restore readable prior values in reverse order after a failure or mismatch
 - **DDC/CI Diagnostics** — Failed reads and writes include monitor name, VCP code, attempted value, Win32 error, and retry count in a copyable VCP Explorer summary
 - **DDC/CI Capabilities Viewer** — View raw capabilities string from monitor
 - **Software Gamma Control** — Independent RGB gamma curves via Windows API
@@ -155,11 +156,13 @@ The Pester suite imports only selected pure function definitions from `MonitorCo
 - Create or load a saved monitor profile
 - Open the **Profiles** tab, enable **Per-application profiles**, and map an executable name such as `photoshop.exe` to a profile
 - Use **Capture** to grab the foreground executable after a short delay, or type the executable name directly
+- Leave **Risky writes** off unless that exact application rule should be allowed to use risky profile values; enabling it shows a separate rule-level warning and does not bypass the per-monitor unlock
 - Rules are saved in `%APPDATA%\MonitorControlPro\app-profile-rules.json`
 
 ### Scheduled Profiles
 - Create or load a saved monitor profile
 - Open the **Schedule** tab, enable **Scheduled profiles**, and add `HH:mm` rules that map times to profiles
+- Leave **Risky writes** off unless that exact schedule rule should be allowed to use risky profile values; the target monitor identity must still be unlocked separately
 - The timeline plots rules against a 24-hour axis so timing gaps are visible before saving more rules
 - The watcher applies the latest due rule once per schedule boundary, including the current effective rule when scheduling is enabled
 - Rules are saved in `%APPDATA%\MonitorControlPro\profile-schedules.json`
@@ -184,6 +187,14 @@ The Pester suite imports only selected pure function definitions from `MonitorCo
 - Before each enabled request, the app persists the selected monitor identity in a crash sentinel and clears it only after the native call returns
 - If the app or Windows exits during a request, discovery is disabled on the next launch and that monitor identity is excluded
 - Use **Exclude selected** or **Clear exclusions** in **System** to manage the per-monitor exclusion list
+
+### Risky VCP Write Safety
+- Risky controls start disabled. Select a display, open **System**, and explicitly enable risky VCP writes for that stable monitor identity
+- The unlock covers power, input, reset, PiP/PbP, and arbitrary VCP writes; identities without a stable key cannot be unlocked
+- Every direct command shows the exact VCP code, value, and target before writing. Canceling makes no hardware change
+- The app reads each supported value back and distinguishes **verified**, **mismatched**, and **readback unavailable** outcomes
+- Profile loads snapshot every readable prior DDC/WMI value and restore those values in reverse order when a write fails or reads back incorrectly
+- Automatic compatibility reports omit risky VCP codes; VCP Explorer reads remain explicitly user initiated
 
 ### Navigation
 - Click on monitor rectangles to select different displays
@@ -381,6 +392,7 @@ Your monitor either:
 - Profiles: `%APPDATA%\MonitorControlPro\*.json`
 - Automation bridge settings: `%APPDATA%\MonitorControlPro\automation-bridge.json` (API key protected with current-user DPAPI)
 - Automation bridge write log: `%APPDATA%\MonitorControlPro\automation-bridge-writes.jsonl` (redacted and size-rotated)
+- Risky VCP identity unlocks: `%APPDATA%\MonitorControlPro\vcp-write-safety.json`
 - No registry modifications
 - No admin rights required
 
