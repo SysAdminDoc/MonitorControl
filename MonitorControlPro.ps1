@@ -710,6 +710,17 @@ $script:CapabilitiesWorkerOutput = $null
 $script:CapabilitiesWorkerAsyncResult = $null
 $script:CapabilitiesWorkerTimer = $null
 $script:CapabilitiesWorkerLastOutputCount = 0
+$script:CapabilitiesSafetySettingsPath = ""
+$script:CapabilitiesProbeSentinelPath = ""
+$script:CapabilitiesSafetySchemaVersion = 1
+$script:CapabilitiesConsentRecorded = $false
+$script:CapabilitiesDiscoveryEnabled = $false
+$script:CapabilitiesMaximumCompatibility = $false
+$script:CapabilitiesExcludedIdentityKeys = @{}
+$script:CapabilitiesLastIncidentIdentityKey = ""
+$script:CapabilitiesLastIncidentAt = ""
+$script:UpdatingCapabilitiesSafetyUI = $false
+$script:CapabilitiesConsentPromptHandled = $false
 $script:DdcReportWorker = $null
 $script:DdcReportWorkerInput = $null
 $script:DdcReportWorkerOutput = $null
@@ -746,6 +757,8 @@ $script:DefaultProfilesPath = "$env:APPDATA\MonitorControlPro"
 $script:ProfileStorageSettingsPath = Join-Path $script:DefaultProfilesPath "profile-storage.json"
 $script:AutomationBridgeSettingsPath = Join-Path $script:DefaultProfilesPath "automation-bridge.json"
 $script:AutomationBridgeWriteLogPath = Join-Path $script:DefaultProfilesPath "automation-bridge-writes.jsonl"
+$script:CapabilitiesSafetySettingsPath = Join-Path $script:DefaultProfilesPath "capabilities-safety.json"
+$script:CapabilitiesProbeSentinelPath = Join-Path $script:DefaultProfilesPath "capabilities-probe-pending.json"
 $script:ProfilesPath = $script:DefaultProfilesPath
 $script:ProfileStorageMode = "Local"
 if (-not (Test-Path -LiteralPath $script:DefaultProfilesPath)) { New-Item -ItemType Directory -Path $script:DefaultProfilesPath -Force | Out-Null }
@@ -770,7 +783,7 @@ $script:MonitorIdentitySettingsPath = Join-Path $script:ProfilesPath "monitor-id
 $script:ProfileSchemaVersion = 3
 $script:ProfileBundleSchemaVersion = 1
 $script:ProfileExportsPath = Join-Path $script:ProfilesPath "exports"
-$script:ProfileMetadataFiles = @("app-profile-rules.json", "profile-schedules.json", "idle-dim.json", "battery-profile.json", "profile-storage.json", "monitor-identities.json", "automation-bridge.json")
+$script:ProfileMetadataFiles = @("app-profile-rules.json", "profile-schedules.json", "idle-dim.json", "battery-profile.json", "profile-storage.json", "monitor-identities.json", "automation-bridge.json", "capabilities-safety.json", "capabilities-probe-pending.json")
 $script:MonitorIdentityRecords = @{}
 $script:UpdatingMonitorLabelUI = $false
 $script:UiCulture = "en-US"
@@ -826,6 +839,10 @@ $script:UiStrings = @{
     "A11y.VcpSetValue" = "VCP set value"
     "A11y.VcpResults" = "VCP results"
     "A11y.Capabilities" = "Monitor capabilities"
+    "A11y.CapabilitiesDiscovery" = "Allow monitor capability discovery"
+    "A11y.CapabilitiesCompatibility" = "Maximum compatibility mode"
+    "A11y.CapabilitiesExclude" = "Exclude the selected monitor from capability discovery"
+    "A11y.CapabilitiesClearExclusions" = "Clear capability discovery exclusions"
     "A11y.DdcReport" = "DDC compatibility report"
     "A11y.AutomationBridge" = "Local automation bridge"
     "A11y.Status" = "Status"
@@ -1477,6 +1494,10 @@ function Initialize-LocalizationAndAccessibility {
     Set-AccessibleName -Control $vcpSetValueBox -Key "A11y.VcpSetValue"
     Set-AccessibleName -Control $vcpResultBox -Key "A11y.VcpResults"
     Set-AccessibleName -Control $capabilitiesBox -Key "A11y.Capabilities"
+    Set-AccessibleName -Control $capabilitiesDiscoveryEnabledCheckbox -Key "A11y.CapabilitiesDiscovery"
+    Set-AccessibleName -Control $capabilitiesMaximumCompatibilityCheckbox -Key "A11y.CapabilitiesCompatibility"
+    Set-AccessibleName -Control $capabilitiesExcludeCurrentBtn -Key "A11y.CapabilitiesExclude"
+    Set-AccessibleName -Control $capabilitiesClearExclusionsBtn -Key "A11y.CapabilitiesClearExclusions"
     Set-AccessibleName -Control $ddcReportBox -Key "A11y.DdcReport"
     Set-AccessibleName -Control $automationBridgeEnabledCheckbox -Key "A11y.AutomationBridge"
     Set-AccessibleName -Control $statusText -Key "A11y.Status"
@@ -1503,6 +1524,7 @@ function Initialize-LocalizationAndAccessibility {
         $idleDimEnabledCheckbox,$idleDimMinutesBox,$idleDimBrightnessBox,$idleDimRestoreCheckbox,$idleDimSaveBtn,
         $batteryProfileEnabledCheckbox,$batteryBrightnessBox,$acBrightnessBox,$batteryProfileSaveBtn,
         $displaySettingsBtn,$colorMgmtBtn,$gpuControlPanelBtn,$gammaRedSlider,$gammaGreenSlider,$gammaBlueSlider,$resetGammaBtn,$capabilitiesBox,
+        $capabilitiesDiscoveryEnabledCheckbox,$capabilitiesMaximumCompatibilityCheckbox,$capabilitiesExcludeCurrentBtn,$capabilitiesClearExclusionsBtn,
         $automationBridgeEnabledCheckbox,$automationBridgeBindBox,$automationBridgePortBox,$automationBridgeKeyBox,$automationBridgeSaveBtn,
         $ddcReportGenerateBtn,$ddcReportCopyBtn,$ddcReportBox
     )
@@ -1534,6 +1556,119 @@ function Clear-PhysicalMonitorHandles {
     if ($ClearList) { $script:PhysicalMonitors = @() }
 }
 
+function Get-CapabilitiesSafetySettingsObject {
+    return [PSCustomObject]@{
+        SchemaVersion = [int]$script:CapabilitiesSafetySchemaVersion
+        ConsentRecorded = [bool]$script:CapabilitiesConsentRecorded
+        DiscoveryEnabled = [bool]$script:CapabilitiesDiscoveryEnabled
+        MaximumCompatibility = [bool]$script:CapabilitiesMaximumCompatibility
+        ExcludedIdentityKeys = @($script:CapabilitiesExcludedIdentityKeys.Keys | Sort-Object)
+        LastIncidentIdentityKey = [string]$script:CapabilitiesLastIncidentIdentityKey
+        LastIncidentAt = [string]$script:CapabilitiesLastIncidentAt
+    }
+}
+
+function Write-CapabilitySafetyState {
+    return (Write-JsonFileSafely -Path $script:CapabilitiesSafetySettingsPath -Data (Get-CapabilitiesSafetySettingsObject) -Depth 5)
+}
+
+function Import-CapabilitySafetyState {
+    $script:CapabilitiesConsentRecorded = $false
+    $script:CapabilitiesDiscoveryEnabled = $false
+    $script:CapabilitiesMaximumCompatibility = $false
+    $script:CapabilitiesExcludedIdentityKeys = @{}
+    $script:CapabilitiesLastIncidentIdentityKey = ""
+    $script:CapabilitiesLastIncidentAt = ""
+
+    if (Test-Path -LiteralPath $script:CapabilitiesSafetySettingsPath) {
+        $data = Read-JsonFileSafely -Path $script:CapabilitiesSafetySettingsPath -Label "Capability safety settings"
+        if ($null -ne $data) {
+            $schema = if ($data.PSObject.Properties.Name -contains "SchemaVersion") { [int]$data.SchemaVersion } else { 1 }
+            if ($schema -gt $script:CapabilitiesSafetySchemaVersion) {
+                $script:CapabilitiesConsentRecorded = $true
+                $script:CapabilitiesMaximumCompatibility = $true
+                Set-DeferredStatus "Capability safety settings are newer than this app; maximum compatibility enabled"
+            } else {
+                if ($data.PSObject.Properties.Name -contains "ConsentRecorded") { $script:CapabilitiesConsentRecorded = [bool]$data.ConsentRecorded }
+                if ($data.PSObject.Properties.Name -contains "DiscoveryEnabled") { $script:CapabilitiesDiscoveryEnabled = [bool]$data.DiscoveryEnabled }
+                if ($data.PSObject.Properties.Name -contains "MaximumCompatibility") { $script:CapabilitiesMaximumCompatibility = [bool]$data.MaximumCompatibility }
+                foreach ($identityKey in @($data.ExcludedIdentityKeys)) {
+                    $key = [string]$identityKey
+                    if (-not [string]::IsNullOrWhiteSpace($key)) { $script:CapabilitiesExcludedIdentityKeys[$key] = $true }
+                }
+                if ($data.PSObject.Properties.Name -contains "LastIncidentIdentityKey") { $script:CapabilitiesLastIncidentIdentityKey = [string]$data.LastIncidentIdentityKey }
+                if ($data.PSObject.Properties.Name -contains "LastIncidentAt") { $script:CapabilitiesLastIncidentAt = [string]$data.LastIncidentAt }
+            }
+        }
+    }
+
+    if (Test-Path -LiteralPath $script:CapabilitiesProbeSentinelPath) {
+        $pendingIdentity = ""
+        $pendingAt = [DateTime]::UtcNow.ToString("o")
+        try {
+            $pending = Get-Content -LiteralPath $script:CapabilitiesProbeSentinelPath -Raw | ConvertFrom-Json
+            $pendingIdentity = [string]$pending.IdentityKey
+            if ($pending.PSObject.Properties.Name -contains "StartedAtUtc" -and -not [string]::IsNullOrWhiteSpace([string]$pending.StartedAtUtc)) {
+                $pendingAt = [string]$pending.StartedAtUtc
+            }
+        } catch {
+            Move-CorruptJsonFile -Path $script:CapabilitiesProbeSentinelPath | Out-Null
+        }
+        if (Test-Path -LiteralPath $script:CapabilitiesProbeSentinelPath) {
+            Remove-Item -LiteralPath $script:CapabilitiesProbeSentinelPath -Force -ErrorAction SilentlyContinue
+        }
+        $script:CapabilitiesDiscoveryEnabled = $false
+        $script:CapabilitiesConsentRecorded = $true
+        $script:CapabilitiesLastIncidentIdentityKey = $pendingIdentity
+        $script:CapabilitiesLastIncidentAt = $pendingAt
+        if (-not [string]::IsNullOrWhiteSpace($pendingIdentity)) {
+            $script:CapabilitiesExcludedIdentityKeys[$pendingIdentity] = $true
+            Set-DeferredStatus "Capability discovery disabled after an interrupted probe; the affected monitor was excluded"
+        } else {
+            $script:CapabilitiesMaximumCompatibility = $true
+            Set-DeferredStatus "Capability discovery disabled after an unreadable probe sentinel"
+        }
+        Write-CapabilitySafetyState | Out-Null
+    }
+}
+
+function Test-CapabilityProbeAllowed {
+    param($Monitor)
+    if ($null -eq $Monitor -or $Monitor.Handle -eq [IntPtr]::Zero) { return $false }
+    if (-not $script:CapabilitiesDiscoveryEnabled -or $script:CapabilitiesMaximumCompatibility) { return $false }
+    $identityKey = [string]$Monitor.IdentityKey
+    if (-not [string]::IsNullOrWhiteSpace($identityKey) -and $script:CapabilitiesExcludedIdentityKeys.ContainsKey($identityKey)) { return $false }
+    return $true
+}
+
+function Get-CapabilitiesSafetyStatusText {
+    $excludedCount = [int]$script:CapabilitiesExcludedIdentityKeys.Count
+    $suffix = if ($excludedCount -eq 1) { "1 exclusion" } else { "$excludedCount exclusions" }
+    if ($script:CapabilitiesMaximumCompatibility) { return "Maximum compatibility - reads disabled ($suffix)" }
+    if (-not $script:CapabilitiesDiscoveryEnabled) { return "Discovery off ($suffix)" }
+    return "Discovery on ($suffix)"
+}
+
+function Request-CapabilitiesDiscoveryConsent {
+    $message = @"
+Monitor capability discovery asks monitor firmware for its full DDC/CI capabilities string.
+
+Some non-compliant monitors and adapters have returned malformed data that can destabilize or crash Windows. MonitorControl Pro records a crash sentinel before each request and can exclude a failing display, but it cannot guarantee faulty firmware is safe.
+
+Enable capability discovery? Choose No to keep controls in maximum-safety fallback mode. You can change this later in System.
+"@
+    $result = [System.Windows.MessageBox]::Show(
+        $message,
+        "Capability discovery safety",
+        [System.Windows.MessageBoxButton]::YesNo,
+        [System.Windows.MessageBoxImage]::Warning
+    )
+    $script:CapabilitiesConsentRecorded = $true
+    $script:CapabilitiesDiscoveryEnabled = ($result -eq [System.Windows.MessageBoxResult]::Yes)
+    Write-CapabilitySafetyState | Out-Null
+    return [bool]$script:CapabilitiesDiscoveryEnabled
+}
+
 function Stop-CapabilitiesWorker {
     param([switch]$Cancel)
     if ($script:CapabilitiesWorkerTimer) { $script:CapabilitiesWorkerTimer.Stop() }
@@ -1555,7 +1690,13 @@ function Stop-CapabilitiesWorker {
 function Update-CapabilitiesBox {
     param($Monitor)
     if ($null -eq $capabilitiesBox -or $null -eq $Monitor) { return }
-    if ($Monitor.Capabilities) {
+    if ($script:CapabilitiesMaximumCompatibility) {
+        $capabilitiesBox.Text = "Capability discovery skipped by maximum compatibility mode."
+    } elseif ([bool]$Monitor.CapabilitiesExcluded) {
+        $capabilitiesBox.Text = "Capability discovery is excluded for this monitor identity."
+    } elseif (-not $script:CapabilitiesDiscoveryEnabled) {
+        $capabilitiesBox.Text = "Capability discovery is disabled. Enable it from System after reviewing the safety warning."
+    } elseif ($Monitor.Capabilities) {
         $prefix = if ([bool]$Monitor.CapabilitiesKnown) { "Parsed VCP codes: $($Monitor.SupportedVcpCodes.Count)" } else { "Parsed VCP codes: unknown" }
         $capabilitiesBox.Text = "$prefix`n`n$($Monitor.Capabilities)"
     } elseif ([bool]$Monitor.CapabilitiesPending) {
@@ -1585,14 +1726,25 @@ function Update-CapabilitiesWorkerOutput {
         $mon.CapabilitiesKnown = [bool]$capabilityInfo.Known
         $mon.SupportedVcpCodes = $capabilityInfo.Codes
         $mon.CapabilitiesPending = $false
+        if (-not [bool]$result.SentinelReady) {
+            $mon.CapabilitiesSafetyError = "Safety sentinel unavailable"
+        } else {
+            $mon.CapabilitiesSafetyError = ""
+        }
     }
     if ($script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) {
         $selected = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
         Update-CapabilitiesBox -Monitor $selected
         Update-CapabilityControls -Monitor $selected
     }
-    Update-Status "Capabilities read complete"
+    $sentinelFailures = @($script:CapabilitiesWorkerOutput | Where-Object { -not [bool]$_.SentinelReady }).Count
+    if ($sentinelFailures -gt 0) {
+        Update-Status "Capability reads skipped where the crash sentinel could not be persisted"
+    } else {
+        Update-Status "Capabilities read complete"
+    }
     Stop-CapabilitiesWorker
+    Sync-CapabilitySafetyUi
 }
 
 function Start-CapabilitiesWorker {
@@ -1600,31 +1752,72 @@ function Start-CapabilitiesWorker {
     $targets = @()
     for ($i = 0; $i -lt $script:PhysicalMonitors.Count; $i++) {
         $mon = $script:PhysicalMonitors[$i]
-        if ($mon.Handle -ne [IntPtr]::Zero) {
+        $mon.CapabilitiesPending = $false
+        $mon.CapabilitiesExcluded = (-not [string]::IsNullOrWhiteSpace([string]$mon.IdentityKey) -and $script:CapabilitiesExcludedIdentityKeys.ContainsKey([string]$mon.IdentityKey))
+        if (Test-CapabilityProbeAllowed -Monitor $mon) {
             $mon.CapabilitiesPending = $true
-            $targets += [PSCustomObject]@{ Index = [int]$i; Handle = $mon.Handle; HandleValue = $mon.Handle.ToInt64(); Name = [string]$mon.Name }
+            $targets += [PSCustomObject]@{
+                Index = [int]$i
+                Handle = $mon.Handle
+                HandleValue = $mon.Handle.ToInt64()
+                Name = [string]$mon.Name
+                IdentityKey = [string]$mon.IdentityKey
+            }
         }
     }
-    if ($targets.Count -eq 0) { return }
+    if ($targets.Count -eq 0) {
+        if ($script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) {
+            Update-CapabilitiesBox -Monitor $script:PhysicalMonitors[$script:CurrentMonitorIndex]
+        }
+        Sync-CapabilitySafetyUi
+        return
+    }
     $workerScript = {
-        param([object[]]$Targets)
+        param([object[]]$Targets, [string]$SentinelPath)
         foreach ($target in $Targets) {
             $capabilities = ""
             $lastError = [int]0
+            $sentinelReady = $false
+            $sentinelTempPath = "$SentinelPath.$([guid]::NewGuid().ToString('N')).tmp"
             try {
-                $capLen = [uint32]0
-                if ([MonitorAPI]::GetCapabilitiesStringLength($target.Handle, [ref]$capLen) -and $capLen -gt 0) {
-                    $capStr = New-Object System.Text.StringBuilder -ArgumentList ([int]$capLen)
-                    if ([MonitorAPI]::CapabilitiesRequestAndCapabilitiesReply($target.Handle, $capStr, $capLen)) {
-                        $capabilities = $capStr.ToString()
+                try {
+                    $marker = [PSCustomObject]@{
+                        SchemaVersion = 1
+                        IdentityKey = [string]$target.IdentityKey
+                        MonitorName = [string]$target.Name
+                        StartedAtUtc = [DateTime]::UtcNow.ToString("o")
+                    }
+                    $markerJson = $marker | ConvertTo-Json -Compress
+                    $encoding = New-Object System.Text.UTF8Encoding($false)
+                    [System.IO.File]::WriteAllText($sentinelTempPath, ($markerJson + [Environment]::NewLine), $encoding)
+                    if (Test-Path -LiteralPath $SentinelPath) { Remove-Item -LiteralPath $SentinelPath -Force }
+                    [System.IO.File]::Move($sentinelTempPath, $SentinelPath)
+                    $sentinelReady = Test-Path -LiteralPath $SentinelPath
+                } catch {
+                    $lastError = -2
+                }
+                if ($sentinelReady) {
+                    $capLen = [uint32]0
+                    if ([MonitorAPI]::GetCapabilitiesStringLength($target.Handle, [ref]$capLen) -and $capLen -gt 0) {
+                        $capStr = New-Object System.Text.StringBuilder -ArgumentList ([int]$capLen)
+                        if ([MonitorAPI]::CapabilitiesRequestAndCapabilitiesReply($target.Handle, $capStr, $capLen)) {
+                            $capabilities = $capStr.ToString()
+                        } else {
+                            $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                        }
                     } else {
                         $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
                     }
-                } else {
-                    $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
                 }
             } catch {
                 $lastError = -1
+            } finally {
+                if (Test-Path -LiteralPath $sentinelTempPath) {
+                    Remove-Item -LiteralPath $sentinelTempPath -Force -ErrorAction SilentlyContinue
+                }
+                if ($sentinelReady -and (Test-Path -LiteralPath $SentinelPath)) {
+                    Remove-Item -LiteralPath $SentinelPath -Force -ErrorAction SilentlyContinue
+                }
             }
             [PSCustomObject]@{
                 Index = [int]$target.Index
@@ -1633,6 +1826,7 @@ function Start-CapabilitiesWorker {
                 Capabilities = [string]$capabilities
                 Success = -not [string]::IsNullOrWhiteSpace($capabilities)
                 LastError = [int]$lastError
+                SentinelReady = [bool]$sentinelReady
             }
         }
     }
@@ -1640,7 +1834,7 @@ function Start-CapabilitiesWorker {
     $script:CapabilitiesWorkerInput.Complete()
     $script:CapabilitiesWorkerOutput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
     $script:CapabilitiesWorker = [PowerShell]::Create()
-    $script:CapabilitiesWorker.AddScript($workerScript.ToString()).AddArgument($targets) | Out-Null
+    $script:CapabilitiesWorker.AddScript($workerScript.ToString()).AddArgument($targets).AddArgument($script:CapabilitiesProbeSentinelPath) | Out-Null
     $script:CapabilitiesWorkerAsyncResult = $script:CapabilitiesWorker.BeginInvoke($script:CapabilitiesWorkerInput, $script:CapabilitiesWorkerOutput)
     $script:CapabilitiesWorkerLastOutputCount = 0
     if (-not $script:CapabilitiesWorkerTimer) {
@@ -1691,7 +1885,8 @@ function Get-Monitors {
                             RefreshRate = $devMode.dmDisplayFrequency; IsPrimary = ($monInfo.Flags -band [MonitorAPI]::MONITORINFOF_PRIMARY) -ne 0
                             Left = $monInfo.Monitor.Left; Top = $monInfo.Monitor.Top; Right = $monInfo.Monitor.Right
                             Bottom = $monInfo.Monitor.Bottom; Capabilities = ""
-                            CapabilitiesKnown = $false; SupportedVcpCodes = @{}; CapabilitiesPending = $true
+                            CapabilitiesKnown = $false; SupportedVcpCodes = @{}; CapabilitiesPending = $false
+                            CapabilitiesExcluded = $false; CapabilitiesSafetyError = ""
                             IdentityKey = $identity.Key; IdentitySource = $identity.Source; IdentityDefaultLabel = $identity.DefaultLabel
                             DevicePath = $identity.DevicePath; MonitorDeviceString = $identity.DeviceString; HardwareId = $identity.HardwareId
                             Manufacturer = $identity.Manufacturer; EdidModel = $identity.Model; EdidSerial = $identity.Serial; EdidName = $identity.EdidName
@@ -1714,6 +1909,7 @@ function Get-Monitors {
             DeviceName = $fallbackDevice; Width = 1920; Height = 1080; RefreshRate = 60; IsPrimary = $true
             Left = 0; Top = 0; Right = 1920; Bottom = 1080; Capabilities = ""
             CapabilitiesKnown = $false; SupportedVcpCodes = @{}; CapabilitiesPending = $false
+            CapabilitiesExcluded = $false; CapabilitiesSafetyError = ""
             IdentityKey = $identity.Key; IdentitySource = $identity.Source; IdentityDefaultLabel = $identity.DefaultLabel
             DevicePath = $identity.DevicePath; MonitorDeviceString = $identity.DeviceString; HardwareId = $identity.HardwareId
             Manufacturer = $identity.Manufacturer; EdidModel = $identity.Model; EdidSerial = $identity.Serial; EdidName = $identity.EdidName
@@ -3621,7 +3817,7 @@ try {
         </TabItem>
         <TabItem x:Name="SystemTab" Header="System" Tag="&#xE713;">
             <Border Background="Transparent" Padding="0"><ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><Grid>
-                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Border Background="#101b2b" BorderBrush="#26384f" BorderThickness="1" CornerRadius="10" Padding="14"><StackPanel><TextBlock Text="Quick links" FontSize="12" Foreground="#dce6f3" FontWeight="SemiBold" Margin="0,0,0,8"/>
                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                         <Button x:Name="DisplaySettingsBtn" Content="Display" Style="{StaticResource Btn}" Padding="5,4" FontSize="9"/>
@@ -3644,6 +3840,17 @@ try {
                     <TextBox x:Name="CapabilitiesBox" IsReadOnly="True" TextWrapping="Wrap" Height="70" VerticalScrollBarVisibility="Auto" Background="#0c1725" FontFamily="Consolas" FontSize="10"/>
                 </StackPanel></Border>
                 <Border Grid.Row="6" Background="#101b2b" BorderBrush="#26384f" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <Grid><CheckBox x:Name="CapabilitiesDiscoveryEnabledCheckbox" Content="Allow capability discovery" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="CapabilitiesSafetyStatusText" Text="Discovery off" FontSize="9" Foreground="#8e9db1" HorizontalAlignment="Right" VerticalAlignment="Center"/></Grid>
+                    <CheckBox x:Name="CapabilitiesMaximumCompatibilityCheckbox" Grid.Row="2" Content="Maximum compatibility (never request capability strings)" Foreground="#b8c5d6"/>
+                    <Grid Grid.Row="4"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                        <TextBlock Text="A pending probe is recorded before every firmware call." Foreground="#75869d" FontSize="9" VerticalAlignment="Center"/>
+                        <Button x:Name="CapabilitiesExcludeCurrentBtn" Grid.Column="2" Content="Exclude selected" Style="{StaticResource Btn}" Padding="10,4" FontSize="9"/>
+                        <Button x:Name="CapabilitiesClearExclusionsBtn" Grid.Column="4" Content="Clear exclusions" Style="{StaticResource Btn}" Padding="10,4" FontSize="9"/>
+                    </Grid>
+                </Grid></Border>
+                <Border Grid.Row="8" Background="#101b2b" BorderBrush="#26384f" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                     <Grid><CheckBox x:Name="AutomationBridgeEnabledCheckbox" Content="Local Automation Bridge" VerticalAlignment="Center"/>
                         <TextBlock x:Name="AutomationBridgeStatusText" Text="Off" FontSize="9" Foreground="#707070" HorizontalAlignment="Right" VerticalAlignment="Center"/></Grid>
@@ -3654,7 +3861,7 @@ try {
                         <Button x:Name="AutomationBridgeSaveBtn" Grid.Column="6" Content="Save" Style="{StaticResource GreenBtn}" Padding="10,4" FontSize="9"/>
                     </Grid>
                 </Grid></Border>
-                <Border Grid.Row="8" Background="#101b2b" BorderBrush="#26384f" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
+                <Border Grid.Row="10" Background="#101b2b" BorderBrush="#26384f" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                         <TextBlock Text="DDC Compatibility Report" FontSize="10" Foreground="#909090" VerticalAlignment="Center"/>
@@ -3749,6 +3956,8 @@ $gammaRedSlider = $window.FindName("GammaRedSlider"); $gammaRedValue = $window.F
 $gammaGreenSlider = $window.FindName("GammaGreenSlider"); $gammaGreenValue = $window.FindName("GammaGreenValue")
 $gammaBlueSlider = $window.FindName("GammaBlueSlider"); $gammaBlueValue = $window.FindName("GammaBlueValue")
 $capabilitiesBox = $window.FindName("CapabilitiesBox"); $ddcReportBox = $window.FindName("DdcReportBox")
+$capabilitiesDiscoveryEnabledCheckbox = $window.FindName("CapabilitiesDiscoveryEnabledCheckbox"); $capabilitiesMaximumCompatibilityCheckbox = $window.FindName("CapabilitiesMaximumCompatibilityCheckbox")
+$capabilitiesSafetyStatusText = $window.FindName("CapabilitiesSafetyStatusText"); $capabilitiesExcludeCurrentBtn = $window.FindName("CapabilitiesExcludeCurrentBtn"); $capabilitiesClearExclusionsBtn = $window.FindName("CapabilitiesClearExclusionsBtn")
 $automationBridgeEnabledCheckbox = $window.FindName("AutomationBridgeEnabledCheckbox"); $automationBridgeStatusText = $window.FindName("AutomationBridgeStatusText")
 $automationBridgeBindBox = $window.FindName("AutomationBridgeBindBox"); $automationBridgePortBox = $window.FindName("AutomationBridgePortBox")
 $automationBridgeKeyBox = $window.FindName("AutomationBridgeKeyBox"); $automationBridgeSaveBtn = $window.FindName("AutomationBridgeSaveBtn")
@@ -3759,6 +3968,44 @@ function Update-Status { param([string]$Message); $statusText.Text = $Message }
 if ($script:PendingStatusMessage) { Update-Status $script:PendingStatusMessage; $script:PendingStatusMessage = "" }
 Initialize-LocalizationAndAccessibility
 Start-DdcWriteResultTimer
+
+function Sync-CapabilitySafetyUi {
+    if ($null -eq $capabilitiesDiscoveryEnabledCheckbox) { return }
+    $script:UpdatingCapabilitiesSafetyUI = $true
+    try {
+        $capabilitiesDiscoveryEnabledCheckbox.IsChecked = [bool]$script:CapabilitiesDiscoveryEnabled
+        $capabilitiesMaximumCompatibilityCheckbox.IsChecked = [bool]$script:CapabilitiesMaximumCompatibility
+        $capabilitiesSafetyStatusText.Text = Get-CapabilitiesSafetyStatusText
+        $capabilitiesClearExclusionsBtn.IsEnabled = $script:CapabilitiesExcludedIdentityKeys.Count -gt 0
+        $canExclude = $false
+        if ($script:PhysicalMonitors.Count -gt 0 -and $script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) {
+            $selected = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
+            $identityKey = [string]$selected.IdentityKey
+            $canExclude = -not [string]::IsNullOrWhiteSpace($identityKey) -and -not $script:CapabilitiesExcludedIdentityKeys.ContainsKey($identityKey)
+        }
+        $capabilitiesExcludeCurrentBtn.IsEnabled = $canExclude
+    } finally {
+        $script:UpdatingCapabilitiesSafetyUI = $false
+    }
+}
+
+function Invoke-CapabilityDiscovery {
+    Stop-CapabilitiesWorker -Cancel
+    foreach ($monitor in @($script:PhysicalMonitors)) {
+        $monitor.Capabilities = ""
+        $monitor.CapabilitiesKnown = $false
+        $monitor.SupportedVcpCodes = @{}
+        $monitor.CapabilitiesPending = $false
+        $monitor.CapabilitiesExcluded = (-not [string]::IsNullOrWhiteSpace([string]$monitor.IdentityKey) -and $script:CapabilitiesExcludedIdentityKeys.ContainsKey([string]$monitor.IdentityKey))
+    }
+    Start-CapabilitiesWorker
+    if ($script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) {
+        $selected = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
+        Update-CapabilitiesBox -Monitor $selected
+        Update-CapabilityControls -Monitor $selected
+    }
+    Sync-CapabilitySafetyUi
+}
 
 function Draw-MonitorLayout {
     $monitorCanvas.Children.Clear()
@@ -3824,6 +4071,7 @@ function Load-MonitorSettings {
         }
         Update-CapabilitiesBox -Monitor $mon
         Update-CapabilityControls -Monitor $mon
+        Sync-CapabilitySafetyUi
         if ($h -eq [IntPtr]::Zero -and $script:WmiBrightnessAvailable) {
             $wmiBrightness = Get-WmiBrightness
             if ($null -ne $wmiBrightness) {
@@ -5492,6 +5740,67 @@ $batteryProfileSaveBtn.Add_Click({
 
 $displaySettingsBtn.Add_Click({ Start-Process "ms-settings:display" }); $colorMgmtBtn.Add_Click({ Start-Process "colorcpl.exe" })
 $gpuControlPanelBtn.Add_Click({ if ($script:HasNvidia) { Start-Process "nvidia-settings" -ErrorAction SilentlyContinue } else { Start-Process "ms-settings:display" } })
+$capabilitiesDiscoveryEnabledCheckbox.Add_Checked({
+    if ($script:UpdatingCapabilitiesSafetyUI) { return }
+    if (-not (Request-CapabilitiesDiscoveryConsent)) {
+        Sync-CapabilitySafetyUi
+        Update-Status "Capability discovery remains disabled"
+        return
+    }
+    $script:CapabilitiesMaximumCompatibility = $false
+    Write-CapabilitySafetyState | Out-Null
+    Invoke-CapabilityDiscovery
+    Update-Status "Capability discovery enabled"
+})
+$capabilitiesDiscoveryEnabledCheckbox.Add_Unchecked({
+    if ($script:UpdatingCapabilitiesSafetyUI) { return }
+    $script:CapabilitiesDiscoveryEnabled = $false
+    Write-CapabilitySafetyState | Out-Null
+    Invoke-CapabilityDiscovery
+    Update-Status "Capability discovery disabled"
+})
+$capabilitiesMaximumCompatibilityCheckbox.Add_Checked({
+    if ($script:UpdatingCapabilitiesSafetyUI) { return }
+    $script:CapabilitiesMaximumCompatibility = $true
+    $script:CapabilitiesDiscoveryEnabled = $false
+    $script:CapabilitiesConsentRecorded = $true
+    Write-CapabilitySafetyState | Out-Null
+    Invoke-CapabilityDiscovery
+    Update-Status "Maximum compatibility enabled; capability strings will not be requested"
+})
+$capabilitiesMaximumCompatibilityCheckbox.Add_Unchecked({
+    if ($script:UpdatingCapabilitiesSafetyUI) { return }
+    $script:CapabilitiesMaximumCompatibility = $false
+    Write-CapabilitySafetyState | Out-Null
+    Invoke-CapabilityDiscovery
+    Update-Status "Maximum compatibility disabled; capability discovery remains off"
+})
+$capabilitiesExcludeCurrentBtn.Add_Click({
+    if ($script:PhysicalMonitors.Count -eq 0 -or $script:CurrentMonitorIndex -ge $script:PhysicalMonitors.Count) { return }
+    $selected = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
+    $identityKey = [string]$selected.IdentityKey
+    if ([string]::IsNullOrWhiteSpace($identityKey)) { return }
+    $script:CapabilitiesExcludedIdentityKeys[$identityKey] = $true
+    Write-CapabilitySafetyState | Out-Null
+    Invoke-CapabilityDiscovery
+    Update-Status "Capability discovery excluded for $(Get-MonitorDisplayLabel -Monitor $selected)"
+})
+$capabilitiesClearExclusionsBtn.Add_Click({
+    if ($script:CapabilitiesExcludedIdentityKeys.Count -eq 0) { return }
+    $result = [System.Windows.MessageBox]::Show(
+        "Clear all capability-discovery exclusions? Previously failing monitors may be probed again if discovery is enabled.",
+        "Clear capability exclusions",
+        [System.Windows.MessageBoxButton]::YesNo,
+        [System.Windows.MessageBoxImage]::Warning
+    )
+    if ($result -ne [System.Windows.MessageBoxResult]::Yes) { return }
+    $script:CapabilitiesExcludedIdentityKeys = @{}
+    $script:CapabilitiesLastIncidentIdentityKey = ""
+    $script:CapabilitiesLastIncidentAt = ""
+    Write-CapabilitySafetyState | Out-Null
+    Invoke-CapabilityDiscovery
+    Update-Status "Capability exclusions cleared"
+})
 $automationBridgeEnabledCheckbox.Add_Checked({
     if ($script:UpdatingAutomationBridgeUI) { return }
     if (-not (Read-AutomationBridgeSettingsFromUI)) { $automationBridgeEnabledCheckbox.IsChecked = $false; return }
@@ -5555,19 +5864,30 @@ function Update-GpuStats {
 }
 
 # Initialize
-Initialize-WmiBrightness; Load-MonitorIdentitySettings; Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Load-MonitorSettings; Start-CapabilitiesWorker; Update-ProfilesList
+Initialize-WmiBrightness; Load-MonitorIdentitySettings; Import-CapabilitySafetyState; Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList
 Load-AppProfileRules; Update-AppProfileControls; Start-AppProfileWatcher
 Load-ProfileSchedules; Update-ScheduleControls; Start-ProfileScheduleWatcher
 Load-IdleDimSettings; Update-IdleDimControls; Start-IdleDimWatcher
 Load-BatteryProfileSettings; Update-BatteryProfileControls; Start-BatteryProfileWatcher
 Load-AutomationBridgeSettings; Update-AutomationBridgeControls; Start-AutomationBridge
 Update-ProfileStorageControls
+Sync-CapabilitySafetyUi
 if (-not ($script:HasNvidia -or $script:HasAmd -or $script:HasCpuTempMonitor)) { $gpuTab.Visibility = "Collapsed" } else {
     $script:GpuTimer = New-Object System.Windows.Threading.DispatcherTimer; $script:GpuTimer.Interval = [TimeSpan]::FromSeconds(2)
     $script:GpuTimer.Add_Tick({ Update-GpuStats }); $script:GpuTimer.Start(); Update-GpuStats
 }
 
 Initialize-TrayIcon
+
+$window.Add_ContentRendered({
+    if ($script:CapabilitiesConsentPromptHandled) { return }
+    $script:CapabilitiesConsentPromptHandled = $true
+    if (-not $script:CapabilitiesConsentRecorded -and -not $script:CapabilitiesMaximumCompatibility) {
+        Request-CapabilitiesDiscoveryConsent | Out-Null
+    }
+    Sync-CapabilitySafetyUi
+    Start-CapabilitiesWorker
+})
 
 $window.Add_StateChanged({
     if ($script:TraySuppressWindowStateEvent -or $script:IsQuitting) { return }

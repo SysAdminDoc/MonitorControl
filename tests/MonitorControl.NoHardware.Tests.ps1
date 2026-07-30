@@ -35,6 +35,12 @@ BeforeAll {
         "Test-MonitorSupportsVcpValue",
         "ConvertTo-VcpCode",
         "ConvertTo-VcpValue",
+        "Get-CapabilitiesSafetySettingsObject",
+        "Write-CapabilitySafetyState",
+        "Import-CapabilitySafetyState",
+        "Test-CapabilityProbeAllowed",
+        "Get-CapabilitiesSafetyStatusText",
+        "Start-CapabilitiesWorker",
         "Normalize-ScheduleTime",
         "Get-ScheduleMinutes",
         "Get-ActiveScheduleRule",
@@ -120,6 +126,68 @@ Describe "Monitor capabilities parsing" {
         Test-MonitorSupportsVcp -Monitor $monitor -Code 0xD6 | Should -BeFalse
         Test-MonitorSupportsVcpValue -Monitor $monitor -Code 0x60 -Value 0x11 | Should -BeTrue
         Test-MonitorSupportsVcpValue -Monitor $monitor -Code 0x60 -Value 0x13 | Should -BeFalse
+    }
+}
+
+Describe "Capability discovery safety" {
+    BeforeEach {
+        $script:CapabilitiesSafetySchemaVersion = 1
+        $script:CapabilitiesSafetySettingsPath = Join-Path $TestDrive "capabilities-safety.json"
+        $script:CapabilitiesProbeSentinelPath = Join-Path $TestDrive "capabilities-probe-pending.json"
+        $script:CapabilitiesConsentRecorded = $false
+        $script:CapabilitiesDiscoveryEnabled = $false
+        $script:CapabilitiesMaximumCompatibility = $false
+        $script:CapabilitiesExcludedIdentityKeys = @{}
+        $script:CapabilitiesLastIncidentIdentityKey = ""
+        $script:CapabilitiesLastIncidentAt = ""
+        Get-ChildItem -LiteralPath $TestDrive -Force | Remove-Item -Recurse -Force
+    }
+
+    It "fails closed until consent and honors maximum compatibility and exclusions" {
+        $monitor = [pscustomobject]@{ Handle = [IntPtr]1; IdentityKey = "edid:test-monitor" }
+
+        Test-CapabilityProbeAllowed -Monitor $monitor | Should -BeFalse
+        $script:CapabilitiesDiscoveryEnabled = $true
+        Test-CapabilityProbeAllowed -Monitor $monitor | Should -BeTrue
+        $script:CapabilitiesExcludedIdentityKeys[$monitor.IdentityKey] = $true
+        Test-CapabilityProbeAllowed -Monitor $monitor | Should -BeFalse
+        $script:CapabilitiesExcludedIdentityKeys = @{}
+        $script:CapabilitiesMaximumCompatibility = $true
+        Test-CapabilityProbeAllowed -Monitor $monitor | Should -BeFalse
+    }
+
+    It "disables discovery and excludes the pending identity after an interrupted probe" {
+        Set-Content -LiteralPath $script:CapabilitiesSafetySettingsPath -Encoding UTF8 -Value '{"SchemaVersion":1,"ConsentRecorded":true,"DiscoveryEnabled":true,"MaximumCompatibility":false,"ExcludedIdentityKeys":[]}'
+        Set-Content -LiteralPath $script:CapabilitiesProbeSentinelPath -Encoding UTF8 -Value '{"SchemaVersion":1,"IdentityKey":"edid:crash-monitor","MonitorName":"Test","StartedAtUtc":"2026-07-29T12:00:00.0000000Z"}'
+
+        Import-CapabilitySafetyState
+
+        $script:CapabilitiesDiscoveryEnabled | Should -BeFalse
+        $script:CapabilitiesConsentRecorded | Should -BeTrue
+        $script:CapabilitiesExcludedIdentityKeys.ContainsKey("edid:crash-monitor") | Should -BeTrue
+        Test-Path -LiteralPath $script:CapabilitiesProbeSentinelPath | Should -BeFalse
+        (Get-Content -LiteralPath $script:CapabilitiesSafetySettingsPath -Raw | ConvertFrom-Json).LastIncidentIdentityKey | Should -Be "edid:crash-monitor"
+    }
+
+    It "uses maximum compatibility for unknown future settings" {
+        Set-Content -LiteralPath $script:CapabilitiesSafetySettingsPath -Encoding UTF8 -Value '{"SchemaVersion":99,"ConsentRecorded":true,"DiscoveryEnabled":true,"MaximumCompatibility":false}'
+
+        Import-CapabilitySafetyState
+
+        $script:CapabilitiesDiscoveryEnabled | Should -BeFalse
+        $script:CapabilitiesMaximumCompatibility | Should -BeTrue
+        Get-CapabilitiesSafetyStatusText | Should -Match "Maximum compatibility"
+    }
+
+    It "persists the crash sentinel before invoking monitor firmware" {
+        $definition = (Get-Command Start-CapabilitiesWorker).Definition
+        $markerIndex = $definition.IndexOf('[System.IO.File]::Move($sentinelTempPath, $SentinelPath)')
+        $firmwareIndex = $definition.IndexOf('[MonitorAPI]::GetCapabilitiesStringLength')
+
+        $markerIndex | Should -BeGreaterThan -1
+        $firmwareIndex | Should -BeGreaterThan $markerIndex
+        $definition | Should -Match 'finally\s*\{'
+        $definition | Should -Match 'Remove-Item -LiteralPath \$SentinelPath'
     }
 }
 
