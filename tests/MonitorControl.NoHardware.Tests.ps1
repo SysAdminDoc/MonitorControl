@@ -1,4 +1,5 @@
 BeforeAll {
+    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
     $script:RepoRoot = Split-Path -Parent $PSScriptRoot
     $script:AppPath = Join-Path $script:RepoRoot "MonitorControlPro.ps1"
 
@@ -21,6 +22,8 @@ BeforeAll {
         $script:LastStatusMessage = $Message
     }
 
+    function Update-ProfilesList {}
+
     Import-MonitorControlFunctions -Name @(
         "Set-DeferredStatus",
         "Test-JsonFileValid",
@@ -28,6 +31,25 @@ BeforeAll {
         "Read-JsonFileSafely",
         "Write-JsonFileSafely",
         "Get-SafeProfileName",
+        "Get-UserProfileFiles",
+        "Get-ProfilePropertyValue",
+        "Get-ProfileIntValue",
+        "ConvertTo-CurrentProfileSchema",
+        "Save-ProfileObject",
+        "Read-ProfileObject",
+        "Test-ProfileBundleEntryPath",
+        "Read-ProfileBundleEntryContent",
+        "Get-ByteSha256Hex",
+        "Get-FileSha256Hex",
+        "Test-ProfileBundleIntegerValue",
+        "Test-ProfileBundleTextValue",
+        "Test-ProfileBundleNumberProperty",
+        "Test-ImportedProfileObject",
+        "Get-ProfileBundleImportPlan",
+        "Format-ProfileBundleImportPreview",
+        "Invoke-ProfileBundleImportCommit",
+        "Export-ProfileBundle",
+        "Import-ProfileBundle",
         "Get-CapabilitiesSection",
         "Get-HexTokens",
         "ConvertFrom-MonitorCapabilities",
@@ -197,6 +219,89 @@ BeforeAll {
             $client.Close()
         }
     }
+
+    function New-TestProfilePayload {
+        param([string]$Name, $Brightness = 50)
+        return [PSCustomObject]@{
+            SchemaVersion = 3
+            Name = $Name
+            MonitorIdentityKey = "edid:test"
+            MonitorLabel = "Test display"
+            MonitorName = "Test monitor"
+            MonitorDevicePath = "DISPLAY\TEST"
+            MonitorSettings = @()
+            Brightness = $Brightness
+            Contrast = 50
+            Red = 50
+            Green = 50
+            Blue = 50
+            Gamma = 100
+            GammaRed = 100
+            GammaGreen = 100
+            GammaBlue = 100
+            UpdatedAt = "2026-07-29T12:00:00Z"
+        }
+    }
+
+    function Add-TestZipTextEntry {
+        param($Archive, [string]$Name, [string]$Text)
+        $entry = $Archive.CreateEntry($Name, [System.IO.Compression.CompressionLevel]::Optimal)
+        $stream = $entry.Open()
+        try {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
+            $stream.Write($bytes, 0, $bytes.Length)
+        } finally {
+            $stream.Dispose()
+        }
+        return $entry
+    }
+
+    function New-TestProfileBundle {
+        param(
+            [string]$Path,
+            [System.Collections.IDictionary]$Profiles,
+            $ManifestOverride = $null,
+            [System.Collections.IDictionary]$ExtraEntries = $null
+        )
+        if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Force }
+        $archive = [System.IO.Compression.ZipFile]::Open($Path, [System.IO.Compression.ZipArchiveMode]::Create)
+        try {
+            $declarations = @()
+            foreach ($name in $Profiles.Keys) {
+                $profile = $Profiles[$name]
+                $text = if ($profile -is [string]) { $profile } else { (($profile | ConvertTo-Json -Depth 6) + [Environment]::NewLine) }
+                $bytes = [System.Text.Encoding]::UTF8.GetBytes($text)
+                Add-TestZipTextEntry -Archive $archive -Name "profiles/$name.json" -Text $text | Out-Null
+                $declarations += [PSCustomObject]@{
+                    Name = [string]$name
+                    File = "profiles/$name.json"
+                    Sha256 = Get-ByteSha256Hex -Bytes $bytes
+                    UncompressedBytes = $bytes.Length
+                }
+            }
+            $manifest = if ($null -ne $ManifestOverride) {
+                $ManifestOverride
+            } else {
+                [PSCustomObject]@{
+                    BundleSchemaVersion = 2
+                    AppVersion = "3.34.0"
+                    ProfileSchemaVersion = 3
+                    ExportedAt = "2026-07-29T12:00:00Z"
+                    ProfileCount = $declarations.Count
+                    Profiles = @($declarations)
+                }
+            }
+            Add-TestZipTextEntry -Archive $archive -Name "manifest.json" -Text (($manifest | ConvertTo-Json -Depth 6) + [Environment]::NewLine) | Out-Null
+            if ($null -ne $ExtraEntries) {
+                foreach ($name in $ExtraEntries.Keys) {
+                    Add-TestZipTextEntry -Archive $archive -Name ([string]$name) -Text ([string]$ExtraEntries[$name]) | Out-Null
+                }
+            }
+        } finally {
+            $archive.Dispose()
+        }
+        return $Path
+    }
 }
 
 Describe "Profile filename validation" {
@@ -212,6 +317,7 @@ Describe "Profile filename validation" {
         Get-SafeProfileName -Name "..\Night" | Should -Be ""
         Get-SafeProfileName -Name "Night:Mode" | Should -Be ""
         Get-SafeProfileName -Name "Night." | Should -Be ""
+        Get-SafeProfileName -Name "CON.json" | Should -Be ""
         Get-SafeProfileName -Name "automation-bridge.json" | Should -Be ""
     }
 }
@@ -246,6 +352,167 @@ Describe "Safe JSON storage" {
         $saved.Brightness | Should -Be 72
         $saved.Contrast | Should -Be 48
         @(Get-ChildItem -LiteralPath $TestDrive -Filter "profile.json.corrupt-*").Count | Should -Be 1
+    }
+}
+
+Describe "Transactional profile bundle import" {
+    BeforeEach {
+        Get-ChildItem -LiteralPath $TestDrive -Force | Remove-Item -Recurse -Force
+        $script:ProfilesPath = Join-Path $TestDrive "profiles"
+        $script:ProfileExportsPath = Join-Path $TestDrive "exports"
+        New-Item -ItemType Directory -Path $script:ProfilesPath -Force | Out-Null
+        $script:ProfileSchemaVersion = 3
+        $script:ProfileBundleSchemaVersion = 2
+        $script:ProfileBundleMaxProfiles = 100
+        $script:ProfileBundleMaxArchiveBytes = 16777216
+        $script:ProfileBundleMaxManifestBytes = 65536
+        $script:ProfileBundleMaxEntryBytes = 262144
+        $script:ProfileBundleMaxTotalBytes = 10485760
+        $script:ProfileBundleMaxCompressionRatio = 100
+        $script:ProfileBundleMaxMonitorSettings = 32
+        $script:ProfileMetadataFiles = @("profile-storage.json", "automation-bridge.json")
+        $script:LastStatusMessage = ""
+    }
+
+    It "plans creates and replacements and can skip conflicts explicitly" {
+        $alphaPath = Join-Path $script:ProfilesPath "Alpha.json"
+        [System.IO.File]::WriteAllText($alphaPath, '{"original":"alpha"}', [System.Text.Encoding]::UTF8)
+        $originalAlpha = [System.IO.File]::ReadAllBytes($alphaPath)
+        $bundlePath = Join-Path $TestDrive "valid.zip"
+        New-TestProfileBundle -Path $bundlePath -Profiles ([ordered]@{
+            Alpha = New-TestProfilePayload -Name "Alpha" -Brightness 70
+            Beta = New-TestProfilePayload -Name "Beta" -Brightness 40
+        }) | Out-Null
+
+        $plan = Get-ProfileBundleImportPlan -BundlePath $bundlePath
+
+        $plan.Valid | Should -BeTrue -Because "$($plan.ErrorCode): $($plan.Message)"
+        @($plan.Items | Where-Object Action -eq "Create").Name | Should -Be "Beta"
+        @($plan.Items | Where-Object Action -eq "Replace").Name | Should -Be "Alpha"
+        $skipPreview = Format-ProfileBundleImportPreview -Plan $plan -ConflictMode Skip
+        $skipPreview | Should -Match "Create \(1\): Beta"
+        $skipPreview | Should -Match "Skip \(1\): Alpha"
+        Import-ProfileBundle -BundlePath $bundlePath -ConflictMode Skip | Should -Be 1
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($alphaPath)) | Should -Be ([Convert]::ToBase64String($originalAlpha))
+        (Get-Content -LiteralPath (Join-Path $script:ProfilesPath "Beta.json") -Raw | ConvertFrom-Json).Name | Should -Be "Beta"
+        Import-ProfileBundle -BundlePath $bundlePath -ConflictMode Replace | Should -Be 2
+        (Get-Content -LiteralPath $alphaPath -Raw | ConvertFrom-Json).Brightness | Should -Be 70
+    }
+
+    It "exports a manifest-declared checksummed bundle that round-trips through validation" {
+        foreach ($name in @("Alpha", "Beta")) {
+            $profile = New-TestProfilePayload -Name $name
+            [System.IO.File]::WriteAllText(
+                (Join-Path $script:ProfilesPath "$name.json"),
+                (($profile | ConvertTo-Json -Depth 6) + [Environment]::NewLine),
+                [System.Text.Encoding]::UTF8
+            )
+        }
+        $bundlePath = Join-Path $TestDrive "exported.zip"
+
+        Export-ProfileBundle -OutputPath $bundlePath | Should -Be $bundlePath
+        $script:ProfilesPath = Join-Path $TestDrive "empty-destination"
+        New-Item -ItemType Directory -Path $script:ProfilesPath -Force | Out-Null
+        $plan = Get-ProfileBundleImportPlan -BundlePath $bundlePath
+
+        $plan.Valid | Should -BeTrue -Because "$($plan.ErrorCode): $($plan.Message)"
+        $plan.BundleSchemaVersion | Should -Be 2
+        $plan.Items.Count | Should -Be 2
+        @($plan.Items | Where-Object Action -eq "Create").Count | Should -Be 2
+    }
+
+    It "rejects path traversal and undeclared archive files" {
+        $profile = New-TestProfilePayload -Name "Alpha"
+        $traversalPath = Join-Path $TestDrive "traversal.zip"
+        New-TestProfileBundle -Path $traversalPath -Profiles ([ordered]@{ Alpha = $profile }) -ExtraEntries ([ordered]@{ "../outside.json" = "{}" }) | Out-Null
+        $undeclaredPath = Join-Path $TestDrive "undeclared.zip"
+        New-TestProfileBundle -Path $undeclaredPath -Profiles ([ordered]@{ Alpha = $profile }) -ExtraEntries ([ordered]@{ "profiles/Extra.json" = "{}" }) | Out-Null
+
+        (Get-ProfileBundleImportPlan -BundlePath $traversalPath).ErrorCode | Should -Be "unsafe_entry_path"
+        (Get-ProfileBundleImportPlan -BundlePath $undeclaredPath).ErrorCode | Should -Be "undeclared_entry"
+        Test-Path -LiteralPath (Join-Path $TestDrive "outside.json") | Should -BeFalse
+    }
+
+    It "rejects duplicate destinations and unsupported schemas" {
+        $duplicateManifest = [PSCustomObject]@{
+            BundleSchemaVersion = 2
+            ProfileSchemaVersion = 3
+            ProfileCount = 2
+            Profiles = @(
+                [PSCustomObject]@{ Name = "Alpha"; File = "profiles/Alpha.json"; Sha256 = ("0" * 64); UncompressedBytes = 1 },
+                [PSCustomObject]@{ Name = "Alpha"; File = "profiles/Alpha.json"; Sha256 = ("0" * 64); UncompressedBytes = 1 }
+            )
+        }
+        $duplicatePath = Join-Path $TestDrive "duplicate.zip"
+        New-TestProfileBundle -Path $duplicatePath -Profiles ([ordered]@{ Alpha = New-TestProfilePayload -Name "Alpha" }) -ManifestOverride $duplicateManifest | Out-Null
+        $futureManifest = [PSCustomObject]@{
+            BundleSchemaVersion = 99
+            ProfileSchemaVersion = 3
+            ProfileCount = 0
+            Profiles = @()
+        }
+        $futurePath = Join-Path $TestDrive "future.zip"
+        New-TestProfileBundle -Path $futurePath -Profiles ([ordered]@{}) -ManifestOverride $futureManifest | Out-Null
+
+        (Get-ProfileBundleImportPlan -BundlePath $duplicatePath).ErrorCode | Should -Be "duplicate_destination"
+        (Get-ProfileBundleImportPlan -BundlePath $futurePath).ErrorCode | Should -Be "unsupported_bundle_schema"
+    }
+
+    It "rejects invalid profile types and out-of-range values" {
+        $badType = New-TestProfilePayload -Name "BadType" -Brightness "50"
+        $badRange = New-TestProfilePayload -Name "BadRange" -Brightness 101
+        $typePath = Join-Path $TestDrive "bad-type.zip"
+        $rangePath = Join-Path $TestDrive "bad-range.zip"
+        New-TestProfileBundle -Path $typePath -Profiles ([ordered]@{ BadType = $badType }) | Out-Null
+        New-TestProfileBundle -Path $rangePath -Profiles ([ordered]@{ BadRange = $badRange }) | Out-Null
+
+        (Get-ProfileBundleImportPlan -BundlePath $typePath).ErrorCode | Should -Be "invalid_profile"
+        (Get-ProfileBundleImportPlan -BundlePath $rangePath).ErrorCode | Should -Be "invalid_profile"
+    }
+
+    It "enforces archive size, entry count, and compression-ratio limits" {
+        $profile = New-TestProfilePayload -Name "Alpha"
+        $sizePath = Join-Path $TestDrive "size.zip"
+        New-TestProfileBundle -Path $sizePath -Profiles ([ordered]@{ Alpha = $profile }) | Out-Null
+        $script:ProfileBundleMaxArchiveBytes = 10
+        (Get-ProfileBundleImportPlan -BundlePath $sizePath).ErrorCode | Should -Be "archive_too_large"
+        $script:ProfileBundleMaxArchiveBytes = 16777216
+
+        $manyEntries = [ordered]@{}
+        1..103 | ForEach-Object { $manyEntries["extra-$_.txt"] = "x" }
+        $countPath = Join-Path $TestDrive "count.zip"
+        New-TestProfileBundle -Path $countPath -Profiles ([ordered]@{}) -ExtraEntries $manyEntries | Out-Null
+        (Get-ProfileBundleImportPlan -BundlePath $countPath).ErrorCode | Should -Be "too_many_entries"
+
+        $ratioPath = Join-Path $TestDrive "ratio.zip"
+        New-TestProfileBundle -Path $ratioPath -Profiles ([ordered]@{}) -ExtraEntries ([ordered]@{ "payload.bin" = ("A" * 200000) }) | Out-Null
+        (Get-ProfileBundleImportPlan -BundlePath $ratioPath).ErrorCode | Should -Be "entry_limit"
+    }
+
+    It "rolls back byte-for-byte when a staged commit fails" {
+        $alphaPath = Join-Path $script:ProfilesPath "Alpha.json"
+        $betaPath = Join-Path $script:ProfilesPath "Beta.json"
+        [System.IO.File]::WriteAllText($alphaPath, "original-alpha-bytes", [System.Text.Encoding]::UTF8)
+        [System.IO.File]::WriteAllText($betaPath, "original-beta-bytes", [System.Text.Encoding]::UTF8)
+        $alphaBefore = [System.IO.File]::ReadAllBytes($alphaPath)
+        $betaBefore = [System.IO.File]::ReadAllBytes($betaPath)
+        $bundlePath = Join-Path $TestDrive "rollback.zip"
+        New-TestProfileBundle -Path $bundlePath -Profiles ([ordered]@{
+            Alpha = New-TestProfilePayload -Name "Alpha" -Brightness 10
+            Beta = New-TestProfilePayload -Name "Beta" -Brightness 90
+        }) | Out-Null
+        $plan = Get-ProfileBundleImportPlan -BundlePath $bundlePath
+
+        $result = Invoke-ProfileBundleImportCommit -Plan $plan -ConflictMode Replace -AfterCommit {
+            param($count, $item)
+            if ($count -eq 1) { throw "simulated commit failure" }
+        }
+
+        $result.Success | Should -BeFalse
+        $result.ErrorCode | Should -Be "commit_failed"
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($alphaPath)) | Should -Be ([Convert]::ToBase64String($alphaBefore))
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($betaPath)) | Should -Be ([Convert]::ToBase64String($betaBefore))
+        @(Get-ChildItem -LiteralPath $script:ProfilesPath -Directory -Filter ".profile-import-*").Count | Should -Be 0
     }
 }
 
