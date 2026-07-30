@@ -4,6 +4,8 @@ All notable changes to MonitorControl will be documented in this file.
 
 ## [Unreleased]
 
+- Added: pinned Windows PowerShell 5.1 verification with Pester 5.8.0, PSScriptAnalyzer 1.25.0, an isolated WPF UI Automation smoke test, and an unsigned release build.
+- Added: regression coverage for every legacy profile schema, deterministic same-time schedule precedence, unique native-handle cleanup, and future-schema rejection.
 - Added: one debounced display recovery pipeline for display, device, resume, and WMI brightness events, with per-identity fresh, stale, retrying, and offline status.
 - Changed: monitor settings, capability, VCP Explorer, and DDC report workers now reject obsolete generations and mismatched stable identities before publishing results.
 - Added: per-monitor DDC failure backoff, adaptive read retries, last-success diagnostics, and no-hardware reconnect regression coverage.

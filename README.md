@@ -125,7 +125,17 @@ The release builder writes an unsigned `dist\MonitorControlPro-vX.Y.Z.zip` and i
 .\tools\run-tests.ps1
 ```
 
-The Pester suite imports only selected pure function definitions from `MonitorControlPro.ps1`, so it does not enumerate displays, open the WPF app, or require DDC/CI hardware.
+The deterministic suite requires Pester 5.8.0 and imports only selected function definitions from `MonitorControlPro.ps1`, so it does not enumerate displays, open the WPF app, or require DDC/CI hardware.
+
+### Run the Full Windows Verification Lane
+```powershell
+# Run from Windows PowerShell 5.1
+Install-Module Pester -RequiredVersion 5.8.0 -Scope CurrentUser
+Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser
+.\tools\verify.ps1
+```
+
+This is the same pinned lane used by CI. It gates static-analysis errors, deterministic protocol/persistence/concurrency tests, an isolated UI Automation launch/navigation/close smoke test, and an unsigned portable ZIP build. The WPF smoke test redirects `APPDATA` and `LOCALAPPDATA` to a disposable directory and verifies that the real `%APPDATA%\MonitorControlPro` tree is unchanged.
 
 ## Usage
 

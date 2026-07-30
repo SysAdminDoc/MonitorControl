@@ -1841,13 +1841,22 @@ function Wait-DdcWriteQueueIdle {
 }
 
 function Clear-PhysicalMonitorHandles {
-    param([switch]$ClearList)
+    param(
+        [switch]$ClearList,
+        [scriptblock]$DestroyHandle
+    )
+    if ($null -eq $DestroyHandle) {
+        $DestroyHandle = {
+            param([IntPtr]$Handle)
+            [MonitorAPI]::DestroyPhysicalMonitor($Handle) | Out-Null
+        }
+    }
     $seen = @{}
     foreach ($mon in @($script:PhysicalMonitors)) {
         if ($null -eq $mon -or $mon.Handle -eq [IntPtr]::Zero) { continue }
         $key = $mon.Handle.ToInt64()
         if (-not $seen.ContainsKey($key)) {
-            try { [MonitorAPI]::DestroyPhysicalMonitor($mon.Handle) | Out-Null } catch {}
+            try { & $DestroyHandle $mon.Handle } catch {}
             $seen[$key] = $true
         }
         try { $mon.Handle = [IntPtr]::Zero } catch {}
@@ -5919,6 +5928,9 @@ function New-ProfileObject {
 
 function ConvertTo-CurrentProfileSchema {
     param($Profile, [string]$FallbackName)
+    $schema = if ($Profile.PSObject.Properties.Name -contains "SchemaVersion") { [int]$Profile.SchemaVersion } else { 1 }
+    if ($schema -lt 1) { throw "Profile schema version must be at least 1" }
+    if ($schema -gt $script:ProfileSchemaVersion) { throw "Profile schema v$schema is newer than this app" }
     $name = if (Get-ProfilePropertyValue -Object $Profile -Property "Name" -Default "") { [string]$Profile.Name } else { $FallbackName }
     $topSetting = [PSCustomObject]@{
         IdentityKey = [string](Get-ProfilePropertyValue -Object $Profile -Property "MonitorIdentityKey" -Default "")
@@ -7293,11 +7305,11 @@ function Normalize-AppExeName {
 function Get-ForegroundProcessExe {
     $hwnd = [MonitorAPI]::GetForegroundWindow()
     if ($hwnd -eq [IntPtr]::Zero) { return $null }
-    $pid = [uint32]0
-    [MonitorAPI]::GetWindowThreadProcessId($hwnd, [ref]$pid) | Out-Null
-    if ($pid -eq 0) { return $null }
+    $processId = [uint32]0
+    [MonitorAPI]::GetWindowThreadProcessId($hwnd, [ref]$processId) | Out-Null
+    if ($processId -eq 0) { return $null }
     try {
-        $process = Get-Process -Id $pid -ErrorAction Stop
+        $process = Get-Process -Id $processId -ErrorAction Stop
         return (Normalize-AppExeName -ExeName "$($process.ProcessName).exe")
     } catch {
         return $null
@@ -7688,9 +7700,19 @@ function Get-ActiveScheduleRule {
     if ($script:ProfileSchedules.Count -eq 0) { return $null }
     $now = $Now
     $nowMinutes = ($now.Hour * 60) + $now.Minute
-    $ordered = @($script:ProfileSchedules | Sort-Object @{ Expression = { Get-ScheduleMinutes -TimeText $_.Time } })
-    $due = @($ordered | Where-Object { (Get-ScheduleMinutes -TimeText $_.Time) -le $nowMinutes })
-    $rule = if ($due.Count -gt 0) { $due[-1] } else { $ordered[-1] }
+    $indexed = @(
+        for ($index = 0; $index -lt $script:ProfileSchedules.Count; $index++) {
+            [PSCustomObject]@{
+                Rule = $script:ProfileSchedules[$index]
+                Minutes = Get-ScheduleMinutes -TimeText $script:ProfileSchedules[$index].Time
+                DeclarationOrder = $index
+            }
+        }
+    )
+    $ordered = @($indexed | Sort-Object Minutes, DeclarationOrder)
+    $due = @($ordered | Where-Object { $_.Minutes -le $nowMinutes })
+    $selected = if ($due.Count -gt 0) { $due[-1] } else { $ordered[-1] }
+    $rule = $selected.Rule
     $effectiveDate = if ($due.Count -gt 0) { $now.ToString("yyyy-MM-dd") } else { $now.AddDays(-1).ToString("yyyy-MM-dd") }
     return [PSCustomObject]@{ Rule = $rule; Key = "$effectiveDate $($rule.Time)|$($rule.Profile)" }
 }
