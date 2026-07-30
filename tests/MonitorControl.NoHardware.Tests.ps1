@@ -67,6 +67,7 @@ BeforeAll {
         "Get-DisplayRecoveryReadRetryCount",
         "Get-DisplayRecoveryTransition",
         "Test-DisplayWorkerResultCurrent",
+        "Clear-PhysicalMonitorHandles",
         "Test-MonitorSupportsVcp",
         "Test-MonitorSupportsVcpValue",
         "ConvertTo-VcpCode",
@@ -345,6 +346,63 @@ Describe "Profile filename validation" {
         Get-SafeProfileName -Name "CON.json" | Should -Be ""
         Get-SafeProfileName -Name "automation-bridge.json" | Should -Be ""
         Get-SafeProfileName -Name "vcp-write-safety.json" | Should -Be ""
+    }
+}
+
+Describe "Profile schema migration" {
+    BeforeEach {
+        $script:ProfileSchemaVersion = 3
+    }
+
+    It "migrates every supported legacy schema to schema v3" {
+        $fixtures = @(
+            [PSCustomObject]@{
+                Name = "Legacy v1"
+                MonitorIdentityKey = "edid:v1"
+                MonitorName = "Legacy display"
+                Brightness = 42
+                Contrast = 43
+                Red = 44
+                Green = 45
+                Blue = 46
+                Gamma = 101
+            },
+            [PSCustomObject]@{
+                SchemaVersion = 2
+                Name = "Legacy v2"
+                MonitorIdentityKey = "edid:v2"
+                MonitorSettings = @(
+                    [PSCustomObject]@{
+                        IdentityKey = "edid:v2"
+                        MonitorName = "Schema two display"
+                        Brightness = 62
+                        Contrast = 63
+                        Red = 64
+                        Green = 65
+                        Blue = 66
+                        Gamma = 102
+                    }
+                )
+            }
+        )
+
+        $migrated = @($fixtures | ForEach-Object {
+            ConvertTo-CurrentProfileSchema -Profile $_ -FallbackName "Fallback"
+        })
+
+        @($migrated.SchemaVersion) | Should -Be @(3, 3)
+        $migrated[0].MonitorSettings.Count | Should -Be 1
+        $migrated[0].MonitorSettings[0].IdentityKey | Should -Be "edid:v1"
+        $migrated[1].MonitorSettings.Count | Should -Be 1
+        $migrated[1].MonitorSettings[0].Brightness | Should -Be 62
+        $migrated[1].MonitorSettings[0].GammaRed | Should -Be 100
+    }
+
+    It "rejects invalid and future profile schemas instead of rewriting them" {
+        { ConvertTo-CurrentProfileSchema -Profile ([PSCustomObject]@{ SchemaVersion = 0; Name = "Invalid" }) -FallbackName "Invalid" } |
+            Should -Throw "*at least 1*"
+        { ConvertTo-CurrentProfileSchema -Profile ([PSCustomObject]@{ SchemaVersion = 99; Name = "Future" }) -FallbackName "Future" } |
+            Should -Throw "*newer than this app*"
     }
 }
 
@@ -759,6 +817,40 @@ Describe "Display recovery generation and identity safety" {
         $source | Should -Match 'WmiMonitorBrightnessEvent'
         $source | Should -Match 'Request-DisplayRecoveryRefresh -Reason \$reason'
         $source | Should -Match '\$script:DisplayRecoveryGeneration\+\+'
+    }
+}
+
+Describe "Physical monitor handle cleanup" {
+    BeforeEach {
+        $script:DestroyedHandleValues = @()
+        $script:PhysicalMonitors = @(
+            [PSCustomObject]@{ Name = "First"; Handle = [IntPtr]101 },
+            [PSCustomObject]@{ Name = "Duplicate"; Handle = [IntPtr]101 },
+            [PSCustomObject]@{ Name = "Second"; Handle = [IntPtr]202 },
+            [PSCustomObject]@{ Name = "No handle"; Handle = [IntPtr]::Zero }
+        )
+    }
+
+    It "destroys each unique native handle once and zeros every alias" {
+        Clear-PhysicalMonitorHandles -ClearList -DestroyHandle {
+            param([IntPtr]$Handle)
+            $script:DestroyedHandleValues += $Handle.ToInt64()
+        }
+
+        @($script:DestroyedHandleValues) | Should -Be @(101, 202)
+        $script:PhysicalMonitors.Count | Should -Be 0
+    }
+
+    It "continues zeroing handles when a native destroy call fails" {
+        $monitors = $script:PhysicalMonitors
+        Clear-PhysicalMonitorHandles -DestroyHandle {
+            param([IntPtr]$Handle)
+            if ($Handle.ToInt64() -eq 101) { throw "injected destroy failure" }
+            $script:DestroyedHandleValues += $Handle.ToInt64()
+        }
+
+        @($script:DestroyedHandleValues) | Should -Be @(202)
+        @($monitors | Where-Object { $_.Handle -ne [IntPtr]::Zero }).Count | Should -Be 0
     }
 }
 
@@ -1220,7 +1312,7 @@ Describe "VCP parser helpers" {
     }
 }
 
-Describe "Scheduled profile rollover" {
+Describe "Scheduled profile rule precedence and rollover" {
     BeforeEach {
         $script:ProfileSchedules = @(
             [pscustomobject]@{ Time = "06:30"; Profile = "Morning" },
@@ -1247,6 +1339,15 @@ Describe "Scheduled profile rollover" {
 
         $active.Rule.Profile | Should -Be "Work"
         $active.Key | Should -Be "2026-07-01 12:00|Work"
+    }
+
+    It "gives the later declaration precedence when rules share a boundary" {
+        $script:ProfileSchedules += [pscustomobject]@{ Time = "12:00"; Profile = "Meeting" }
+
+        $active = Get-ActiveScheduleRule -Now ([datetime]"2026-07-01T12:30:00")
+
+        $active.Rule.Profile | Should -Be "Meeting"
+        $active.Key | Should -Be "2026-07-01 12:00|Meeting"
     }
 }
 
