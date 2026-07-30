@@ -737,7 +737,23 @@ $script:AutomationBridgeBindAddress = "127.0.0.1"
 $script:AutomationBridgePort = 34291
 $script:AutomationBridgeApiKey = ""
 $script:AutomationBridgeMqttEnabled = $false
+$script:AutomationBridgeSettingsSchemaVersion = 2
+$script:AutomationBridgeNetworkExposureApproved = $false
+$script:AutomationBridgeNetworkExposureApprovedFor = ""
+$script:AutomationBridgeLastError = ""
+$script:AutomationBridgeMaxRequestLineBytes = 2048
+$script:AutomationBridgeMaxHeaderBytes = 8192
+$script:AutomationBridgeMaxHeaderCount = 32
+$script:AutomationBridgeMaxQueryParameterCount = 32
+$script:AutomationBridgeMaxBodyBytes = 65536
+$script:AutomationBridgeMaxResponseBytes = 262144
+$script:AutomationBridgeMaxConcurrentClients = 4
+$script:AutomationBridgeReadTimeoutMs = 5000
+$script:AutomationBridgeWriteTimeoutMs = 5000
+$script:AutomationBridgeRouteTimeoutMs = 10000
+$script:AutomationBridgeAuditLogMaxBytes = 1048576
 $script:AutomationBridgeAllowedCommands = @("list", "readBrightness", "setBrightness", "loadProfile")
+$script:AutomationBridgeListener = $null
 $script:AutomationBridgeWorker = $null
 $script:AutomationBridgeInput = $null
 $script:AutomationBridgeOutput = $null
@@ -2487,12 +2503,61 @@ function New-AutomationBridgeApiKey {
     return (($bytes | ForEach-Object { $_.ToString("x2") }) -join "")
 }
 
+function Protect-AutomationBridgeApiKey {
+    param([string]$ApiKey)
+    if ([string]::IsNullOrWhiteSpace($ApiKey)) { return "" }
+    if ($null -eq ("System.Security.Cryptography.ProtectedData" -as [type])) {
+        Add-Type -AssemblyName System.Security -ErrorAction Stop
+    }
+    $plainBytes = [System.Text.Encoding]::UTF8.GetBytes($ApiKey)
+    $entropy = [System.Text.Encoding]::UTF8.GetBytes("MonitorControlPro.AutomationBridge.v2")
+    try {
+        $protectedBytes = [System.Security.Cryptography.ProtectedData]::Protect(
+            $plainBytes,
+            $entropy,
+            [System.Security.Cryptography.DataProtectionScope]::CurrentUser
+        )
+        return "dpapi:v1:$([Convert]::ToBase64String($protectedBytes))"
+    } finally {
+        if ($plainBytes.Length -gt 0) { [Array]::Clear($plainBytes, 0, $plainBytes.Length) }
+        if ($entropy.Length -gt 0) { [Array]::Clear($entropy, 0, $entropy.Length) }
+    }
+}
+
+function Unprotect-AutomationBridgeApiKey {
+    param([string]$ProtectedApiKey)
+    if ([string]::IsNullOrWhiteSpace($ProtectedApiKey) -or -not $ProtectedApiKey.StartsWith("dpapi:v1:", [StringComparison]::Ordinal)) { return "" }
+    if ($null -eq ("System.Security.Cryptography.ProtectedData" -as [type])) {
+        Add-Type -AssemblyName System.Security -ErrorAction Stop
+    }
+    $encoded = $ProtectedApiKey.Substring(9)
+    $entropy = [System.Text.Encoding]::UTF8.GetBytes("MonitorControlPro.AutomationBridge.v2")
+    $plainBytes = $null
+    try {
+        $protectedBytes = [Convert]::FromBase64String($encoded)
+        $plainBytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
+            $protectedBytes,
+            $entropy,
+            [System.Security.Cryptography.DataProtectionScope]::CurrentUser
+        )
+        return [System.Text.Encoding]::UTF8.GetString($plainBytes)
+    } catch {
+        return ""
+    } finally {
+        if ($null -ne $plainBytes -and $plainBytes.Length -gt 0) { [Array]::Clear($plainBytes, 0, $plainBytes.Length) }
+        if ($entropy.Length -gt 0) { [Array]::Clear($entropy, 0, $entropy.Length) }
+    }
+}
+
 function Get-AutomationBridgeSettingsObject {
     return [PSCustomObject]@{
+        SchemaVersion = [int]$script:AutomationBridgeSettingsSchemaVersion
         Enabled = [bool]$script:AutomationBridgeEnabled
         BindAddress = [string]$script:AutomationBridgeBindAddress
         Port = [int]$script:AutomationBridgePort
-        ApiKey = [string]$script:AutomationBridgeApiKey
+        ApiKeyProtected = Protect-AutomationBridgeApiKey -ApiKey $script:AutomationBridgeApiKey
+        NetworkExposureApproved = [bool]$script:AutomationBridgeNetworkExposureApproved
+        NetworkExposureApprovedFor = [string]$script:AutomationBridgeNetworkExposureApprovedFor
         MqttEnabled = [bool]$script:AutomationBridgeMqttEnabled
         AllowedCommands = @($script:AutomationBridgeAllowedCommands)
         UpdatedAt = (Get-Date).ToString("o")
@@ -2501,7 +2566,20 @@ function Get-AutomationBridgeSettingsObject {
 
 function Save-AutomationBridgeSettings {
     if ([string]::IsNullOrWhiteSpace($script:AutomationBridgeApiKey)) { $script:AutomationBridgeApiKey = New-AutomationBridgeApiKey }
-    Write-JsonFileSafely -Path $script:AutomationBridgeSettingsPath -Data (Get-AutomationBridgeSettingsObject) -Depth 5 | Out-Null
+    try {
+        $saved = Write-JsonFileSafely -Path $script:AutomationBridgeSettingsPath -Data (Get-AutomationBridgeSettingsObject) -Depth 5
+        if (-not $saved) {
+            $script:AutomationBridgeLastError = "Settings could not be protected and saved"
+            Update-Status "Automation bridge settings could not be protected and saved"
+        } elseif ($script:AutomationBridgeLastError -eq "Settings could not be protected and saved") {
+            $script:AutomationBridgeLastError = ""
+        }
+        return [bool]$saved
+    } catch {
+        $script:AutomationBridgeLastError = "Settings could not be protected and saved"
+        Update-Status "Automation bridge settings could not be protected and saved"
+        return $false
+    }
 }
 
 function Load-AutomationBridgeSettings {
@@ -2510,22 +2588,66 @@ function Load-AutomationBridgeSettings {
     $script:AutomationBridgePort = 34291
     $script:AutomationBridgeApiKey = New-AutomationBridgeApiKey
     $script:AutomationBridgeMqttEnabled = $false
+    $script:AutomationBridgeNetworkExposureApproved = $false
+    $script:AutomationBridgeNetworkExposureApprovedFor = ""
+    $script:AutomationBridgeLastError = ""
     $settingsExists = Test-Path -LiteralPath $script:AutomationBridgeSettingsPath
+    $rewriteSettings = $false
     if ($settingsExists) {
         try {
             $data = Read-JsonFileSafely -Path $script:AutomationBridgeSettingsPath -Label "Automation bridge"
             if ($null -ne $data) {
-                $script:AutomationBridgeEnabled = [bool]$data.Enabled
-                if ($data.BindAddress) { $script:AutomationBridgeBindAddress = [string]$data.BindAddress }
-                if ($data.Port) { $script:AutomationBridgePort = [Math]::Max(1024, [Math]::Min(65535, [int]$data.Port)) }
-                if ($data.ApiKey) { $script:AutomationBridgeApiKey = [string]$data.ApiKey }
-                $script:AutomationBridgeMqttEnabled = [bool]$data.MqttEnabled
+                $schema = if ($data.PSObject.Properties.Name -contains "SchemaVersion") { [int]$data.SchemaVersion } else { 1 }
+                if ($schema -gt $script:AutomationBridgeSettingsSchemaVersion) {
+                    $script:AutomationBridgeLastError = "Settings schema is newer than this app"
+                } else {
+                    $script:AutomationBridgeEnabled = [bool]$data.Enabled
+                    if ($schema -lt $script:AutomationBridgeSettingsSchemaVersion) { $rewriteSettings = $true }
+                    if ($data.BindAddress) {
+                        $script:AutomationBridgeBindAddress = [string]$data.BindAddress
+                        if ($null -eq (Resolve-AutomationBridgeIPAddress -BindAddress $script:AutomationBridgeBindAddress)) {
+                            $script:AutomationBridgeEnabled = $false
+                            $script:AutomationBridgeLastError = "Invalid bind address"
+                            $rewriteSettings = $true
+                        }
+                    }
+                    if ($data.Port) { $script:AutomationBridgePort = [Math]::Max(1024, [Math]::Min(65535, [int]$data.Port)) }
+                    if ($data.PSObject.Properties.Name -contains "ApiKeyProtected") {
+                        $unprotected = Unprotect-AutomationBridgeApiKey -ProtectedApiKey ([string]$data.ApiKeyProtected)
+                        if ([string]::IsNullOrWhiteSpace($unprotected)) {
+                            $script:AutomationBridgeEnabled = $false
+                            $script:AutomationBridgeLastError = "Stored API key could not be unlocked"
+                        } else {
+                            $script:AutomationBridgeApiKey = $unprotected
+                        }
+                    } elseif ($data.PSObject.Properties.Name -contains "ApiKey" -and -not [string]::IsNullOrWhiteSpace([string]$data.ApiKey)) {
+                        $script:AutomationBridgeApiKey = [string]$data.ApiKey
+                        $rewriteSettings = $true
+                    }
+                    if ($data.PSObject.Properties.Name -contains "NetworkExposureApproved") {
+                        $script:AutomationBridgeNetworkExposureApproved = [bool]$data.NetworkExposureApproved
+                    }
+                    if ($data.PSObject.Properties.Name -contains "NetworkExposureApprovedFor") {
+                        $script:AutomationBridgeNetworkExposureApprovedFor = [string]$data.NetworkExposureApprovedFor
+                    }
+                    $script:AutomationBridgeMqttEnabled = [bool]$data.MqttEnabled
+                }
             }
         } catch {
-            Update-Status "Automation bridge settings could not be loaded"
+            $script:AutomationBridgeEnabled = $false
+            $script:AutomationBridgeLastError = "Settings could not be loaded"
         }
     }
-    if ($settingsExists) { Save-AutomationBridgeSettings }
+    $resolved = Resolve-AutomationBridgeIPAddress -BindAddress $script:AutomationBridgeBindAddress
+    if ($script:AutomationBridgeEnabled -and $null -ne $resolved -and -not [System.Net.IPAddress]::IsLoopback($resolved)) {
+        if (-not $script:AutomationBridgeNetworkExposureApproved -or $script:AutomationBridgeNetworkExposureApprovedFor -ne $resolved.ToString()) {
+            $script:AutomationBridgeEnabled = $false
+            $script:AutomationBridgeLastError = "Network exposure requires approval"
+            $rewriteSettings = $true
+        }
+    }
+    if ($rewriteSettings) { Save-AutomationBridgeSettings | Out-Null }
+    Initialize-AutomationBridgeAuditLog
 }
 
 function Resolve-AutomationBridgeIPAddress {
@@ -2535,7 +2657,41 @@ function Resolve-AutomationBridgeIPAddress {
     }
     $address = [System.Net.IPAddress]::Loopback
     if ([System.Net.IPAddress]::TryParse($BindAddress.Trim(), [ref]$address)) { return $address }
-    return [System.Net.IPAddress]::Loopback
+    return $null
+}
+
+function Test-AutomationBridgeLoopback {
+    param([string]$BindAddress)
+    $address = Resolve-AutomationBridgeIPAddress -BindAddress $BindAddress
+    return ($null -ne $address -and [System.Net.IPAddress]::IsLoopback($address))
+}
+
+function Confirm-AutomationBridgeNetworkExposure {
+    param([System.Net.IPAddress]$Address)
+    if ($null -eq $Address) { return $false }
+    if ([System.Net.IPAddress]::IsLoopback($Address)) {
+        $script:AutomationBridgeNetworkExposureApproved = $false
+        $script:AutomationBridgeNetworkExposureApprovedFor = ""
+        return $true
+    }
+    if ($script:AutomationBridgeNetworkExposureApproved -and $script:AutomationBridgeNetworkExposureApprovedFor -eq $Address.ToString()) { return $true }
+    $message = @"
+This bind address exposes the automation bridge beyond this PC.
+
+All routes except the minimal health check require an API key, but the bridge uses unencrypted HTTP. A client or network observer could capture that key. Only continue on a trusted network with an appropriate Windows Firewall rule.
+
+Expose the bridge on $($Address.ToString())?
+"@
+    $result = [System.Windows.MessageBox]::Show(
+        $message,
+        "Expose automation bridge to the network?",
+        [System.Windows.MessageBoxButton]::YesNo,
+        [System.Windows.MessageBoxImage]::Warning
+    )
+    if ($result -ne [System.Windows.MessageBoxResult]::Yes) { return $false }
+    $script:AutomationBridgeNetworkExposureApproved = $true
+    $script:AutomationBridgeNetworkExposureApprovedFor = $Address.ToString()
+    return $true
 }
 
 function Read-AutomationBridgeSettingsFromUI {
@@ -2547,10 +2703,20 @@ function Read-AutomationBridgeSettingsFromUI {
     }
     $bind = $automationBridgeBindBox.Text.Trim()
     if ([string]::IsNullOrWhiteSpace($bind)) { $bind = "127.0.0.1" }
-    $null = Resolve-AutomationBridgeIPAddress -BindAddress $bind
+    $resolved = Resolve-AutomationBridgeIPAddress -BindAddress $bind
+    if ($null -eq $resolved) {
+        $script:AutomationBridgeLastError = "Invalid bind address"
+        Update-Status "Bridge bind address must be localhost or a valid IP address"
+        return $false
+    }
     $key = $automationBridgeKeyBox.Password.Trim()
     if ($key.Length -lt 16) {
         Update-Status "Bridge API key must be at least 16 characters"
+        return $false
+    }
+    if ([bool]$automationBridgeEnabledCheckbox.IsChecked -and -not (Confirm-AutomationBridgeNetworkExposure -Address $resolved)) {
+        $script:AutomationBridgeLastError = "Network exposure was not approved"
+        Update-Status "Automation bridge remains disabled; network exposure was not approved"
         return $false
     }
     $script:AutomationBridgeBindAddress = $bind
@@ -2558,6 +2724,7 @@ function Read-AutomationBridgeSettingsFromUI {
     $script:AutomationBridgeApiKey = $key
     $script:AutomationBridgeEnabled = [bool]$automationBridgeEnabledCheckbox.IsChecked
     $script:AutomationBridgeMqttEnabled = $false
+    $script:AutomationBridgeLastError = ""
     return $true
 }
 
@@ -2570,7 +2737,15 @@ function Update-AutomationBridgeControls {
         $automationBridgePortBox.Text = ([int]$script:AutomationBridgePort).ToString()
         $automationBridgeKeyBox.Password = [string]$script:AutomationBridgeApiKey
         $running = $null -ne $script:AutomationBridgeWorker
-        $state = if ($running) { "Listening" } elseif ($script:AutomationBridgeEnabled) { "Stopped" } else { "Off" }
+        $state = if (-not [string]::IsNullOrWhiteSpace($script:AutomationBridgeLastError)) {
+            "Error: $script:AutomationBridgeLastError"
+        } elseif ($running) {
+            "Listening"
+        } elseif ($script:AutomationBridgeEnabled) {
+            "Stopped"
+        } else {
+            "Off"
+        }
         $mqtt = if ($script:AutomationBridgeMqttEnabled) { "MQTT on" } else { "MQTT off" }
         $automationBridgeStatusText.Text = "$state - http://$script:AutomationBridgeBindAddress`:$script:AutomationBridgePort ($mqtt)"
     } finally {
@@ -2596,33 +2771,161 @@ function Get-AutomationBridgeInputValue {
     return ""
 }
 
-function Test-AutomationBridgeWriteAuthorized {
-    param($Request, $Body)
+function Test-AutomationBridgeToken {
+    param([string]$Provided, [string]$Expected)
+    if ([string]::IsNullOrWhiteSpace($Provided) -or [string]::IsNullOrWhiteSpace($Expected) -or $Provided.Length -gt 256 -or $Expected.Length -gt 256) {
+        return $false
+    }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $providedHash = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Provided))
+        $expectedHash = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Expected))
+        $difference = 0
+        for ($i = 0; $i -lt $expectedHash.Length; $i++) {
+            $difference = $difference -bor ($providedHash[$i] -bxor $expectedHash[$i])
+        }
+        return $difference -eq 0
+    } finally {
+        $sha.Dispose()
+    }
+}
+
+function Test-AutomationBridgeRequestAuthorized {
+    param($Request)
+    if ($null -ne $Request -and $Request.PSObject.Properties.Name -contains "Authenticated" -and [bool]$Request.Authenticated) { return $true }
     $provided = ""
     if ($Request.Headers -and $Request.Headers.ContainsKey("x-monitorcontrol-key")) { $provided = [string]$Request.Headers["x-monitorcontrol-key"] }
     if (-not $provided -and $Request.Headers -and $Request.Headers.ContainsKey("authorization")) {
         $auth = [string]$Request.Headers["authorization"]
         if ($auth -match '^Bearer\s+(.+)$') { $provided = $matches[1] }
     }
-    if (-not $provided) { $provided = Get-AutomationBridgeInputValue -Request $Request -Body $Body -Name "apiKey" }
-    return (-not [string]::IsNullOrWhiteSpace($provided) -and $provided -eq $script:AutomationBridgeApiKey)
+    return Test-AutomationBridgeToken -Provided $provided -Expected $script:AutomationBridgeApiKey
+}
+
+function Test-AutomationBridgePayloadCredential {
+    param($Request, $Body)
+    if ($Request.Query -and $Request.Query.ContainsKey("apiKey")) { return $true }
+    if ($null -ne $Body -and @($Body.PSObject.Properties.Name | Where-Object { $_ -ieq "apiKey" }).Count -gt 0) { return $true }
+    return $false
+}
+
+function ConvertTo-AutomationBridgeAuditEntry {
+    param([string]$Action, [string]$Target, $Value, [bool]$Success, [string]$Remote, [string]$Message, [string]$Timestamp)
+    $safeAction = if ($Action -in @("setBrightness", "loadProfile")) { $Action } else { "unknown" }
+    $targetScope = if ([string]::IsNullOrWhiteSpace($Target)) { "default" } else { "specified" }
+    $remoteScope = "network"
+    if ([string]::IsNullOrWhiteSpace($Remote)) {
+        $remoteScope = "unknown"
+    } elseif ($Remote -eq "loopback" -or $Remote -match '^\[?(127\.|::1\]?:)') {
+        $remoteScope = "loopback"
+    }
+    $resultCode = if ($Message -in @("queued", "loaded", "no_monitors", "monitor_not_found", "no_write_target", "completed", "operation_failed")) {
+        $Message
+    } else {
+        switch ($Message) {
+            "Queued" { "queued" }
+            "Loaded" { "loaded" }
+            "No monitors enumerated" { "no_monitors" }
+            "Monitor not found" { "monitor_not_found" }
+            "No write target" { "no_write_target" }
+            default { if ($Success) { "completed" } else { "operation_failed" } }
+        }
+    }
+    $safeValue = ""
+    $parsedValue = 0
+    if ($safeAction -eq "setBrightness" -and [int]::TryParse([string]$Value, [ref]$parsedValue)) {
+        $safeValue = [Math]::Max(0, [Math]::Min(100, $parsedValue))
+    }
+    $parsedTimestamp = [DateTime]::MinValue
+    $safeTimestamp = if (
+        -not [string]::IsNullOrWhiteSpace($Timestamp) -and
+        [DateTime]::TryParse($Timestamp, [ref]$parsedTimestamp)
+    ) {
+        $parsedTimestamp.ToUniversalTime().ToString("o")
+    } else {
+        [DateTime]::UtcNow.ToString("o")
+    }
+    return [PSCustomObject]@{
+        Timestamp = $safeTimestamp
+        Action = $safeAction
+        TargetScope = $targetScope
+        Value = $safeValue
+        Success = [bool]$Success
+        RemoteScope = $remoteScope
+        ResultCode = $resultCode
+    }
+}
+
+function Convert-AutomationBridgeAuditFile {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $true }
+    $tempPath = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+        $encoding = New-Object System.Text.UTF8Encoding($false)
+        $retained = New-Object 'System.Collections.Generic.Queue[object]'
+        $retainedBytes = 0
+        foreach ($rawLine in [System.IO.File]::ReadLines($Path)) {
+            if ([string]::IsNullOrWhiteSpace($rawLine)) { continue }
+            try {
+                $legacy = $rawLine | ConvertFrom-Json
+            } catch {
+                continue
+            }
+            $sanitized = ConvertTo-AutomationBridgeAuditEntry `
+                -Action ([string]$legacy.Action) `
+                -Target $(if ($legacy.PSObject.Properties.Name -contains "TargetScope") { if ([string]$legacy.TargetScope -eq "default") { "" } else { "specified" } } else { [string]$legacy.Target }) `
+                -Value $legacy.Value `
+                -Success ([bool]$legacy.Success) `
+                -Remote $(if ($legacy.PSObject.Properties.Name -contains "RemoteScope") { [string]$legacy.RemoteScope } else { [string]$legacy.Remote }) `
+                -Message $(if ($legacy.PSObject.Properties.Name -contains "ResultCode") { [string]$legacy.ResultCode } else { [string]$legacy.Message }) `
+                -Timestamp ([string]$legacy.Timestamp)
+            $line = (($sanitized | ConvertTo-Json -Compress -Depth 5) + [Environment]::NewLine)
+            $byteCount = $encoding.GetByteCount($line)
+            if ($byteCount -gt $script:AutomationBridgeAuditLogMaxBytes) { continue }
+            while ($retained.Count -gt 0 -and ($retainedBytes + $byteCount) -gt $script:AutomationBridgeAuditLogMaxBytes) {
+                $removed = $retained.Dequeue()
+                $retainedBytes -= [int]$removed.Bytes
+            }
+            $retained.Enqueue([PSCustomObject]@{ Text = $line; Bytes = $byteCount })
+            $retainedBytes += $byteCount
+        }
+        $builder = New-Object System.Text.StringBuilder
+        foreach ($item in $retained) { [void]$builder.Append([string]$item.Text) }
+        [System.IO.File]::WriteAllText($tempPath, $builder.ToString(), $encoding)
+        [System.IO.File]::Copy($tempPath, $Path, $true)
+        Remove-Item -LiteralPath $tempPath -Force
+        return $true
+    } catch {
+        if (Test-Path -LiteralPath $tempPath) { Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue }
+        Set-DeferredStatus "Automation bridge audit log privacy migration failed"
+        return $false
+    }
+}
+
+function Initialize-AutomationBridgeAuditLog {
+    Convert-AutomationBridgeAuditFile -Path $script:AutomationBridgeWriteLogPath | Out-Null
+    Convert-AutomationBridgeAuditFile -Path "$script:AutomationBridgeWriteLogPath.1" | Out-Null
 }
 
 function Write-AutomationBridgeWriteLog {
     param([string]$Action, [string]$Target, $Value, [bool]$Success, [string]$Remote, [string]$Message)
-    $entry = [PSCustomObject]@{
-        Timestamp = (Get-Date).ToString("o")
-        Action = $Action
-        Target = $Target
-        Value = $Value
-        Success = [bool]$Success
-        Remote = $Remote
-        Message = $Message
-    }
+    $entry = ConvertTo-AutomationBridgeAuditEntry -Action $Action -Target $Target -Value $Value -Success $Success -Remote $Remote -Message $Message -Timestamp ([DateTime]::UtcNow.ToString("o"))
     try {
         $encoding = New-Object System.Text.UTF8Encoding($false)
-        [System.IO.File]::AppendAllText($script:AutomationBridgeWriteLogPath, (($entry | ConvertTo-Json -Compress -Depth 5) + [Environment]::NewLine), $encoding)
-    } catch {}
+        $line = (($entry | ConvertTo-Json -Compress -Depth 5) + [Environment]::NewLine)
+        $lineBytes = $encoding.GetByteCount($line)
+        if (Test-Path -LiteralPath $script:AutomationBridgeWriteLogPath) {
+            $currentLength = (Get-Item -LiteralPath $script:AutomationBridgeWriteLogPath).Length
+            if (($currentLength + $lineBytes) -gt $script:AutomationBridgeAuditLogMaxBytes) {
+                $archivePath = "$script:AutomationBridgeWriteLogPath.1"
+                if (Test-Path -LiteralPath $archivePath) { Remove-Item -LiteralPath $archivePath -Force }
+                Move-Item -LiteralPath $script:AutomationBridgeWriteLogPath -Destination $archivePath
+            }
+        }
+        [System.IO.File]::AppendAllText($script:AutomationBridgeWriteLogPath, $line, $encoding)
+    } catch {
+        Set-DeferredStatus "Automation bridge audit log is unavailable"
+    }
 }
 
 function Get-AutomationBridgeMonitorList {
@@ -2676,7 +2979,7 @@ function Read-AutomationBridgeBrightness {
         return New-AutomationBridgeResponse -Status 409 -Body @{ error = "No DDC/CI handle" }
     }
     $result = Get-VCPValue -Handle $mon.Handle -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -MonitorName $mon.Name
-    if (-not [bool]$result.Success) { return New-AutomationBridgeResponse -Status 502 -Body @{ error = "DDC read failed"; win32 = [int]$result.LastError } }
+    if (-not [bool]$result.Success) { return New-AutomationBridgeResponse -Status 502 -Body @{ error = "ddc_read_failed" } }
     return New-AutomationBridgeResponse -Status 200 -Body @{ monitor = $mon.Index; brightness = [int]$result.Current; maximum = [int]$result.Maximum; source = "DDC" }
 }
 
@@ -2724,8 +3027,21 @@ function Invoke-AutomationBridgeRequest {
     $body = Get-AutomationBridgeBodyJson -Request $Request
     $path = ([string]$Request.Path).TrimEnd("/").ToLowerInvariant()
     if ($path -eq "") { $path = "/" }
-    if ($Request.Method -eq "GET" -and ($path -eq "/health" -or $path -eq "/api/health")) {
-        return New-AutomationBridgeResponse -Status 200 -Body @{ ok = $true; version = "3.34.0"; bridge = "ready"; mqtt = [bool]$script:AutomationBridgeMqttEnabled }
+    $queryCount = if ($Request.Query) { [int]$Request.Query.Count } else { 0 }
+    $isEmptyHealthCheck = (
+        $Request.Method -eq "GET" -and
+        ($path -eq "/health" -or $path -eq "/api/health") -and
+        $queryCount -eq 0 -and
+        [string]::IsNullOrEmpty([string]$Request.Body)
+    )
+    if ($isEmptyHealthCheck) {
+        return New-AutomationBridgeResponse -Status 200 -Body @{ ok = $true }
+    }
+    if (Test-AutomationBridgePayloadCredential -Request $Request -Body $body) {
+        return New-AutomationBridgeResponse -Status 400 -Body @{ error = "credential_must_use_header" }
+    }
+    if (-not (Test-AutomationBridgeRequestAuthorized -Request $Request)) {
+        return New-AutomationBridgeResponse -Status 401 -Body @{ error = "unauthorized" }
     }
     if ($Request.Method -eq "GET" -and ($path -eq "/monitors" -or $path -eq "/api/monitors")) {
         return New-AutomationBridgeResponse -Status 200 -Body @{ monitors = @(Get-AutomationBridgeMonitorList) }
@@ -2736,7 +3052,6 @@ function Invoke-AutomationBridgeRequest {
     if ($path -eq "/brightness" -or $path -eq "/api/brightness") {
         if ($Request.Method -eq "GET") { return Read-AutomationBridgeBrightness -MonitorRef (Get-AutomationBridgeInputValue -Request $Request -Body $body -Name "monitor") }
         if ($Request.Method -eq "POST") {
-            if (-not (Test-AutomationBridgeWriteAuthorized -Request $Request -Body $body)) { return New-AutomationBridgeResponse -Status 401 -Body @{ error = "API key required for writes" } }
             $rawValue = Get-AutomationBridgeInputValue -Request $Request -Body $body -Name "value"
             $value = 0
             if (-not [int]::TryParse($rawValue, [ref]$value)) { return New-AutomationBridgeResponse -Status 400 -Body @{ error = "Brightness value required" } }
@@ -2744,7 +3059,6 @@ function Invoke-AutomationBridgeRequest {
         }
     }
     if (($path -eq "/profile" -or $path -eq "/api/profile") -and $Request.Method -eq "POST") {
-        if (-not (Test-AutomationBridgeWriteAuthorized -Request $Request -Body $body)) { return New-AutomationBridgeResponse -Status 401 -Body @{ error = "API key required for writes" } }
         $name = Get-AutomationBridgeInputValue -Request $Request -Body $body -Name "name"
         if ([string]::IsNullOrWhiteSpace($name)) { return New-AutomationBridgeResponse -Status 400 -Body @{ error = "Profile name required" } }
         $ok = Apply-ProfileByName -Name $name -Reason "Bridge profile"
@@ -2758,12 +3072,24 @@ function Invoke-AutomationBridgeRequest {
 function Process-AutomationBridgeRequests {
     $request = $null
     while ($script:AutomationBridgeRequests.TryDequeue([ref]$request)) {
+        if (
+            $request.PSObject.Properties.Name -contains "ExpiresAtUtc" -and
+            [DateTime]::UtcNow -ge [DateTime]$request.ExpiresAtUtc
+        ) {
+            $request = $null
+            continue
+        }
         try {
             $response = Invoke-AutomationBridgeRequest -Request $request
         } catch {
-            $response = New-AutomationBridgeResponse -Status 500 -Body @{ error = $_.Exception.Message }
+            $response = New-AutomationBridgeResponse -Status 500 -Body @{ error = "internal_error"; code = "bridge_request_failed" }
         }
-        $script:AutomationBridgeResponses[$request.Id] = $response
+        if (
+            -not ($request.PSObject.Properties.Name -contains "ExpiresAtUtc") -or
+            [DateTime]::UtcNow -lt [DateTime]$request.ExpiresAtUtc
+        ) {
+            $script:AutomationBridgeResponses[$request.Id] = $response
+        }
         $request = $null
     }
 }
@@ -2776,12 +3102,476 @@ function Start-AutomationBridgeRequestTimer {
     $script:AutomationBridgeTimer.Start()
 }
 
+function Get-AutomationBridgeWorkerScript {
+    return {
+        param($Settings, $RequestQueue, $ResponseMap, $BridgeState)
+
+        function Send-BridgeBusy {
+            param($Client, $Settings, $BridgeState)
+            try {
+                $Client.SendTimeout = [int]$Settings.WriteTimeoutMs
+                $stream = $Client.GetStream()
+                $stream.WriteTimeout = [int]$Settings.WriteTimeoutMs
+                $BridgeState["LastWriteTimeoutMs"] = [int]$stream.WriteTimeout
+                $payload = '{"error":"server_busy"}'
+                $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
+                $header = "HTTP/1.1 503 Service Unavailable`r`nContent-Type: application/json; charset=utf-8`r`nContent-Length: $($bodyBytes.Length)`r`nCache-Control: no-store`r`nX-Content-Type-Options: nosniff`r`nConnection: close`r`n`r`n"
+                $headerBytes = [System.Text.Encoding]::ASCII.GetBytes($header)
+                $stream.Write($headerBytes, 0, $headerBytes.Length)
+                $stream.Write($bodyBytes, 0, $bodyBytes.Length)
+            } catch {
+                $BridgeState["WriteFailureCount"] = [int]$BridgeState["WriteFailureCount"] + 1
+            } finally {
+                try {
+                    $stream = $Client.GetStream()
+                    $buffer = New-Object byte[] 1024
+                    $deadline = [DateTime]::UtcNow.AddMilliseconds(75)
+                    while ([DateTime]::UtcNow -lt $deadline) {
+                        $available = [int]$Client.Available
+                        if ($available -le 0) { Start-Sleep -Milliseconds 5; continue }
+                        $read = $stream.Read($buffer, 0, [Math]::Min($buffer.Length, $available))
+                        if ($read -le 0) { break }
+                    }
+                } catch { $null = $_ }
+                try { $Client.Client.Shutdown([System.Net.Sockets.SocketShutdown]::Send) } catch { $null = $_ }
+                try { $Client.Close() } catch { $null = $_ }
+            }
+        }
+
+        $handlerScript = {
+            param($Client, $Settings, $RequestQueue, $ResponseMap, $BridgeState)
+
+            function Read-BridgeLine {
+                param($Stream, [int]$Limit)
+                $bytes = New-Object 'System.Collections.Generic.List[byte]'
+                $sawCarriageReturn = $false
+                while ($true) {
+                    $value = $Stream.ReadByte()
+                    if ($value -lt 0) {
+                        return [PSCustomObject]@{ Ok = $false; Error = "unexpected_eof"; Line = ""; Bytes = [int]$bytes.Count }
+                    }
+                    if ($sawCarriageReturn) {
+                        if ($value -ne 10) {
+                            return [PSCustomObject]@{ Ok = $false; Error = "invalid_line_ending"; Line = ""; Bytes = [int]$bytes.Count }
+                        }
+                        return [PSCustomObject]@{
+                            Ok = $true
+                            Error = ""
+                            Line = [System.Text.Encoding]::ASCII.GetString($bytes.ToArray())
+                            Bytes = [int]$bytes.Count + 2
+                        }
+                    }
+                    if ($value -eq 13) {
+                        $sawCarriageReturn = $true
+                        continue
+                    }
+                    if ($value -eq 10) {
+                        return [PSCustomObject]@{ Ok = $false; Error = "invalid_line_ending"; Line = ""; Bytes = [int]$bytes.Count }
+                    }
+                    if ($value -gt 127 -or ($value -lt 32 -and $value -ne 9)) {
+                        return [PSCustomObject]@{ Ok = $false; Error = "invalid_header_character"; Line = ""; Bytes = [int]$bytes.Count }
+                    }
+                    if ($bytes.Count -ge $Limit) {
+                        return [PSCustomObject]@{ Ok = $false; Error = "line_too_long"; Line = ""; Bytes = [int]$bytes.Count }
+                    }
+                    $bytes.Add([byte]$value)
+                }
+            }
+
+            function ConvertFrom-BridgeQuery {
+                param([string]$Query)
+                $result = @{}
+                if ([string]::IsNullOrEmpty($Query)) { return $result }
+                foreach ($pair in $Query.TrimStart("?").Split("&")) {
+                    if ([string]::IsNullOrEmpty($pair)) { continue }
+                    $parts = $pair.Split("=", 2)
+                    $name = [Uri]::UnescapeDataString($parts[0].Replace("+", " "))
+                    $value = if ($parts.Count -gt 1) { [Uri]::UnescapeDataString($parts[1].Replace("+", " ")) } else { "" }
+                    $result[$name] = $value
+                }
+                return $result
+            }
+
+            function Test-BridgeToken {
+                param([string]$Provided, [string]$Expected)
+                if ([string]::IsNullOrWhiteSpace($Provided) -or [string]::IsNullOrWhiteSpace($Expected) -or $Provided.Length -gt 256 -or $Expected.Length -gt 256) {
+                    return $false
+                }
+                $sha = [System.Security.Cryptography.SHA256]::Create()
+                try {
+                    $providedHash = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Provided))
+                    $expectedHash = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Expected))
+                    $difference = 0
+                    for ($i = 0; $i -lt $expectedHash.Length; $i++) {
+                        $difference = $difference -bor ($providedHash[$i] -bxor $expectedHash[$i])
+                    }
+                    return $difference -eq 0
+                } finally {
+                    $sha.Dispose()
+                }
+            }
+
+            function Send-BridgeJson {
+                param($Client, [int]$Status, $Body, $Settings, $BridgeState)
+                try {
+                    $reason = switch ($Status) {
+                        200 { "OK" }
+                        202 { "Accepted" }
+                        400 { "Bad Request" }
+                        401 { "Unauthorized" }
+                        404 { "Not Found" }
+                        405 { "Method Not Allowed" }
+                        408 { "Request Timeout" }
+                        409 { "Conflict" }
+                        411 { "Length Required" }
+                        413 { "Payload Too Large" }
+                        414 { "URI Too Long" }
+                        431 { "Request Header Fields Too Large" }
+                        500 { "Internal Server Error" }
+                        502 { "Bad Gateway" }
+                        503 { "Service Unavailable" }
+                        504 { "Gateway Timeout" }
+                        505 { "HTTP Version Not Supported" }
+                        default { "Bad Request" }
+                    }
+                    $payload = if ($null -eq $Body) { "{}" } else { $Body | ConvertTo-Json -Depth 8 -Compress }
+                    $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
+                    if ($bodyBytes.Length -gt [int]$Settings.MaxResponseBytes) {
+                        $Status = 500
+                        $reason = "Internal Server Error"
+                        $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes('{"error":"response_too_large"}')
+                    }
+                    $authenticationHeader = if ($Status -eq 401) { "WWW-Authenticate: Bearer`r`n" } else { "" }
+                    $header = "HTTP/1.1 $Status $reason`r`nContent-Type: application/json; charset=utf-8`r`nContent-Length: $($bodyBytes.Length)`r`nCache-Control: no-store`r`nX-Content-Type-Options: nosniff`r`n$authenticationHeader" + "Connection: close`r`n`r`n"
+                    $headerBytes = [System.Text.Encoding]::ASCII.GetBytes($header)
+                    $stream = $Client.GetStream()
+                    $stream.WriteTimeout = [int]$Settings.WriteTimeoutMs
+                    $BridgeState["LastWriteTimeoutMs"] = [int]$stream.WriteTimeout
+                    $stream.Write($headerBytes, 0, $headerBytes.Length)
+                    $stream.Write($bodyBytes, 0, $bodyBytes.Length)
+                    return $true
+                } catch {
+                    $BridgeState["WriteFailureCount"] = [int]$BridgeState["WriteFailureCount"] + 1
+                    return $false
+                }
+            }
+
+            function Close-BridgeClient {
+                param($Client, [bool]$DrainInput)
+                if ($DrainInput) {
+                    try {
+                        $drainStream = $Client.GetStream()
+                        $drainBuffer = New-Object byte[] 1024
+                        $drainDeadline = [DateTime]::UtcNow.AddMilliseconds(75)
+                        while ([DateTime]::UtcNow -lt $drainDeadline) {
+                            $available = [int]$Client.Available
+                            if ($available -le 0) { Start-Sleep -Milliseconds 5; continue }
+                            $read = $drainStream.Read($drainBuffer, 0, [Math]::Min($drainBuffer.Length, $available))
+                            if ($read -le 0) { break }
+                        }
+                    } catch { $null = $_ }
+                }
+                try { $Client.Client.Shutdown([System.Net.Sockets.SocketShutdown]::Send) } catch { $null = $_ }
+                try { $Client.Close() } catch { $null = $_ }
+            }
+
+            $stream = $null
+            $requestFullyRead = $false
+            try {
+                $Client.NoDelay = $true
+                $Client.ReceiveTimeout = [int]$Settings.ReadTimeoutMs
+                $Client.SendTimeout = [int]$Settings.WriteTimeoutMs
+                $stream = $Client.GetStream()
+                $stream.ReadTimeout = [int]$Settings.ReadTimeoutMs
+                $stream.WriteTimeout = [int]$Settings.WriteTimeoutMs
+                $BridgeState["LastReadTimeoutMs"] = [int]$stream.ReadTimeout
+                $BridgeState["LastWriteTimeoutMs"] = [int]$stream.WriteTimeout
+
+                $requestLineResult = Read-BridgeLine -Stream $stream -Limit ([int]$Settings.MaxRequestLineBytes)
+                if (-not $requestLineResult.Ok) {
+                    $status = if ($requestLineResult.Error -eq "line_too_long") { 414 } else { 400 }
+                    Send-BridgeJson -Client $Client -Status $status -Body @{ error = [string]$requestLineResult.Error } -Settings $Settings -BridgeState $BridgeState | Out-Null
+                    return
+                }
+                $requestLine = [string]$requestLineResult.Line
+                $match = [regex]::Match($requestLine, '^([A-Z]+) ([^ ]+) (HTTP/[0-9]+\.[0-9]+)$')
+                if (-not $match.Success) {
+                    Send-BridgeJson -Client $Client -Status 400 -Body @{ error = "invalid_request_line" } -Settings $Settings -BridgeState $BridgeState | Out-Null
+                    return
+                }
+                $method = $match.Groups[1].Value
+                $target = $match.Groups[2].Value
+                $httpVersion = $match.Groups[3].Value
+                if ($method -notin @("GET", "POST")) {
+                    Send-BridgeJson -Client $Client -Status 405 -Body @{ error = "method_not_allowed" } -Settings $Settings -BridgeState $BridgeState | Out-Null
+                    return
+                }
+                if ($httpVersion -notin @("HTTP/1.0", "HTTP/1.1")) {
+                    Send-BridgeJson -Client $Client -Status 505 -Body @{ error = "http_version_not_supported" } -Settings $Settings -BridgeState $BridgeState | Out-Null
+                    return
+                }
+                if (-not $target.StartsWith("/") -or $target.Contains("#")) {
+                    Send-BridgeJson -Client $Client -Status 400 -Body @{ error = "invalid_request_target" } -Settings $Settings -BridgeState $BridgeState | Out-Null
+                    return
+                }
+
+                $headers = @{}
+                $headerBytesRead = 0
+                $headerCount = 0
+                while ($true) {
+                    $headerResult = Read-BridgeLine -Stream $stream -Limit ([int]$Settings.MaxHeaderBytes)
+                    if (-not $headerResult.Ok) {
+                        $status = if ($headerResult.Error -eq "line_too_long") { 431 } else { 400 }
+                        Send-BridgeJson -Client $Client -Status $status -Body @{ error = [string]$headerResult.Error } -Settings $Settings -BridgeState $BridgeState | Out-Null
+                        return
+                    }
+                    $headerBytesRead += [int]$headerResult.Bytes
+                    if ($headerBytesRead -gt [int]$Settings.MaxHeaderBytes) {
+                        Send-BridgeJson -Client $Client -Status 431 -Body @{ error = "headers_too_large" } -Settings $Settings -BridgeState $BridgeState | Out-Null
+                        return
+                    }
+                    $line = [string]$headerResult.Line
+                    if ($line.Length -eq 0) { break }
+                    $headerCount++
+                    if ($headerCount -gt [int]$Settings.MaxHeaderCount) {
+                        Send-BridgeJson -Client $Client -Status 431 -Body @{ error = "too_many_headers" } -Settings $Settings -BridgeState $BridgeState | Out-Null
+                        return
+                    }
+                    if ($line.StartsWith(" ") -or $line.StartsWith("`t")) {
+                        Send-BridgeJson -Client $Client -Status 400 -Body @{ error = "folded_header_not_allowed" } -Settings $Settings -BridgeState $BridgeState | Out-Null
+                        return
+                    }
+                    $colon = $line.IndexOf(":")
+                    if ($colon -le 0) {
+                        Send-BridgeJson -Client $Client -Status 400 -Body @{ error = "invalid_header" } -Settings $Settings -BridgeState $BridgeState | Out-Null
+                        return
+                    }
+                    $name = $line.Substring(0, $colon)
+                    if (-not [regex]::IsMatch($name, "^[A-Za-z0-9!#$%&'*+.^_|~-]+$")) {
+                        Send-BridgeJson -Client $Client -Status 400 -Body @{ error = "invalid_header_name" } -Settings $Settings -BridgeState $BridgeState | Out-Null
+                        return
+                    }
+                    $name = $name.ToLowerInvariant()
+                    if ($headers.ContainsKey($name)) {
+                        Send-BridgeJson -Client $Client -Status 400 -Body @{ error = "duplicate_header" } -Settings $Settings -BridgeState $BridgeState | Out-Null
+                        return
+                    }
+                    $headers[$name] = $line.Substring($colon + 1).Trim()
+                }
+
+                if ($httpVersion -eq "HTTP/1.1" -and (-not $headers.ContainsKey("host") -or [string]::IsNullOrWhiteSpace([string]$headers["host"]))) {
+                    Send-BridgeJson -Client $Client -Status 400 -Body @{ error = "host_required" } -Settings $Settings -BridgeState $BridgeState | Out-Null
+                    return
+                }
+                if ($headers.ContainsKey("transfer-encoding")) {
+                    Send-BridgeJson -Client $Client -Status 400 -Body @{ error = "transfer_encoding_not_supported" } -Settings $Settings -BridgeState $BridgeState | Out-Null
+                    return
+                }
+                $contentLength = [long]0
+                if ($headers.ContainsKey("content-length")) {
+                    $lengthText = [string]$headers["content-length"]
+                    if (-not [regex]::IsMatch($lengthText, '^(0|[1-9][0-9]*)$') -or -not [long]::TryParse($lengthText, [ref]$contentLength)) {
+                        Send-BridgeJson -Client $Client -Status 400 -Body @{ error = "invalid_content_length" } -Settings $Settings -BridgeState $BridgeState | Out-Null
+                        return
+                    }
+                } elseif ($method -eq "POST") {
+                    Send-BridgeJson -Client $Client -Status 411 -Body @{ error = "content_length_required" } -Settings $Settings -BridgeState $BridgeState | Out-Null
+                    return
+                }
+                if ($contentLength -gt [int]$Settings.MaxBodyBytes) {
+                    Send-BridgeJson -Client $Client -Status 413 -Body @{ error = "body_too_large" } -Settings $Settings -BridgeState $BridgeState | Out-Null
+                    return
+                }
+
+                $body = ""
+                if ($contentLength -gt 0) {
+                    $bodyBytes = New-Object byte[] ([int]$contentLength)
+                    $offset = 0
+                    while ($offset -lt $bodyBytes.Length) {
+                        $read = $stream.Read($bodyBytes, $offset, $bodyBytes.Length - $offset)
+                        if ($read -le 0) {
+                            Send-BridgeJson -Client $Client -Status 400 -Body @{ error = "incomplete_body" } -Settings $Settings -BridgeState $BridgeState | Out-Null
+                            return
+                        }
+                        $offset += $read
+                    }
+                    try {
+                        $strictUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
+                        $body = $strictUtf8.GetString($bodyBytes)
+                    } catch {
+                        Send-BridgeJson -Client $Client -Status 400 -Body @{ error = "invalid_utf8_body" } -Settings $Settings -BridgeState $BridgeState | Out-Null
+                        return
+                    }
+                }
+                $requestFullyRead = $true
+
+                try {
+                    $uri = [Uri]::new("http://localhost$target")
+                    $rawQueryCount = if ([string]::IsNullOrEmpty($uri.Query)) {
+                        0
+                    } else {
+                        @($uri.Query.TrimStart("?").Split("&") | Where-Object { -not [string]::IsNullOrEmpty($_) }).Count
+                    }
+                    if ($rawQueryCount -gt [int]$Settings.MaxQueryParameterCount) {
+                        Send-BridgeJson -Client $Client -Status 400 -Body @{ error = "too_many_query_parameters" } -Settings $Settings -BridgeState $BridgeState | Out-Null
+                        return
+                    }
+                    $query = ConvertFrom-BridgeQuery -Query $uri.Query
+                } catch {
+                    Send-BridgeJson -Client $Client -Status 400 -Body @{ error = "invalid_request_target" } -Settings $Settings -BridgeState $BridgeState | Out-Null
+                    return
+                }
+
+                $isEmptyHealthCheck = (
+                    $method -eq "GET" -and
+                    ($uri.AbsolutePath -ieq "/health" -or $uri.AbsolutePath -ieq "/api/health") -and
+                    $query.Count -eq 0 -and
+                    $contentLength -eq 0
+                )
+                if ($isEmptyHealthCheck) {
+                    Send-BridgeJson -Client $Client -Status 200 -Body @{ ok = $true } -Settings $Settings -BridgeState $BridgeState | Out-Null
+                    return
+                }
+
+                $bodyJson = $null
+                if (-not [string]::IsNullOrEmpty($body)) {
+                    try { $bodyJson = $body | ConvertFrom-Json } catch { $bodyJson = $null }
+                }
+                $payloadCredential = $query.ContainsKey("apiKey")
+                if ($null -ne $bodyJson -and @($bodyJson.PSObject.Properties.Name | Where-Object { $_ -ieq "apiKey" }).Count -gt 0) {
+                    $payloadCredential = $true
+                }
+                if ($payloadCredential) {
+                    Send-BridgeJson -Client $Client -Status 400 -Body @{ error = "credential_must_use_header" } -Settings $Settings -BridgeState $BridgeState | Out-Null
+                    return
+                }
+
+                $provided = ""
+                if ($headers.ContainsKey("x-monitorcontrol-key")) {
+                    $provided = [string]$headers["x-monitorcontrol-key"]
+                } elseif ($headers.ContainsKey("authorization")) {
+                    $authorization = [string]$headers["authorization"]
+                    if ($authorization -match '^Bearer\s+(.+)$') { $provided = $matches[1] }
+                }
+                if (-not (Test-BridgeToken -Provided $provided -Expected ([string]$Settings.ApiKey))) {
+                    Send-BridgeJson -Client $Client -Status 401 -Body @{ error = "unauthorized" } -Settings $Settings -BridgeState $BridgeState | Out-Null
+                    return
+                }
+                $headers.Remove("x-monitorcontrol-key")
+                $headers.Remove("authorization")
+
+                $remoteScope = "unknown"
+                try {
+                    if ([System.Net.IPAddress]::IsLoopback($Client.Client.RemoteEndPoint.Address)) { $remoteScope = "loopback" } else { $remoteScope = "network" }
+                } catch {
+                    $remoteScope = "unknown"
+                }
+                $id = [guid]::NewGuid().ToString("N")
+                $request = [PSCustomObject]@{
+                    Id = $id
+                    Method = $method
+                    Path = [string]$uri.AbsolutePath
+                    Query = $query
+                    Headers = $headers
+                    Body = $body
+                    Remote = $remoteScope
+                    Authenticated = $true
+                    ExpiresAtUtc = [DateTime]::UtcNow.AddMilliseconds([int]$Settings.RouteTimeoutMs)
+                }
+                $RequestQueue.Enqueue($request)
+                $deadline = [DateTime]$request.ExpiresAtUtc
+                $response = $null
+                while ([DateTime]::UtcNow -lt $deadline -and -not [bool]$BridgeState["Stop"]) {
+                    if ($ResponseMap.ContainsKey($id)) {
+                        $response = $ResponseMap[$id]
+                        $ResponseMap.Remove($id)
+                        break
+                    }
+                    Start-Sleep -Milliseconds 20
+                }
+                if ($null -eq $response) {
+                    $ResponseMap.Remove($id)
+                    Send-BridgeJson -Client $Client -Status 504 -Body @{ error = "route_timeout" } -Settings $Settings -BridgeState $BridgeState | Out-Null
+                } else {
+                    Send-BridgeJson -Client $Client -Status ([int]$response.Status) -Body $response.Body -Settings $Settings -BridgeState $BridgeState | Out-Null
+                }
+            } catch [System.IO.IOException] {
+                if ($null -ne $stream) {
+                    Send-BridgeJson -Client $Client -Status 408 -Body @{ error = "request_timeout" } -Settings $Settings -BridgeState $BridgeState | Out-Null
+                }
+            } catch {
+                Send-BridgeJson -Client $Client -Status 500 -Body @{ error = "internal_error" } -Settings $Settings -BridgeState $BridgeState | Out-Null
+            } finally {
+                Close-BridgeClient -Client $Client -DrainInput (-not $requestFullyRead)
+            }
+        }
+
+        $listener = $Settings.Listener
+        $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, [int]$Settings.MaxConcurrentClients)
+        $pool.Open()
+        $active = New-Object System.Collections.ArrayList
+        try {
+            while (-not [bool]$BridgeState["Stop"]) {
+                foreach ($job in @($active.ToArray())) {
+                    if ($job.Async.IsCompleted) {
+                        try { $job.PowerShell.EndInvoke($job.Async) | Out-Null } catch {
+                            $BridgeState["HandlerFailureCount"] = [int]$BridgeState["HandlerFailureCount"] + 1
+                        }
+                        $job.PowerShell.Dispose()
+                        [void]$active.Remove($job)
+                    }
+                }
+                $BridgeState["ActiveClients"] = [int]$active.Count
+                if ([int]$active.Count -gt [int]$BridgeState["PeakActiveClients"]) {
+                    $BridgeState["PeakActiveClients"] = [int]$active.Count
+                }
+
+                if ($listener.Pending()) {
+                    $client = $listener.AcceptTcpClient()
+                    if ($active.Count -ge [int]$Settings.MaxConcurrentClients) {
+                        $BridgeState["RejectedClients"] = [int]$BridgeState["RejectedClients"] + 1
+                        Send-BridgeBusy -Client $client -Settings $Settings -BridgeState $BridgeState
+                        continue
+                    }
+                    $powershell = [PowerShell]::Create()
+                    $powershell.RunspacePool = $pool
+                    $powershell.AddScript($handlerScript.ToString()).AddArgument($client).AddArgument($Settings).AddArgument($RequestQueue).AddArgument($ResponseMap).AddArgument($BridgeState) | Out-Null
+                    $async = $powershell.BeginInvoke()
+                    [void]$active.Add([PSCustomObject]@{ PowerShell = $powershell; Async = $async; Client = $client })
+                    continue
+                }
+                Start-Sleep -Milliseconds 20
+            }
+        } finally {
+            try { $listener.Stop() } catch { $null = $_ }
+            foreach ($job in @($active.ToArray())) {
+                try { $job.Client.Close() } catch { $null = $_ }
+                try {
+                    if (-not $job.Async.AsyncWaitHandle.WaitOne(500)) { $job.PowerShell.Stop() }
+                    $job.PowerShell.EndInvoke($job.Async) | Out-Null
+                } catch {
+                    $BridgeState["HandlerFailureCount"] = [int]$BridgeState["HandlerFailureCount"] + 1
+                }
+                $job.PowerShell.Dispose()
+            }
+            $active.Clear()
+            $BridgeState["ActiveClients"] = 0
+            try { $pool.Close() } catch { $null = $_ }
+            $pool.Dispose()
+        }
+    }
+}
+
 function Stop-AutomationBridge {
     $script:AutomationBridgeState["Stop"] = $true
     if ($script:AutomationBridgeTimer) { $script:AutomationBridgeTimer.Stop() }
+    if ($script:AutomationBridgeListener) {
+        try { $script:AutomationBridgeListener.Stop() } catch { $null = $_ }
+        $script:AutomationBridgeListener = $null
+    }
     if ($script:AutomationBridgeWorker) {
         try {
-            if ($script:AutomationBridgeAsyncResult -and -not $script:AutomationBridgeAsyncResult.AsyncWaitHandle.WaitOne(1500)) {
+            if ($script:AutomationBridgeAsyncResult -and -not $script:AutomationBridgeAsyncResult.AsyncWaitHandle.WaitOne(2500)) {
                 try { $script:AutomationBridgeWorker.Stop() } catch {}
             }
         } catch {}
@@ -2802,116 +3592,63 @@ function Start-AutomationBridge {
     Stop-AutomationBridge
     if (-not $script:AutomationBridgeEnabled) { Update-AutomationBridgeControls; return }
     $ip = Resolve-AutomationBridgeIPAddress -BindAddress $script:AutomationBridgeBindAddress
-    try {
-        $probe = [System.Net.Sockets.TcpListener]::new($ip, [int]$script:AutomationBridgePort)
-        $probe.Start()
-        $probe.Stop()
-    } catch {
-        Update-Status "Bridge start failed: $($_.Exception.Message)"
-        $script:AutomationBridgeEnabled = $false
-        Save-AutomationBridgeSettings
+    if ($null -eq $ip) {
+        $script:AutomationBridgeLastError = "Invalid bind address"
+        Update-Status "Bridge start failed: invalid bind address"
         Update-AutomationBridgeControls
         return
     }
-    $settings = [PSCustomObject]@{ BindAddress = [string]$ip.ToString(); Port = [int]$script:AutomationBridgePort }
-    $script:AutomationBridgeState = [hashtable]::Synchronized(@{ Stop = $false })
-    $workerScript = {
-        param($Settings, $RequestQueue, $ResponseMap, $BridgeState)
-
-        function ConvertFrom-BridgeQuery {
-            param([string]$Query)
-            $result = @{}
-            if ([string]::IsNullOrWhiteSpace($Query)) { return $result }
-            foreach ($pair in $Query.TrimStart("?").Split("&")) {
-                if ([string]::IsNullOrWhiteSpace($pair)) { continue }
-                $parts = $pair.Split("=", 2)
-                $name = [Uri]::UnescapeDataString($parts[0])
-                $value = if ($parts.Count -gt 1) { [Uri]::UnescapeDataString($parts[1].Replace("+", " ")) } else { "" }
-                $result[$name] = $value
-            }
-            return $result
-        }
-
-        function Send-BridgeJson {
-            param($Client, [int]$Status, $Body)
-            $reason = switch ($Status) { 200 { "OK" } 202 { "Accepted" } 400 { "Bad Request" } 401 { "Unauthorized" } 404 { "Not Found" } 409 { "Conflict" } 500 { "Internal Server Error" } 502 { "Bad Gateway" } default { "OK" } }
-            $payload = if ($null -eq $Body) { "{}" } else { $Body | ConvertTo-Json -Depth 8 -Compress }
-            $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
-            $header = "HTTP/1.1 $Status $reason`r`nContent-Type: application/json; charset=utf-8`r`nContent-Length: $($bodyBytes.Length)`r`nConnection: close`r`n`r`n"
-            $headerBytes = [System.Text.Encoding]::ASCII.GetBytes($header)
-            $stream = $Client.GetStream()
-            $stream.Write($headerBytes, 0, $headerBytes.Length)
-            $stream.Write($bodyBytes, 0, $bodyBytes.Length)
-        }
-
-        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Parse([string]$Settings.BindAddress), [int]$Settings.Port)
-        $listener.Start()
-        try {
-            while (-not [bool]$BridgeState["Stop"]) {
-                if (-not $listener.Pending()) { Start-Sleep -Milliseconds 100; continue }
-                $client = $listener.AcceptTcpClient()
-                try {
-                    $stream = $client.GetStream()
-                    $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::ASCII, $false, 2048, $true)
-                    $requestLine = $reader.ReadLine()
-                    if ([string]::IsNullOrWhiteSpace($requestLine)) { Send-BridgeJson -Client $client -Status 400 -Body @{ error = "Missing request line" }; continue }
-                    $parts = $requestLine.Split(" ")
-                    if ($parts.Count -lt 2) { Send-BridgeJson -Client $client -Status 400 -Body @{ error = "Bad request line" }; continue }
-                    $headers = @{}
-                    while ($true) {
-                        $line = $reader.ReadLine()
-                        if ($null -eq $line -or $line -eq "") { break }
-                        $split = $line.Split(":", 2)
-                        if ($split.Count -eq 2) { $headers[$split[0].Trim().ToLowerInvariant()] = $split[1].Trim() }
-                    }
-                    $body = ""
-                    $length = 0
-                    if ($headers.ContainsKey("content-length")) { [int]::TryParse([string]$headers["content-length"], [ref]$length) | Out-Null }
-                    if ($length -gt 0) {
-                        $buffer = New-Object char[] $length
-                        $read = $reader.Read($buffer, 0, $length)
-                        if ($read -gt 0) { $body = -join $buffer[0..($read - 1)] }
-                    }
-                    $uri = [Uri]::new("http://localhost$($parts[1])")
-                    $id = [guid]::NewGuid().ToString("N")
-                    $request = [PSCustomObject]@{
-                        Id = $id
-                        Method = [string]$parts[0].ToUpperInvariant()
-                        Path = [string]$uri.AbsolutePath
-                        Query = (ConvertFrom-BridgeQuery -Query $uri.Query)
-                        Headers = $headers
-                        Body = $body
-                        Remote = [string]$client.Client.RemoteEndPoint
-                    }
-                    $RequestQueue.Enqueue($request)
-                    $deadline = [DateTime]::UtcNow.AddSeconds(15)
-                    $response = $null
-                    while ([DateTime]::UtcNow -lt $deadline -and -not [bool]$BridgeState["Stop"]) {
-                        if ($ResponseMap.ContainsKey($id)) {
-                            $response = $ResponseMap[$id]
-                            $ResponseMap.Remove($id)
-                            break
-                        }
-                        Start-Sleep -Milliseconds 50
-                    }
-                    if ($null -eq $response) { Send-BridgeJson -Client $client -Status 500 -Body @{ error = "Bridge request timed out" } }
-                    else { Send-BridgeJson -Client $client -Status ([int]$response.Status) -Body $response.Body }
-                } catch {
-                    try { Send-BridgeJson -Client $client -Status 500 -Body @{ error = $_.Exception.Message } } catch {}
-                } finally {
-                    try { $client.Close() } catch {}
-                }
-            }
-        } finally {
-            try { $listener.Stop() } catch {}
-        }
+    if (-not [System.Net.IPAddress]::IsLoopback($ip) -and (
+        -not $script:AutomationBridgeNetworkExposureApproved -or
+        $script:AutomationBridgeNetworkExposureApprovedFor -ne $ip.ToString()
+    )) {
+        $script:AutomationBridgeLastError = "Network exposure requires approval"
+        Update-Status "Bridge start blocked until network exposure is approved"
+        Update-AutomationBridgeControls
+        return
     }
+    try {
+        $script:AutomationBridgeListener = [System.Net.Sockets.TcpListener]::new($ip, [int]$script:AutomationBridgePort)
+        $script:AutomationBridgeListener.Start()
+    } catch {
+        $script:AutomationBridgeListener = $null
+        $script:AutomationBridgeLastError = "Bind address or port is unavailable"
+        Update-Status "Bridge start failed: bind address or port is unavailable"
+        Update-AutomationBridgeControls
+        return
+    }
+    $settings = [PSCustomObject]@{
+        Listener = $script:AutomationBridgeListener
+        ApiKey = [string]$script:AutomationBridgeApiKey
+        MaxRequestLineBytes = [int]$script:AutomationBridgeMaxRequestLineBytes
+        MaxHeaderBytes = [int]$script:AutomationBridgeMaxHeaderBytes
+        MaxHeaderCount = [int]$script:AutomationBridgeMaxHeaderCount
+        MaxQueryParameterCount = [int]$script:AutomationBridgeMaxQueryParameterCount
+        MaxBodyBytes = [int]$script:AutomationBridgeMaxBodyBytes
+        MaxResponseBytes = [int]$script:AutomationBridgeMaxResponseBytes
+        MaxConcurrentClients = [int]$script:AutomationBridgeMaxConcurrentClients
+        ReadTimeoutMs = [int]$script:AutomationBridgeReadTimeoutMs
+        WriteTimeoutMs = [int]$script:AutomationBridgeWriteTimeoutMs
+        RouteTimeoutMs = [int]$script:AutomationBridgeRouteTimeoutMs
+    }
+    $script:AutomationBridgeState = [hashtable]::Synchronized(@{
+        Stop = $false
+        ActiveClients = 0
+        PeakActiveClients = 0
+        RejectedClients = 0
+        WriteFailureCount = 0
+        HandlerFailureCount = 0
+        LastReadTimeoutMs = 0
+        LastWriteTimeoutMs = 0
+    })
+    $workerScript = Get-AutomationBridgeWorkerScript
     $script:AutomationBridgeInput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
     $script:AutomationBridgeInput.Complete()
     $script:AutomationBridgeOutput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
     $script:AutomationBridgeWorker = [PowerShell]::Create()
     $script:AutomationBridgeWorker.AddScript($workerScript.ToString()).AddArgument($settings).AddArgument($script:AutomationBridgeRequests).AddArgument($script:AutomationBridgeResponses).AddArgument($script:AutomationBridgeState) | Out-Null
     $script:AutomationBridgeAsyncResult = $script:AutomationBridgeWorker.BeginInvoke($script:AutomationBridgeInput, $script:AutomationBridgeOutput)
+    $script:AutomationBridgeLastError = ""
     Start-AutomationBridgeRequestTimer
     Update-AutomationBridgeControls
     Update-Status "Bridge listening on http://$script:AutomationBridgeBindAddress`:$script:AutomationBridgePort"
@@ -5805,7 +6542,11 @@ $automationBridgeEnabledCheckbox.Add_Checked({
     if ($script:UpdatingAutomationBridgeUI) { return }
     if (-not (Read-AutomationBridgeSettingsFromUI)) { $automationBridgeEnabledCheckbox.IsChecked = $false; return }
     $script:AutomationBridgeEnabled = $true
-    Save-AutomationBridgeSettings
+    if (-not (Save-AutomationBridgeSettings)) {
+        $script:AutomationBridgeEnabled = $false
+        Update-AutomationBridgeControls
+        return
+    }
     Start-AutomationBridge
 })
 $automationBridgeEnabledCheckbox.Add_Unchecked({
@@ -5813,13 +6554,13 @@ $automationBridgeEnabledCheckbox.Add_Unchecked({
     if ($null -eq $automationBridgeStatusText) { return }
     Read-AutomationBridgeSettingsFromUI | Out-Null
     $script:AutomationBridgeEnabled = $false
-    Save-AutomationBridgeSettings
+    $saved = Save-AutomationBridgeSettings
     Stop-AutomationBridge
-    Update-Status "Bridge off"
+    if ($saved) { Update-Status "Bridge off" } else { Update-Status "Bridge stopped, but the disabled state could not be saved" }
 })
 $automationBridgeSaveBtn.Add_Click({
     if (-not (Read-AutomationBridgeSettingsFromUI)) { return }
-    Save-AutomationBridgeSettings
+    if (-not (Save-AutomationBridgeSettings)) { Update-AutomationBridgeControls; return }
     if ($script:AutomationBridgeEnabled) { Start-AutomationBridge } else { Stop-AutomationBridge }
     Update-Status "Bridge settings saved"
 })

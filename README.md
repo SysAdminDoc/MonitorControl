@@ -171,8 +171,10 @@ The Pester suite imports only selected pure function definitions from `MonitorCo
 
 ### Local Automation Bridge
 - Open the **System** tab and enable **Local Automation Bridge** only when needed
-- Default bind is `127.0.0.1:34291`; non-local bind addresses must be entered manually
-- Write commands require the generated API key through `X-MonitorControl-Key`, `Authorization: Bearer <key>`, or JSON `apiKey`
+- Default bind is `127.0.0.1:34291`; enabling a non-loopback address requires an explicit network-exposure warning because the bridge uses unencrypted HTTP
+- Only an exact, body-free `GET /api/health` is unauthenticated; every other request requires the generated key through `X-MonitorControl-Key` or `Authorization: Bearer <key>`
+- Query-string and JSON-body API keys are rejected, and the saved key is encrypted for the current Windows user with DPAPI
+- The listener enforces request-line, header-count, header-size, body-size, response-size, concurrency, and socket-deadline limits; malformed framing receives a deterministic 4xx response
 - Supported endpoints are `GET /api/health`, `GET /api/monitors`, `GET /api/profiles`, `GET /api/brightness`, `POST /api/brightness`, and `POST /api/profile`
 - MQTT/Home Assistant integration remains disabled; use the bridge as the local foundation before enabling network integrations
 
@@ -376,8 +378,8 @@ Your monitor either:
 
 ### Data Storage
 - Profiles: `%APPDATA%\MonitorControlPro\*.json`
-- Automation bridge settings: `%APPDATA%\MonitorControlPro\automation-bridge.json`
-- Automation bridge write log: `%APPDATA%\MonitorControlPro\automation-bridge-writes.jsonl`
+- Automation bridge settings: `%APPDATA%\MonitorControlPro\automation-bridge.json` (API key protected with current-user DPAPI)
+- Automation bridge write log: `%APPDATA%\MonitorControlPro\automation-bridge-writes.jsonl` (redacted and size-rotated)
 - No registry modifications
 - No admin rights required
 

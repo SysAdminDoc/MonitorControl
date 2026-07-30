@@ -41,11 +41,162 @@ BeforeAll {
         "Test-CapabilityProbeAllowed",
         "Get-CapabilitiesSafetyStatusText",
         "Start-CapabilitiesWorker",
+        "New-AutomationBridgeApiKey",
+        "Protect-AutomationBridgeApiKey",
+        "Unprotect-AutomationBridgeApiKey",
+        "Get-AutomationBridgeSettingsObject",
+        "Save-AutomationBridgeSettings",
+        "Load-AutomationBridgeSettings",
+        "Resolve-AutomationBridgeIPAddress",
+        "Test-AutomationBridgeLoopback",
+        "New-AutomationBridgeResponse",
+        "Get-AutomationBridgeBodyJson",
+        "Get-AutomationBridgeInputValue",
+        "Test-AutomationBridgeToken",
+        "Test-AutomationBridgeRequestAuthorized",
+        "Test-AutomationBridgePayloadCredential",
+        "ConvertTo-AutomationBridgeAuditEntry",
+        "Convert-AutomationBridgeAuditFile",
+        "Initialize-AutomationBridgeAuditLog",
+        "Write-AutomationBridgeWriteLog",
+        "Invoke-AutomationBridgeRequest",
+        "Process-AutomationBridgeRequests",
+        "Get-AutomationBridgeWorkerScript",
         "Normalize-ScheduleTime",
         "Get-ScheduleMinutes",
         "Get-ActiveScheduleRule",
         "Get-IdleSecondsFromTicks"
     )
+
+    function Start-TestAutomationBridge {
+        param(
+            [int]$MaxRequestLineBytes = 128,
+            [int]$MaxHeaderBytes = 512,
+            [int]$MaxHeaderCount = 8,
+            [int]$MaxBodyBytes = 128,
+            [int]$MaxConcurrentClients = 2,
+            [int]$ReadTimeoutMs = 300,
+            [int]$WriteTimeoutMs = 300
+        )
+        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+        $listener.Start()
+        $port = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
+        $requests = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
+        $responses = [hashtable]::Synchronized(@{})
+        $state = [hashtable]::Synchronized(@{
+            Stop = $false
+            ActiveClients = 0
+            PeakActiveClients = 0
+            RejectedClients = 0
+            WriteFailureCount = 0
+            HandlerFailureCount = 0
+            LastReadTimeoutMs = 0
+            LastWriteTimeoutMs = 0
+        })
+        $settings = [PSCustomObject]@{
+            Listener = $listener
+            ApiKey = "0123456789abcdef0123456789abcdef"
+            MaxRequestLineBytes = $MaxRequestLineBytes
+            MaxHeaderBytes = $MaxHeaderBytes
+            MaxHeaderCount = $MaxHeaderCount
+            MaxQueryParameterCount = 8
+            MaxBodyBytes = $MaxBodyBytes
+            MaxResponseBytes = 8192
+            MaxConcurrentClients = $MaxConcurrentClients
+            ReadTimeoutMs = $ReadTimeoutMs
+            WriteTimeoutMs = $WriteTimeoutMs
+            RouteTimeoutMs = 1000
+        }
+
+        $workerInput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
+        $workerInput.Complete()
+        $workerOutput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
+        $workerPowerShell = [PowerShell]::Create()
+        $workerScript = Get-AutomationBridgeWorkerScript
+        $workerPowerShell.AddScript($workerScript.ToString()).AddArgument($settings).AddArgument($requests).AddArgument($responses).AddArgument($state) | Out-Null
+        $workerAsync = $workerPowerShell.BeginInvoke($workerInput, $workerOutput)
+
+        $responderInput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
+        $responderInput.Complete()
+        $responderOutput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
+        $responderPowerShell = [PowerShell]::Create()
+        $responderScript = {
+            param($Requests, $Responses, $State)
+            while (-not [bool]$State["Stop"]) {
+                $request = $null
+                if ($Requests.TryDequeue([ref]$request)) {
+                    $Responses[$request.Id] = [PSCustomObject]@{
+                        Status = 200
+                        Body = @{ accepted = $true; path = [string]$request.Path }
+                    }
+                } else {
+                    Start-Sleep -Milliseconds 10
+                }
+            }
+        }
+        $responderPowerShell.AddScript($responderScript.ToString()).AddArgument($requests).AddArgument($responses).AddArgument($state) | Out-Null
+        $responderAsync = $responderPowerShell.BeginInvoke($responderInput, $responderOutput)
+
+        Start-Sleep -Milliseconds 75
+        return [PSCustomObject]@{
+            Port = $port
+            ApiKey = [string]$settings.ApiKey
+            Listener = $listener
+            State = $state
+            WorkerPowerShell = $workerPowerShell
+            WorkerAsync = $workerAsync
+            WorkerInput = $workerInput
+            WorkerOutput = $workerOutput
+            ResponderPowerShell = $responderPowerShell
+            ResponderAsync = $responderAsync
+            ResponderInput = $responderInput
+            ResponderOutput = $responderOutput
+        }
+    }
+
+    function Stop-TestAutomationBridge {
+        param($Server)
+        if ($null -eq $Server) { return }
+        $Server.State["Stop"] = $true
+        try { $Server.Listener.Stop() } catch { $null = $_ }
+        foreach ($entry in @(
+            [PSCustomObject]@{ PowerShell = $Server.WorkerPowerShell; Async = $Server.WorkerAsync },
+            [PSCustomObject]@{ PowerShell = $Server.ResponderPowerShell; Async = $Server.ResponderAsync }
+        )) {
+            if ($null -eq $entry.PowerShell) { continue }
+            try {
+                if (-not $entry.Async.AsyncWaitHandle.WaitOne(3000)) { $entry.PowerShell.Stop() }
+                $entry.PowerShell.EndInvoke($entry.Async) | Out-Null
+            } catch { $null = $_ }
+            $entry.PowerShell.Dispose()
+        }
+        foreach ($collection in @($Server.WorkerInput, $Server.WorkerOutput, $Server.ResponderInput, $Server.ResponderOutput)) {
+            if ($null -ne $collection) { $collection.Dispose() }
+        }
+    }
+
+    function Invoke-RawAutomationBridgeRequest {
+        param(
+            $Server,
+            [string]$Request,
+            [switch]$ShutdownSend,
+            [int]$TimeoutMs = 3000
+        )
+        $client = [System.Net.Sockets.TcpClient]::new()
+        $client.ReceiveTimeout = $TimeoutMs
+        $client.SendTimeout = $TimeoutMs
+        try {
+            $client.Connect([System.Net.IPAddress]::Loopback, [int]$Server.Port)
+            $stream = $client.GetStream()
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($Request)
+            if ($bytes.Length -gt 0) { $stream.Write($bytes, 0, $bytes.Length) }
+            if ($ShutdownSend) { $client.Client.Shutdown([System.Net.Sockets.SocketShutdown]::Send) }
+            $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8)
+            return $reader.ReadToEnd()
+        } finally {
+            $client.Close()
+        }
+    }
 }
 
 Describe "Profile filename validation" {
@@ -188,6 +339,230 @@ Describe "Capability discovery safety" {
         $firmwareIndex | Should -BeGreaterThan $markerIndex
         $definition | Should -Match 'finally\s*\{'
         $definition | Should -Match 'Remove-Item -LiteralPath \$SentinelPath'
+    }
+}
+
+Describe "Automation bridge protected settings and routing" {
+    BeforeEach {
+        Get-ChildItem -LiteralPath $TestDrive -Force | Remove-Item -Recurse -Force
+        $script:AutomationBridgeSettingsPath = Join-Path $TestDrive "automation-bridge.json"
+        $script:AutomationBridgeWriteLogPath = Join-Path $TestDrive "automation-bridge-writes.jsonl"
+        $script:AutomationBridgeSettingsSchemaVersion = 2
+        $script:AutomationBridgeAuditLogMaxBytes = 1024
+        $script:AutomationBridgeEnabled = $true
+        $script:AutomationBridgeBindAddress = "127.0.0.1"
+        $script:AutomationBridgePort = 34291
+        $script:AutomationBridgeApiKey = "bridge-secret-0123456789abcdef"
+        $script:AutomationBridgeMqttEnabled = $false
+        $script:AutomationBridgeAllowedCommands = @("list", "readBrightness", "setBrightness", "loadProfile")
+        $script:AutomationBridgeNetworkExposureApproved = $false
+        $script:AutomationBridgeNetworkExposureApprovedFor = ""
+        $script:AutomationBridgeLastError = ""
+        $script:PendingStatusMessage = ""
+        $script:LastStatusMessage = ""
+    }
+
+    It "stores API keys with current-user DPAPI and can unlock them" {
+        Save-AutomationBridgeSettings | Should -BeTrue
+
+        $raw = Get-Content -LiteralPath $script:AutomationBridgeSettingsPath -Raw
+        $saved = $raw | ConvertFrom-Json
+        $raw | Should -Not -Match ([regex]::Escape($script:AutomationBridgeApiKey))
+        $saved.PSObject.Properties.Name | Should -Not -Contain "ApiKey"
+        $saved.ApiKeyProtected | Should -Match '^dpapi:v1:'
+        Unprotect-AutomationBridgeApiKey -ProtectedApiKey $saved.ApiKeyProtected | Should -Be $script:AutomationBridgeApiKey
+    }
+
+    It "migrates a legacy plaintext key without changing it" {
+        $legacyKey = "legacy-secret-0123456789abcdef"
+        Set-Content -LiteralPath $script:AutomationBridgeSettingsPath -Encoding UTF8 -Value (
+            @{
+                Enabled = $false
+                BindAddress = "127.0.0.1"
+                Port = 34291
+                ApiKey = $legacyKey
+                MqttEnabled = $false
+            } | ConvertTo-Json
+        )
+
+        Load-AutomationBridgeSettings
+
+        $script:AutomationBridgeApiKey | Should -Be $legacyKey
+        $raw = Get-Content -LiteralPath $script:AutomationBridgeSettingsPath -Raw
+        $raw | Should -Not -Match ([regex]::Escape($legacyKey))
+        ($raw | ConvertFrom-Json).ApiKeyProtected | Should -Match '^dpapi:v1:'
+    }
+
+    It "fails closed without rewriting a future settings schema" {
+        $futureJson = '{"SchemaVersion":99,"Enabled":true,"BindAddress":"127.0.0.1","Port":34291,"ApiKeyProtected":"future-format","FutureField":"preserve-me"}'
+        Set-Content -LiteralPath $script:AutomationBridgeSettingsPath -Encoding UTF8 -Value $futureJson
+
+        Load-AutomationBridgeSettings
+
+        $script:AutomationBridgeEnabled | Should -BeFalse
+        $script:AutomationBridgeLastError | Should -Match "newer"
+        (Get-Content -LiteralPath $script:AutomationBridgeSettingsPath -Raw) | Should -Match '"FutureField":"preserve-me"'
+        (Get-Content -LiteralPath $script:AutomationBridgeSettingsPath -Raw) | Should -Match '"SchemaVersion":99'
+    }
+
+    It "rejects invalid bind addresses instead of falling back to loopback" {
+        Resolve-AutomationBridgeIPAddress -BindAddress "not-an-ip-address" | Should -BeNullOrEmpty
+        Test-AutomationBridgeLoopback -BindAddress "localhost" | Should -BeTrue
+        Test-AutomationBridgeLoopback -BindAddress "0.0.0.0" | Should -BeFalse
+    }
+
+    It "compares only header tokens and rejects payload credentials" {
+        Test-AutomationBridgeToken -Provided $script:AutomationBridgeApiKey -Expected $script:AutomationBridgeApiKey | Should -BeTrue
+        Test-AutomationBridgeToken -Provided "$($script:AutomationBridgeApiKey)x" -Expected $script:AutomationBridgeApiKey | Should -BeFalse
+        $request = [PSCustomObject]@{
+            Headers = @{ "x-monitorcontrol-key" = $script:AutomationBridgeApiKey }
+            Query = @{ apiKey = $script:AutomationBridgeApiKey }
+            Body = ""
+        }
+        Test-AutomationBridgeRequestAuthorized -Request $request | Should -BeTrue
+        Test-AutomationBridgePayloadCredential -Request $request -Body $null | Should -BeTrue
+    }
+
+    It "redacts stable targets, remote endpoints, messages, and secrets from bounded logs" {
+        $script:AutomationBridgeAuditLogMaxBytes = 420
+        1..8 | ForEach-Object {
+            Write-AutomationBridgeWriteLog -Action "loadProfile" -Target "private-profile-$($_)" -Value "" -Success $false -Remote "10.20.30.40:1234" -Message "secret exception detail"
+        }
+
+        Test-Path -LiteralPath "$script:AutomationBridgeWriteLogPath.1" | Should -BeTrue
+        $allLogText = @(
+            Get-Content -LiteralPath $script:AutomationBridgeWriteLogPath -Raw
+            Get-Content -LiteralPath "$script:AutomationBridgeWriteLogPath.1" -Raw
+        ) -join "`n"
+        $allLogText | Should -Not -Match "private-profile|10\.20\.30\.40|secret exception"
+        $allLogText | Should -Match '"RemoteScope":"network"'
+        (Get-Item -LiteralPath $script:AutomationBridgeWriteLogPath).Length | Should -BeLessOrEqual $script:AutomationBridgeAuditLogMaxBytes
+    }
+
+    It "sanitizes retained legacy audit files during migration" {
+        $legacyLine = @{
+            Timestamp = "2026-07-29T12:00:00Z"
+            Action = "loadProfile"
+            Target = "private-profile"
+            Value = ""
+            Success = $false
+            Remote = "10.20.30.40:1234"
+            Message = "secret exception detail"
+        } | ConvertTo-Json -Compress
+        Set-Content -LiteralPath $script:AutomationBridgeWriteLogPath -Encoding UTF8 -Value $legacyLine
+        Set-Content -LiteralPath "$script:AutomationBridgeWriteLogPath.1" -Encoding UTF8 -Value $legacyLine
+
+        Initialize-AutomationBridgeAuditLog
+
+        $migrated = (Get-Content -LiteralPath $script:AutomationBridgeWriteLogPath -Raw) + (Get-Content -LiteralPath "$script:AutomationBridgeWriteLogPath.1" -Raw)
+        $migrated | Should -Not -Match "private-profile|10\.20\.30\.40|secret exception"
+        $migrated | Should -Match '"TargetScope":"specified"'
+        $migrated | Should -Match '"RemoteScope":"network"'
+    }
+
+    It "returns a generic 500 without leaking exception text" {
+        $script:AutomationBridgeRequests = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
+        $script:AutomationBridgeResponses = [hashtable]::Synchronized(@{})
+        $request = [PSCustomObject]@{ Id = "failure"; Method = "GET"; Path = "/api/monitors"; Query = @{}; Headers = @{}; Body = "" }
+        $script:AutomationBridgeRequests.Enqueue($request)
+        Mock Invoke-AutomationBridgeRequest { throw "secret-key and stable-monitor-id" }
+
+        Process-AutomationBridgeRequests
+
+        $responseJson = $script:AutomationBridgeResponses["failure"].Body | ConvertTo-Json -Compress
+        $script:AutomationBridgeResponses["failure"].Status | Should -Be 500
+        $responseJson | Should -Match "internal_error"
+        $responseJson | Should -Not -Match "secret-key|stable-monitor-id"
+    }
+}
+
+Describe "Automation bridge raw socket limits" {
+    BeforeEach {
+        $script:RawBridgeServer = Start-TestAutomationBridge
+    }
+
+    AfterEach {
+        Stop-TestAutomationBridge -Server $script:RawBridgeServer
+        $script:RawBridgeServer = $null
+    }
+
+    It "exposes only an empty health check without authentication" {
+        $health = Invoke-RawAutomationBridgeRequest -Server $script:RawBridgeServer -Request "GET /api/health HTTP/1.1`r`nHost: localhost`r`n`r`n"
+        $healthWithQuery = Invoke-RawAutomationBridgeRequest -Server $script:RawBridgeServer -Request "GET /api/health?detail=1 HTTP/1.1`r`nHost: localhost`r`n`r`n"
+
+        $health | Should -Match '^HTTP/1\.1 200 OK'
+        $health | Should -Match '\{"ok":true\}'
+        $health | Should -Not -Match 'version|mqtt'
+        $healthWithQuery | Should -Match '^HTTP/1\.1 401 Unauthorized'
+    }
+
+    It "requires a valid header key and rejects query or body keys" {
+        $noKey = Invoke-RawAutomationBridgeRequest -Server $script:RawBridgeServer -Request "GET /api/monitors HTTP/1.1`r`nHost: localhost`r`n`r`n"
+        $queryKey = Invoke-RawAutomationBridgeRequest -Server $script:RawBridgeServer -Request "GET /api/monitors?apiKey=$($script:RawBridgeServer.ApiKey) HTTP/1.1`r`nHost: localhost`r`n`r`n"
+        $payload = "{`"apiKey`":`"$($script:RawBridgeServer.ApiKey)`",`"value`":50}"
+        $payloadLength = [System.Text.Encoding]::UTF8.GetByteCount($payload)
+        $bodyKey = Invoke-RawAutomationBridgeRequest -Server $script:RawBridgeServer -Request "POST /api/brightness HTTP/1.1`r`nHost: localhost`r`nContent-Length: $payloadLength`r`n`r`n$payload"
+        $headerKey = Invoke-RawAutomationBridgeRequest -Server $script:RawBridgeServer -Request "GET /api/monitors HTTP/1.1`r`nHost: localhost`r`nX-MonitorControl-Key: $($script:RawBridgeServer.ApiKey)`r`n`r`n"
+
+        $noKey | Should -Match '^HTTP/1\.1 401 Unauthorized'
+        $queryKey | Should -Match '^HTTP/1\.1 400 Bad Request'
+        $bodyKey | Should -Match '^HTTP/1\.1 400 Bad Request'
+        $headerKey | Should -Match '^HTTP/1\.1 200 OK'
+    }
+
+    It "bounds the request line, header bytes and count, body, and framing" {
+        $longTarget = "/" + ("a" * 140)
+        $longLine = Invoke-RawAutomationBridgeRequest -Server $script:RawBridgeServer -Request "GET $longTarget HTTP/1.1`r`nHost: localhost`r`n`r`n"
+        $manyHeadersText = "GET /api/health HTTP/1.1`r`nHost: localhost`r`n" + ((1..9 | ForEach-Object { "X-H$($_): value`r`n" }) -join "") + "`r`n"
+        $manyHeaders = Invoke-RawAutomationBridgeRequest -Server $script:RawBridgeServer -Request $manyHeadersText
+        $invalidLength = Invoke-RawAutomationBridgeRequest -Server $script:RawBridgeServer -Request "POST /api/brightness HTTP/1.1`r`nHost: localhost`r`nContent-Length: +1`r`n`r`n"
+        $duplicateLength = Invoke-RawAutomationBridgeRequest -Server $script:RawBridgeServer -Request "POST /api/brightness HTTP/1.1`r`nHost: localhost`r`nContent-Length: 0`r`nContent-Length: 0`r`n`r`n"
+        $transferEncoding = Invoke-RawAutomationBridgeRequest -Server $script:RawBridgeServer -Request "POST /api/brightness HTTP/1.1`r`nHost: localhost`r`nTransfer-Encoding: chunked`r`nContent-Length: 0`r`n`r`n"
+        $largeBody = Invoke-RawAutomationBridgeRequest -Server $script:RawBridgeServer -Request "POST /api/brightness HTTP/1.1`r`nHost: localhost`r`nContent-Length: 129`r`n`r`n"
+
+        $longLine | Should -Match '^HTTP/1\.1 414 URI Too Long'
+        $manyHeaders | Should -Match '^HTTP/1\.1 431 Request Header Fields Too Large'
+        $invalidLength | Should -Match '^HTTP/1\.1 400 Bad Request'
+        $duplicateLength | Should -Match '^HTTP/1\.1 400 Bad Request'
+        $transferEncoding | Should -Match '^HTTP/1\.1 400 Bad Request'
+        $largeBody | Should -Match '^HTTP/1\.1 413 Payload Too Large'
+    }
+
+    It "rejects an incomplete body and enforces read and write deadlines" {
+        $incompleteBody = Invoke-RawAutomationBridgeRequest -Server $script:RawBridgeServer -Request "POST /api/brightness HTTP/1.1`r`nHost: localhost`r`nContent-Length: 5`r`n`r`nabc" -ShutdownSend
+        $timedOut = Invoke-RawAutomationBridgeRequest -Server $script:RawBridgeServer -Request "GET /api/health HTTP/1.1"
+
+        $incompleteBody | Should -Match '^HTTP/1\.1 400 Bad Request'
+        $timedOut | Should -Match '^HTTP/1\.1 408 Request Timeout'
+        $script:RawBridgeServer.State["LastReadTimeoutMs"] | Should -Be 300
+        $script:RawBridgeServer.State["LastWriteTimeoutMs"] | Should -Be 300
+    }
+
+    It "rejects excess clients while keeping active work bounded" {
+        Stop-TestAutomationBridge -Server $script:RawBridgeServer
+        $script:RawBridgeServer = Start-TestAutomationBridge -MaxConcurrentClients 2 -ReadTimeoutMs 1500 -WriteTimeoutMs 300
+        $slowClients = @()
+        try {
+            1..2 | ForEach-Object {
+                $client = [System.Net.Sockets.TcpClient]::new()
+                $client.Connect([System.Net.IPAddress]::Loopback, [int]$script:RawBridgeServer.Port)
+                $bytes = [System.Text.Encoding]::ASCII.GetBytes("GET /")
+                $client.GetStream().Write($bytes, 0, $bytes.Length)
+                $slowClients += $client
+            }
+            $deadline = [DateTime]::UtcNow.AddSeconds(2)
+            while ([int]$script:RawBridgeServer.State["ActiveClients"] -lt 2 -and [DateTime]::UtcNow -lt $deadline) {
+                Start-Sleep -Milliseconds 20
+            }
+
+            $rejected = Invoke-RawAutomationBridgeRequest -Server $script:RawBridgeServer -Request "GET /api/health HTTP/1.1`r`nHost: localhost`r`n`r`n"
+
+            $rejected | Should -Match '^HTTP/1\.1 503 Service Unavailable'
+            $script:RawBridgeServer.State["PeakActiveClients"] | Should -BeLessOrEqual 2
+            $script:RawBridgeServer.State["RejectedClients"] | Should -BeGreaterOrEqual 1
+        } finally {
+            foreach ($client in $slowClients) { $client.Close() }
+        }
     }
 }
 
