@@ -55,6 +55,7 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 - **VCP Explorer** — Query and set any VCP code for advanced users
 - **VCP Code Scanner** — Discover which DDC/CI features your monitor supports, including extended MCCS codes for gamma, OSD controls, indicators, auxiliary power, and display modes
 - **Capabilities-Aware Controls** — Parses monitor `vcp(...)` capabilities, disables controls that are known unsupported, and can scan either reported capabilities or the full probe table
+- **Crash-Safe Capability Discovery** — Requires explicit consent, persists a per-probe crash sentinel, automatically excludes an interrupted monitor identity, and offers a maximum-compatibility mode that never requests capability strings
 - **Stable Monitor Identity** — Stores EDID/device-path backed monitor identities, supports custom display labels, and targets saved profiles by identity after reordering
 - **Accessibility & Localization Baseline** — Applies English UI string keys, explicit automation names, and stable tab order for screen-reader friendly control surfaces
 - **Portable Release ZIP** — Local release builds package the script, icon, README, LICENSE, signature status, and SHA256 checksums
@@ -174,6 +175,13 @@ The Pester suite imports only selected pure function definitions from `MonitorCo
 - Write commands require the generated API key through `X-MonitorControl-Key`, `Authorization: Bearer <key>`, or JSON `apiKey`
 - Supported endpoints are `GET /api/health`, `GET /api/monitors`, `GET /api/profiles`, `GET /api/brightness`, `POST /api/brightness`, and `POST /api/profile`
 - MQTT/Home Assistant integration remains disabled; use the bridge as the local foundation before enabling network integrations
+
+### Capability Discovery Safety
+- On first launch, choose whether MonitorControl Pro may request full DDC/CI capability strings from monitor firmware
+- Choose **No** or enable **Maximum compatibility** in **System** to prevent all capability-string requests
+- Before each enabled request, the app persists the selected monitor identity in a crash sentinel and clears it only after the native call returns
+- If the app or Windows exits during a request, discovery is disabled on the next launch and that monitor identity is excluded
+- Use **Exclude selected** or **Clear exclusions** in **System** to manage the per-monitor exclusion list
 
 ### Navigation
 - Click on monitor rectangles to select different displays
