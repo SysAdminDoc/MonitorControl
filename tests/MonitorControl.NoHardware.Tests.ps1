@@ -53,6 +53,10 @@ BeforeAll {
         "Get-CapabilitiesSection",
         "Get-HexTokens",
         "ConvertFrom-MonitorCapabilities",
+        "Get-DisplayRecoveryBackoffDelay",
+        "Get-DisplayRecoveryReadRetryCount",
+        "Get-DisplayRecoveryTransition",
+        "Test-DisplayWorkerResultCurrent",
         "Test-MonitorSupportsVcp",
         "Test-MonitorSupportsVcpValue",
         "ConvertTo-VcpCode",
@@ -556,6 +560,76 @@ Describe "Monitor capabilities parsing" {
         Test-MonitorSupportsVcp -Monitor $monitor -Code 0xD6 | Should -BeFalse
         Test-MonitorSupportsVcpValue -Monitor $monitor -Code 0x60 -Value 0x11 | Should -BeTrue
         Test-MonitorSupportsVcpValue -Monitor $monitor -Code 0x60 -Value 0x13 | Should -BeFalse
+    }
+}
+
+Describe "Display recovery generation and identity safety" {
+    BeforeEach {
+        $script:DisplayRecoveryOfflineThreshold = 4
+    }
+
+    It "uses bounded exponential backoff and increases read retries after repeated identity failures" {
+        (Get-DisplayRecoveryBackoffDelay -FailureCount 0) | Should -Be 0
+        (Get-DisplayRecoveryBackoffDelay -FailureCount 1) | Should -Be 750
+        (Get-DisplayRecoveryBackoffDelay -FailureCount 2) | Should -Be 1500
+        (Get-DisplayRecoveryBackoffDelay -FailureCount 6) | Should -Be 24000
+        (Get-DisplayRecoveryBackoffDelay -FailureCount 12) | Should -Be 30000
+
+        (Get-DisplayRecoveryReadRetryCount -State ([PSCustomObject]@{ ConsecutiveFailures = 0 }) -DefaultRetries 2) | Should -Be 2
+        (Get-DisplayRecoveryReadRetryCount -State ([PSCustomObject]@{ ConsecutiveFailures = 4 }) -DefaultRetries 2) | Should -Be 4
+        (Get-DisplayRecoveryReadRetryCount -State ([PSCustomObject]@{ ConsecutiveFailures = 20 }) -DefaultRetries 2) | Should -Be 5
+    }
+
+    It "moves one stable identity through stale retrying offline and fresh states" {
+        $clock = [DateTime]::Parse("2026-07-29T12:00:00Z").ToUniversalTime()
+        $state = Get-DisplayRecoveryTransition -IdentityKey "edid:a" -PreviousState $null -Outcome "Enumerated" -NowUtc $clock -Generation 3
+        $state.Status | Should -Be "Retrying"
+
+        1..3 | ForEach-Object {
+            $state = Get-DisplayRecoveryTransition -IdentityKey "edid:a" -PreviousState $state -Outcome "Failure" -NowUtc $clock.AddSeconds($_) -Generation 3 -ErrorMessage "read failed"
+        }
+        $state.Status | Should -Be "Retrying"
+        $state.ConsecutiveFailures | Should -Be 3
+        $state = Get-DisplayRecoveryTransition -IdentityKey "edid:a" -PreviousState $state -Outcome "Failure" -NowUtc $clock.AddSeconds(4) -Generation 3 -ErrorMessage "read failed"
+        $state.Status | Should -Be "Offline"
+        $state.NextRetryUtc | Should -BeGreaterThan $clock.AddSeconds(4)
+
+        $state = Get-DisplayRecoveryTransition -IdentityKey "edid:a" -PreviousState $state -Outcome "Success" -NowUtc $clock.AddSeconds(10) -Generation 3
+        $state.Status | Should -Be "Fresh"
+        $state.ConsecutiveFailures | Should -Be 0
+        $state.LastSuccessUtc | Should -Be $clock.AddSeconds(10)
+    }
+
+    It "rejects obsolete workers and same-slot results from a different display" {
+        $monitors = @(
+            [PSCustomObject]@{ IdentityKey = "edid:a"; Handle = [IntPtr]101 },
+            [PSCustomObject]@{ IdentityKey = "edid:b"; Handle = [IntPtr]202 }
+        )
+        $result = [PSCustomObject]@{
+            Generation = 8
+            MonitorIndex = 0
+            IdentityKey = "edid:a"
+            HandleValue = [int64]101
+        }
+        (Test-DisplayWorkerResultCurrent -Result $result -CurrentGeneration 8 -Monitors $monitors) | Should -BeTrue
+        (Test-DisplayWorkerResultCurrent -Result $result -CurrentGeneration 9 -Monitors $monitors) | Should -BeFalse
+
+        $replacement = @([PSCustomObject]@{ IdentityKey = "edid:replacement"; Handle = [IntPtr]101 })
+        (Test-DisplayWorkerResultCurrent -Result $result -CurrentGeneration 8 -Monitors $replacement) | Should -BeFalse
+
+        $replacement[0].IdentityKey = "edid:a"
+        $replacement[0].Handle = [IntPtr]303
+        (Test-DisplayWorkerResultCurrent -Result $result -CurrentGeneration 8 -Monitors $replacement) | Should -BeFalse
+    }
+
+    It "wires display device resume and WMI events through one debounced request path" {
+        $source = Get-Content -LiteralPath $script:AppPath -Raw
+        $source | Should -Match '0x007E \{ \$reason = "display-change" \}'
+        $source | Should -Match '0x0219 \{ \$reason = "device-change" \}'
+        $source | Should -Match '\$powerEvent -in @\(0x0006, 0x0007, 0x0012\)'
+        $source | Should -Match 'WmiMonitorBrightnessEvent'
+        $source | Should -Match 'Request-DisplayRecoveryRefresh -Reason \$reason'
+        $source | Should -Match '\$script:DisplayRecoveryGeneration\+\+'
     }
 }
 

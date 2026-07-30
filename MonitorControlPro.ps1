@@ -10,7 +10,7 @@
 
 param([switch]$StartMinimized, [string]$LoadProfile)
 
-Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing, System.IO.Compression, System.IO.Compression.FileSystem
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing, System.IO.Compression, System.IO.Compression.FileSystem, System.Management
 
 $nativeCode = @"
 using System;
@@ -697,6 +697,10 @@ $script:VcpWorkerTimer = $null
 $script:VcpWorkerMode = ""
 $script:VcpWorkerMonitorName = ""
 $script:VcpWorkerLastOutputCount = 0
+$script:VcpWorkerGeneration = -1
+$script:VcpWorkerIdentityKey = ""
+$script:VcpWorkerMonitorIndex = -1
+$script:VcpWorkerHandleValue = [int64]0
 $script:MonitorSettingsWorker = $null
 $script:MonitorSettingsWorkerInput = $null
 $script:MonitorSettingsWorkerOutput = $null
@@ -705,12 +709,16 @@ $script:MonitorSettingsWorkerTimer = $null
 $script:MonitorSettingsWorkerIndex = -1
 $script:MonitorSettingsWorkerName = ""
 $script:MonitorSettingsWorkerLastOutputCount = 0
+$script:MonitorSettingsWorkerGeneration = -1
+$script:MonitorSettingsWorkerTotalReads = 0
+$script:MonitorSettingsWorkerTargets = @()
 $script:CapabilitiesWorker = $null
 $script:CapabilitiesWorkerInput = $null
 $script:CapabilitiesWorkerOutput = $null
 $script:CapabilitiesWorkerAsyncResult = $null
 $script:CapabilitiesWorkerTimer = $null
 $script:CapabilitiesWorkerLastOutputCount = 0
+$script:CapabilitiesWorkerGeneration = -1
 $script:CapabilitiesSafetySettingsPath = ""
 $script:CapabilitiesProbeSentinelPath = ""
 $script:CapabilitiesSafetySchemaVersion = 1
@@ -734,6 +742,7 @@ $script:DdcReportWorkerAsyncResult = $null
 $script:DdcReportWorkerTimer = $null
 $script:DdcReportWorkerLastOutputCount = 0
 $script:DdcReportTargets = @()
+$script:DdcReportWorkerGeneration = -1
 $script:DdcReportLastText = ""
 $script:DdcReportOutputPath = ""
 $script:AutomationBridgeSettingsPath = ""
@@ -936,6 +945,19 @@ $script:TraySuppressWindowStateEvent = $false
 $script:IsQuitting = $false
 $script:ProfileCycleIndex = -1
 $script:DeferredRefreshTimers = @()
+$script:DisplayRecoveryGeneration = 1
+$script:DisplayRecoveryStates = @{}
+$script:DisplayRecoveryPendingReasons = @{}
+$script:DisplayRecoveryDebounceTimer = $null
+$script:DisplayRecoveryEventPumpTimer = $null
+$script:DisplayRecoveryEventQueue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]'
+$script:DisplayRecoveryHwndSource = $null
+$script:DisplayRecoveryWindowHook = $null
+$script:WmiBrightnessEventWatcher = $null
+$script:WmiBrightnessEventSubscription = $null
+$script:DisplayRecoveryEventSourceIdentifier = "MonitorControlPro.WmiBrightness.$PID"
+$script:DisplayRecoveryDebounceMilliseconds = 650
+$script:DisplayRecoveryOfflineThreshold = 4
 
 $script:VCPCodeDescriptions = @{
     0x04 = "Factory Reset"; 0x08 = "Reset Color"; 0x10 = "Brightness"; 0x12 = "Contrast"
@@ -1381,6 +1403,149 @@ function Find-MonitorIndexByIdentity {
         if ([string]$script:PhysicalMonitors[$i].IdentityKey -eq $IdentityKey) { return $i }
     }
     return -1
+}
+
+function Get-DisplayRecoveryBackoffDelay {
+    param([int]$FailureCount)
+    if ($FailureCount -le 0) { return 0 }
+    $exponent = [Math]::Min(6, $FailureCount - 1)
+    return [int][Math]::Min(30000, 750 * [Math]::Pow(2, $exponent))
+}
+
+function Get-DisplayRecoveryReadRetryCount {
+    param($State, [int]$DefaultRetries = 2)
+    $failureCount = if ($null -ne $State -and $State.PSObject.Properties.Name -contains "ConsecutiveFailures") {
+        [Math]::Max(0, [int]$State.ConsecutiveFailures)
+    } else {
+        0
+    }
+    return [int][Math]::Min(5, [Math]::Max(0, $DefaultRetries) + [Math]::Floor($failureCount / 2))
+}
+
+function Get-DisplayRecoveryTransition {
+    param(
+        [string]$IdentityKey,
+        $PreviousState,
+        [ValidateSet("Enumerated", "Stale", "Retry", "Success", "Failure", "Missing")]
+        [string]$Outcome,
+        [DateTime]$NowUtc = [DateTime]::UtcNow,
+        [int]$Generation = 0,
+        [string]$ErrorMessage = ""
+    )
+    $previousFailures = 0
+    $lastSuccessUtc = $null
+    if ($null -ne $PreviousState) {
+        if ($PreviousState.PSObject.Properties.Name -contains "ConsecutiveFailures") {
+            $previousFailures = [Math]::Max(0, [int]$PreviousState.ConsecutiveFailures)
+        }
+        if ($PreviousState.PSObject.Properties.Name -contains "LastSuccessUtc") {
+            $lastSuccessUtc = $PreviousState.LastSuccessUtc
+        }
+    }
+    $status = "Retrying"
+    $failures = $previousFailures
+    $nextRetryUtc = $null
+    $lastError = $ErrorMessage
+    switch ($Outcome) {
+        "Success" {
+            $status = "Fresh"
+            $failures = 0
+            $lastSuccessUtc = $NowUtc
+            $lastError = ""
+        }
+        "Failure" {
+            $failures++
+            $offlineThreshold = if ($script:DisplayRecoveryOfflineThreshold -gt 0) { [int]$script:DisplayRecoveryOfflineThreshold } else { 4 }
+            $status = if ($failures -ge $offlineThreshold) { "Offline" } else { "Retrying" }
+            $nextRetryUtc = $NowUtc.AddMilliseconds((Get-DisplayRecoveryBackoffDelay -FailureCount $failures))
+        }
+        "Stale" {
+            $status = "Stale"
+            $lastError = ""
+        }
+        "Retry" {
+            $status = "Retrying"
+            $lastError = ""
+        }
+        "Missing" {
+            $status = "Offline"
+            $lastError = if ($ErrorMessage) { $ErrorMessage } else { "Display is not currently enumerated" }
+        }
+        default {
+            $status = "Retrying"
+            $lastError = ""
+        }
+    }
+    return [PSCustomObject]@{
+        IdentityKey = [string]$IdentityKey
+        Status = [string]$status
+        LastSuccessUtc = $lastSuccessUtc
+        ConsecutiveFailures = [int]$failures
+        NextRetryUtc = $nextRetryUtc
+        LastError = [string]$lastError
+        Generation = [int]$Generation
+    }
+}
+
+function Test-DisplayWorkerResultCurrent {
+    param($Result, [int]$CurrentGeneration, [object[]]$Monitors)
+    if ($null -eq $Result) { return $false }
+    $properties = @($Result.PSObject.Properties.Name)
+    if ($properties -notcontains "Generation" -or [int]$Result.Generation -ne $CurrentGeneration) { return $false }
+    if ($properties -notcontains "MonitorIndex") { return $false }
+    $monitorIndex = [int]$Result.MonitorIndex
+    if ($monitorIndex -lt 0 -or $monitorIndex -ge @($Monitors).Count) { return $false }
+    $monitor = @($Monitors)[$monitorIndex]
+    if ($null -eq $monitor -or $properties -notcontains "IdentityKey") { return $false }
+    $resultIdentity = [string]$Result.IdentityKey
+    if ([string]::IsNullOrWhiteSpace($resultIdentity) -or $resultIdentity -ne [string]$monitor.IdentityKey) { return $false }
+    if ($properties -contains "HandleValue") {
+        if ($monitor.PSObject.Properties.Name -notcontains "Handle") { return $false }
+        if ([int64]$Result.HandleValue -ne [int64]$monitor.Handle.ToInt64()) { return $false }
+    }
+    return $true
+}
+
+function Set-DisplayRecoveryOutcome {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Updates in-memory recovery state only.')]
+    param(
+        [string]$IdentityKey,
+        [ValidateSet("Enumerated", "Stale", "Retry", "Success", "Failure", "Missing")]
+        [string]$Outcome,
+        [DateTime]$NowUtc = [DateTime]::UtcNow,
+        [int]$Generation = $script:DisplayRecoveryGeneration,
+        [string]$ErrorMessage = ""
+    )
+    if ([string]::IsNullOrWhiteSpace($IdentityKey)) { return $null }
+    $previous = if ($script:DisplayRecoveryStates.ContainsKey($IdentityKey)) { $script:DisplayRecoveryStates[$IdentityKey] } else { $null }
+    $next = Get-DisplayRecoveryTransition -IdentityKey $IdentityKey -PreviousState $previous -Outcome $Outcome -NowUtc $NowUtc -Generation $Generation -ErrorMessage $ErrorMessage
+    $script:DisplayRecoveryStates[$IdentityKey] = $next
+    foreach ($monitor in @($script:PhysicalMonitors)) {
+        if ($null -eq $monitor -or [string]$monitor.IdentityKey -ne $IdentityKey) { continue }
+        $monitor | Add-Member -NotePropertyName RecoveryState -NotePropertyValue ([string]$next.Status) -Force
+        $monitor | Add-Member -NotePropertyName RecoveryLastSuccessUtc -NotePropertyValue $next.LastSuccessUtc -Force
+        $monitor | Add-Member -NotePropertyName RecoveryConsecutiveFailures -NotePropertyValue ([int]$next.ConsecutiveFailures) -Force
+        $monitor | Add-Member -NotePropertyName RecoveryNextRetryUtc -NotePropertyValue $next.NextRetryUtc -Force
+        $monitor | Add-Member -NotePropertyName RecoveryLastError -NotePropertyValue ([string]$next.LastError) -Force
+        $monitor | Add-Member -NotePropertyName RecoveryGeneration -NotePropertyValue ([int]$next.Generation) -Force
+    }
+    try { Update-SelectedMonitorRecoveryUi } catch { $null = $_ }
+    return $next
+}
+
+function Sync-DisplayRecoveryInventory {
+    $present = @{}
+    foreach ($monitor in @($script:PhysicalMonitors)) {
+        if ($null -eq $monitor -or [string]::IsNullOrWhiteSpace([string]$monitor.IdentityKey)) { continue }
+        $identityKey = [string]$monitor.IdentityKey
+        $present[$identityKey] = $true
+        Set-DisplayRecoveryOutcome -IdentityKey $identityKey -Outcome "Enumerated" -Generation $script:DisplayRecoveryGeneration | Out-Null
+    }
+    foreach ($identityKey in @($script:DisplayRecoveryStates.Keys)) {
+        if (-not $present.ContainsKey([string]$identityKey)) {
+            Set-DisplayRecoveryOutcome -IdentityKey ([string]$identityKey) -Outcome "Missing" -Generation $script:DisplayRecoveryGeneration | Out-Null
+        }
+    }
 }
 
 function Update-MonitorIdentityControls {
@@ -1834,6 +1999,7 @@ function Stop-CapabilitiesWorker {
     $script:CapabilitiesWorkerOutput = $null
     $script:CapabilitiesWorkerAsyncResult = $null
     $script:CapabilitiesWorkerLastOutputCount = 0
+    $script:CapabilitiesWorkerGeneration = -1
 }
 
 function Update-CapabilitiesBox {
@@ -1859,17 +2025,19 @@ function Update-CapabilitiesWorkerOutput {
     if (-not $script:CapabilitiesWorker -or -not $script:CapabilitiesWorkerOutput -or -not $script:CapabilitiesWorkerAsyncResult) { return }
     $count = $script:CapabilitiesWorkerOutput.Count
     $completed = [bool]$script:CapabilitiesWorkerAsyncResult.IsCompleted
-    if ($count -ne $script:CapabilitiesWorkerLastOutputCount -and -not $completed) {
+    $workerGeneration = [int]$script:CapabilitiesWorkerGeneration
+    if ($count -ne $script:CapabilitiesWorkerLastOutputCount -and -not $completed -and $workerGeneration -eq $script:DisplayRecoveryGeneration) {
         $script:CapabilitiesWorkerLastOutputCount = $count
         Update-Status "Reading capabilities... $count"
     }
     if (-not $completed) { return }
     try { $script:CapabilitiesWorker.EndInvoke($script:CapabilitiesWorkerAsyncResult) } catch { Update-Status "Capabilities read failed: $($_.Exception.Message)" }
-    foreach ($result in @($script:CapabilitiesWorkerOutput)) {
-        $index = [int]$result.Index
-        if ($index -lt 0 -or $index -ge $script:PhysicalMonitors.Count) { continue }
+    $validResults = @($script:CapabilitiesWorkerOutput | Where-Object {
+        Test-DisplayWorkerResultCurrent -Result $_ -CurrentGeneration $script:DisplayRecoveryGeneration -Monitors $script:PhysicalMonitors
+    })
+    foreach ($result in $validResults) {
+        $index = [int]$result.MonitorIndex
         $mon = $script:PhysicalMonitors[$index]
-        if ($mon.Handle.ToInt64() -ne [int64]$result.HandleValue) { continue }
         $capabilityInfo = ConvertFrom-MonitorCapabilities -Capabilities ([string]$result.Capabilities)
         $mon.Capabilities = [string]$result.Capabilities
         $mon.CapabilitiesKnown = [bool]$capabilityInfo.Known
@@ -1880,17 +2048,22 @@ function Update-CapabilitiesWorkerOutput {
         } else {
             $mon.CapabilitiesSafetyError = ""
         }
+        if ([bool]$result.Success) {
+            Set-DisplayRecoveryOutcome -IdentityKey ([string]$result.IdentityKey) -Outcome "Success" -Generation $script:DisplayRecoveryGeneration | Out-Null
+        }
     }
-    if ($script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) {
+    if ($workerGeneration -eq $script:DisplayRecoveryGeneration -and $script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) {
         $selected = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
         Update-CapabilitiesBox -Monitor $selected
         Update-CapabilityControls -Monitor $selected
     }
-    $sentinelFailures = @($script:CapabilitiesWorkerOutput | Where-Object { -not [bool]$_.SentinelReady }).Count
-    if ($sentinelFailures -gt 0) {
-        Update-Status "Capability reads skipped where the crash sentinel could not be persisted"
-    } else {
-        Update-Status "Capabilities read complete"
+    if ($workerGeneration -eq $script:DisplayRecoveryGeneration) {
+        $sentinelFailures = @($validResults | Where-Object { -not [bool]$_.SentinelReady }).Count
+        if ($sentinelFailures -gt 0) {
+            Update-Status "Capability reads skipped where the crash sentinel could not be persisted"
+        } else {
+            Update-Status "Capabilities read complete"
+        }
     }
     Stop-CapabilitiesWorker
     Sync-CapabilitySafetyUi
@@ -1907,10 +2080,12 @@ function Start-CapabilitiesWorker {
             $mon.CapabilitiesPending = $true
             $targets += [PSCustomObject]@{
                 Index = [int]$i
+                MonitorIndex = [int]$i
                 Handle = $mon.Handle
                 HandleValue = $mon.Handle.ToInt64()
                 Name = [string]$mon.Name
                 IdentityKey = [string]$mon.IdentityKey
+                Generation = [int]$script:DisplayRecoveryGeneration
             }
         }
     }
@@ -1970,8 +2145,11 @@ function Start-CapabilitiesWorker {
             }
             [PSCustomObject]@{
                 Index = [int]$target.Index
+                MonitorIndex = [int]$target.MonitorIndex
                 HandleValue = [int64]$target.HandleValue
                 MonitorName = [string]$target.Name
+                IdentityKey = [string]$target.IdentityKey
+                Generation = [int]$target.Generation
                 Capabilities = [string]$capabilities
                 Success = -not [string]::IsNullOrWhiteSpace($capabilities)
                 LastError = [int]$lastError
@@ -1986,6 +2164,7 @@ function Start-CapabilitiesWorker {
     $script:CapabilitiesWorker.AddScript($workerScript.ToString()).AddArgument($targets).AddArgument($script:CapabilitiesProbeSentinelPath) | Out-Null
     $script:CapabilitiesWorkerAsyncResult = $script:CapabilitiesWorker.BeginInvoke($script:CapabilitiesWorkerInput, $script:CapabilitiesWorkerOutput)
     $script:CapabilitiesWorkerLastOutputCount = 0
+    $script:CapabilitiesWorkerGeneration = [int]$script:DisplayRecoveryGeneration
     if (-not $script:CapabilitiesWorkerTimer) {
         $script:CapabilitiesWorkerTimer = New-Object System.Windows.Threading.DispatcherTimer
         $script:CapabilitiesWorkerTimer.Interval = [TimeSpan]::FromMilliseconds(200)
@@ -2067,6 +2246,7 @@ function Get-Monitors {
         Apply-MonitorIdentity -Monitor $fallbackObject
         $script:PhysicalMonitors += $fallbackObject
     }
+    Sync-DisplayRecoveryInventory
 }
 
 function Format-DdcDiagnostic {
@@ -2426,17 +2606,33 @@ function Stop-VcpWorker {
     $script:VcpWorkerMode = ""
     $script:VcpWorkerMonitorName = ""
     $script:VcpWorkerLastOutputCount = 0
+    $script:VcpWorkerGeneration = -1
+    $script:VcpWorkerIdentityKey = ""
+    $script:VcpWorkerMonitorIndex = -1
+    $script:VcpWorkerHandleValue = [int64]0
     if ($vcpQueryBtn) { $vcpQueryBtn.IsEnabled = $true }
     if ($vcpScanBtn) { $vcpScanBtn.IsEnabled = $true }
 }
 
 function Update-VcpWorkerOutput {
     if (-not $script:VcpWorker -or -not $script:VcpWorkerOutput -or -not $script:VcpWorkerAsyncResult) { return }
+    $context = [PSCustomObject]@{
+        Generation = [int]$script:VcpWorkerGeneration
+        MonitorIndex = [int]$script:VcpWorkerMonitorIndex
+        IdentityKey = [string]$script:VcpWorkerIdentityKey
+        HandleValue = [int64]$script:VcpWorkerHandleValue
+    }
+    if (-not (Test-DisplayWorkerResultCurrent -Result $context -CurrentGeneration $script:DisplayRecoveryGeneration -Monitors $script:PhysicalMonitors)) {
+        Stop-VcpWorker -Cancel
+        return
+    }
     $count = $script:VcpWorkerOutput.Count
     $completed = [bool]$script:VcpWorkerAsyncResult.IsCompleted
     if ($count -ne $script:VcpWorkerLastOutputCount -or $completed) {
         $script:VcpWorkerLastOutputCount = $count
-        $items = @($script:VcpWorkerOutput)
+        $items = @($script:VcpWorkerOutput | Where-Object {
+            Test-DisplayWorkerResultCurrent -Result $_ -CurrentGeneration $script:DisplayRecoveryGeneration -Monitors $script:PhysicalMonitors
+        })
         if ($script:VcpWorkerMode -eq "Query") {
             if ($items.Count -gt 0) {
                 $result = $items[-1]
@@ -2471,10 +2667,17 @@ function Update-VcpWorkerOutput {
     }
     if ($completed) {
         try { $script:VcpWorker.EndInvoke($script:VcpWorkerAsyncResult) } catch { Update-Status "VCP read failed: $($_.Exception.Message)" }
-        $items = @($script:VcpWorkerOutput)
+        $items = @($script:VcpWorkerOutput | Where-Object {
+            Test-DisplayWorkerResultCurrent -Result $_ -CurrentGeneration $script:DisplayRecoveryGeneration -Monitors $script:PhysicalMonitors
+        })
         if ($script:VcpWorkerMode -eq "Query" -and $items.Count -gt 0 -and -not [bool]$items[-1].Success) {
             $failure = $items[-1]
             Register-DdcDiagnostic -Operation "Read" -Monitor ([string]$failure.MonitorName) -Code ([int]$failure.Code) -Value $null -LastError ([int]$failure.LastError) -Attempts ([int]$failure.Attempts) -Message "" | Out-Null
+        }
+        if (@($items | Where-Object { [bool]$_.Success }).Count -gt 0) {
+            Set-DisplayRecoveryOutcome -IdentityKey ([string]$context.IdentityKey) -Outcome "Success" -Generation $script:DisplayRecoveryGeneration | Out-Null
+        } elseif ($items.Count -gt 0) {
+            Set-DisplayRecoveryOutcome -IdentityKey ([string]$context.IdentityKey) -Outcome "Failure" -Generation $script:DisplayRecoveryGeneration -ErrorMessage "VCP read failed" | Out-Null
         }
         if ($script:VcpWorkerMode -eq "Scan") { Update-Status "VCP scan complete" }
         Stop-VcpWorker
@@ -2482,11 +2685,33 @@ function Update-VcpWorkerOutput {
 }
 
 function Start-VcpReadWorker {
-    param([IntPtr]$Handle, [int[]]$Codes, [string]$Mode, [string]$MonitorName, [int]$ReadRetries = 0)
+    param(
+        [IntPtr]$Handle,
+        [int[]]$Codes,
+        [string]$Mode,
+        [string]$MonitorName,
+        [int]$ReadRetries = -1,
+        [string]$IdentityKey = "",
+        [int]$MonitorIndex = -1
+    )
     Stop-VcpWorker -Cancel
     if ($Handle -eq [IntPtr]::Zero -or $Codes.Count -eq 0) { return }
+    if ($MonitorIndex -lt 0 -and $script:CurrentMonitorIndex -ge 0 -and $script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) {
+        $candidate = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
+        if ($candidate.Handle.ToInt64() -eq $Handle.ToInt64()) {
+            $MonitorIndex = [int]$script:CurrentMonitorIndex
+            $IdentityKey = [string]$candidate.IdentityKey
+        }
+    }
+    if ($MonitorIndex -lt 0 -or [string]::IsNullOrWhiteSpace($IdentityKey)) { return }
+    if ($ReadRetries -lt 0) {
+        $state = if ($script:DisplayRecoveryStates.ContainsKey($IdentityKey)) { $script:DisplayRecoveryStates[$IdentityKey] } else { $null }
+        $ReadRetries = Get-DisplayRecoveryReadRetryCount -State $state -DefaultRetries $script:DdcReadRetryCount
+    }
+    $generation = [int]$script:DisplayRecoveryGeneration
+    $handleValue = [int64]$Handle.ToInt64()
     $workerScript = {
-        param([IntPtr]$Handle, [int[]]$Codes, [string]$MonitorName, [int]$ReadRetries)
+        param([IntPtr]$Handle, [int[]]$Codes, [string]$MonitorName, [int]$ReadRetries, [string]$IdentityKey, [int]$MonitorIndex, [int]$Generation, [int64]$HandleValue)
         $index = 0
         foreach ($code in $Codes) {
             $index++
@@ -2506,6 +2731,10 @@ function Start-VcpReadWorker {
                 Attempts = [int]$attempts
                 RetryCount = [Math]::Max(0, $attempts - 1)
                 MonitorName = [string]$MonitorName
+                IdentityKey = [string]$IdentityKey
+                MonitorIndex = [int]$MonitorIndex
+                Generation = [int]$Generation
+                HandleValue = [int64]$HandleValue
                 Index = [int]$index
                 Count = [int]$Codes.Count
             }
@@ -2513,11 +2742,15 @@ function Start-VcpReadWorker {
     }
     $script:VcpWorkerMode = $Mode
     $script:VcpWorkerMonitorName = $MonitorName
+    $script:VcpWorkerGeneration = $generation
+    $script:VcpWorkerIdentityKey = $IdentityKey
+    $script:VcpWorkerMonitorIndex = $MonitorIndex
+    $script:VcpWorkerHandleValue = $handleValue
     $script:VcpWorkerInput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
     $script:VcpWorkerInput.Complete()
     $script:VcpWorkerOutput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
     $script:VcpWorker = [PowerShell]::Create()
-    $script:VcpWorker.AddScript($workerScript.ToString()).AddArgument($Handle).AddArgument($Codes).AddArgument($MonitorName).AddArgument($ReadRetries) | Out-Null
+    $script:VcpWorker.AddScript($workerScript.ToString()).AddArgument($Handle).AddArgument($Codes).AddArgument($MonitorName).AddArgument($ReadRetries).AddArgument($IdentityKey).AddArgument($MonitorIndex).AddArgument($generation).AddArgument($handleValue) | Out-Null
     $script:VcpWorkerAsyncResult = $script:VcpWorker.BeginInvoke($script:VcpWorkerInput, $script:VcpWorkerOutput)
     $script:VcpWorkerLastOutputCount = 0
     if (-not $script:VcpWorkerTimer) {
@@ -2558,7 +2791,8 @@ function Format-DdcReportCodeList {
 function Get-DdcReportTargets {
     $allProbeCodes = @(Get-DdcReportProbeCodes)
     $targets = @()
-    foreach ($mon in @($script:PhysicalMonitors)) {
+    for ($monitorIndex = 0; $monitorIndex -lt $script:PhysicalMonitors.Count; $monitorIndex++) {
+        $mon = $script:PhysicalMonitors[$monitorIndex]
         if ($null -eq $mon) { continue }
         $supportedCodes = @()
         if ([bool]$mon.CapabilitiesKnown -and $mon.SupportedVcpCodes) {
@@ -2581,6 +2815,7 @@ function Get-DdcReportTargets {
         }
         $targets += [PSCustomObject]@{
             Index = [int]$mon.Index
+            MonitorIndex = [int]$monitorIndex
             Label = [string](Get-MonitorDisplayLabel -Monitor $mon)
             Name = [string]$mon.Name
             DeviceName = [string]$mon.DeviceName
@@ -2600,8 +2835,11 @@ function Get-DdcReportTargets {
             ProbeCodes = [object[]]$probeCodes
             SkippedProbeCodes = [object[]]$skippedCodes
             RiskyWritesEnabled = Test-VcpWriteEnabledForMonitor -Monitor $mon
+            RecoveryState = if ($mon.PSObject.Properties.Name -contains "RecoveryState") { [string]$mon.RecoveryState } else { "Stale" }
+            RecoveryLastSuccessUtc = if ($mon.PSObject.Properties.Name -contains "RecoveryLastSuccessUtc") { $mon.RecoveryLastSuccessUtc } else { $null }
             Handle = $mon.Handle
             HandleValue = [int64]$mon.Handle.ToInt64()
+            Generation = [int]$script:DisplayRecoveryGeneration
         }
     }
     return $targets
@@ -2678,6 +2916,8 @@ function New-DdcCompatibilityReport {
         if ($edidParts.Count -gt 0) { [void]$sb.AppendLine("  EDID: $($edidParts -join "; ")") }
         [void]$sb.AppendLine("  Capabilities: $($target.CapabilityStatus), length=$($target.CapabilitiesLength), parsed codes=$(@($target.SupportedCodes).Count)")
         [void]$sb.AppendLine("  Parsed VCP list: $(Format-DdcReportCodeList -Codes $target.SupportedCodes)")
+        $recoverySuccess = if ($null -ne $target.RecoveryLastSuccessUtc) { ([DateTime]$target.RecoveryLastSuccessUtc).ToString("o") } else { "never" }
+        [void]$sb.AppendLine("  Recovery: $($target.RecoveryState), last successful read=$recoverySuccess")
         [void]$sb.AppendLine("  Risky VCP writes: $(if ([bool]$target.RiskyWritesEnabled) { 'identity unlocked; direct confirmation still required' } else { 'disabled' })")
         if (@($target.SkippedProbeCodes).Count -gt 0) {
             [void]$sb.AppendLine("  Common probes skipped by capabilities: $(Format-DdcReportCodeList -Codes $target.SkippedProbeCodes)")
@@ -2750,13 +2990,20 @@ function Stop-DdcReportWorker {
     $script:DdcReportWorkerAsyncResult = $null
     $script:DdcReportWorkerLastOutputCount = 0
     $script:DdcReportTargets = @()
+    $script:DdcReportWorkerGeneration = -1
     if ($ddcReportGenerateBtn) { $ddcReportGenerateBtn.IsEnabled = $true }
     if ($ddcReportCopyBtn) { $ddcReportCopyBtn.IsEnabled = $true }
 }
 
 function Update-DdcReportWorkerOutput {
     if (-not $script:DdcReportWorker -or -not $script:DdcReportWorkerOutput -or -not $script:DdcReportWorkerAsyncResult) { return }
-    $probeResults = @($script:DdcReportWorkerOutput | Where-Object { $_.Kind -eq "Probe" })
+    if ($script:DdcReportWorkerGeneration -ne $script:DisplayRecoveryGeneration) {
+        Stop-DdcReportWorker -Cancel
+        return
+    }
+    $probeResults = @($script:DdcReportWorkerOutput | Where-Object {
+        $_.Kind -eq "Probe" -and (Test-DisplayWorkerResultCurrent -Result $_ -CurrentGeneration $script:DisplayRecoveryGeneration -Monitors $script:PhysicalMonitors)
+    })
     $count = $probeResults.Count
     $completed = [bool]$script:DdcReportWorkerAsyncResult.IsCompleted
     if ($count -ne $script:DdcReportWorkerLastOutputCount -and -not $completed) {
@@ -2821,6 +3068,10 @@ function Start-DdcReportWorker {
                 [PSCustomObject]@{
                     Kind = "Probe"
                     TargetIndex = [int]$target.Index
+                    MonitorIndex = [int]$target.MonitorIndex
+                    IdentityKey = [string]$target.IdentityKey
+                    Generation = [int]$target.Generation
+                    HandleValue = [int64]$target.HandleValue
                     ProbeIndex = [int]$probeIndex
                     Code = [int]$code
                     Success = [bool]$ok
@@ -2841,6 +3092,7 @@ function Start-DdcReportWorker {
     $script:DdcReportWorker.AddScript($workerScript.ToString()).AddArgument($targets).AddArgument($script:DdcScanRetryCount) | Out-Null
     $script:DdcReportWorkerAsyncResult = $script:DdcReportWorker.BeginInvoke($script:DdcReportWorkerInput, $script:DdcReportWorkerOutput)
     $script:DdcReportWorkerLastOutputCount = 0
+    $script:DdcReportWorkerGeneration = [int]$script:DisplayRecoveryGeneration
     if (-not $script:DdcReportWorkerTimer) {
         $script:DdcReportWorkerTimer = New-Object System.Windows.Threading.DispatcherTimer
         $script:DdcReportWorkerTimer.Interval = [TimeSpan]::FromMilliseconds(150)
@@ -4026,6 +4278,9 @@ function Stop-MonitorSettingsWorker {
     $script:MonitorSettingsWorkerIndex = -1
     $script:MonitorSettingsWorkerName = ""
     $script:MonitorSettingsWorkerLastOutputCount = 0
+    $script:MonitorSettingsWorkerGeneration = -1
+    $script:MonitorSettingsWorkerTotalReads = 0
+    $script:MonitorSettingsWorkerTargets = @()
 }
 
 function Apply-MonitorSettingResult {
@@ -4053,35 +4308,60 @@ function Apply-MonitorSettingResult {
 
 function Update-MonitorSettingsWorkerOutput {
     if (-not $script:MonitorSettingsWorker -or -not $script:MonitorSettingsWorkerOutput -or -not $script:MonitorSettingsWorkerAsyncResult) { return }
+    if ($script:MonitorSettingsWorkerGeneration -ne $script:DisplayRecoveryGeneration) {
+        Stop-MonitorSettingsWorker -Cancel
+        return
+    }
     $count = $script:MonitorSettingsWorkerOutput.Count
     $completed = [bool]$script:MonitorSettingsWorkerAsyncResult.IsCompleted
     if ($count -ne $script:MonitorSettingsWorkerLastOutputCount -and -not $completed) {
         $script:MonitorSettingsWorkerLastOutputCount = $count
-        Update-Status "Reading from $script:MonitorSettingsWorkerName... $count/7"
+        Update-Status "Reading from $script:MonitorSettingsWorkerName... $count/$script:MonitorSettingsWorkerTotalReads"
     }
     if (-not $completed) { return }
     $workerName = $script:MonitorSettingsWorkerName
-    $workerIndex = $script:MonitorSettingsWorkerIndex
+    $workerTargets = @($script:MonitorSettingsWorkerTargets)
     try { $script:MonitorSettingsWorker.EndInvoke($script:MonitorSettingsWorkerAsyncResult) } catch { Update-Status "Monitor settings read failed: $($_.Exception.Message)" }
-    if ($workerIndex -eq $script:CurrentMonitorIndex) {
-        $results = @($script:MonitorSettingsWorkerOutput)
-        $failures = @($results | Where-Object { -not [bool]$_.Success })
-        $script:UpdatingUI = $true
-        try {
-            foreach ($result in $results) { Apply-MonitorSettingResult -Result $result }
-        } finally {
-            $script:UpdatingUI = $false
-        }
-        foreach ($failure in $failures) {
-            Register-DdcDiagnostic -Operation "Read" -Monitor $workerName -Code ([int]$failure.Code) -Value $null -LastError ([int]$failure.LastError) -Attempts ([int]$failure.Attempts) -Message "Monitor setting refresh" -SuppressStatus | Out-Null
-        }
-        if ($failures.Count -gt 0) {
-            Update-Status ("{0} ({1}/7 readable; DDC diagnostics captured)" -f $workerName, ($results.Count - $failures.Count))
+    $results = @($script:MonitorSettingsWorkerOutput | Where-Object {
+        Test-DisplayWorkerResultCurrent -Result $_ -CurrentGeneration $script:DisplayRecoveryGeneration -Monitors $script:PhysicalMonitors
+    })
+    $selectedPublished = $false
+    foreach ($target in $workerTargets) {
+        if (-not (Test-DisplayWorkerResultCurrent -Result $target -CurrentGeneration $script:DisplayRecoveryGeneration -Monitors $script:PhysicalMonitors)) { continue }
+        $targetResults = @($results | Where-Object { [string]$_.IdentityKey -eq [string]$target.IdentityKey })
+        $successes = @($targetResults | Where-Object { [bool]$_.Success })
+        $failures = @($targetResults | Where-Object { -not [bool]$_.Success })
+        if ($successes.Count -gt 0) {
+            Set-DisplayRecoveryOutcome -IdentityKey ([string]$target.IdentityKey) -Outcome "Success" -Generation $script:DisplayRecoveryGeneration | Out-Null
         } else {
-            Update-Status "$workerName"
+            $message = if ($targetResults.Count -eq 0) { "DDC worker returned no result" } else { "DDC health read failed" }
+            Set-DisplayRecoveryOutcome -IdentityKey ([string]$target.IdentityKey) -Outcome "Failure" -Generation $script:DisplayRecoveryGeneration -ErrorMessage $message | Out-Null
         }
-        Update-TrayPopupState
-        Update-TrayIconText
+        $isSelected = $script:CurrentMonitorIndex -ge 0 -and
+            $script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count -and
+            [string]$script:PhysicalMonitors[$script:CurrentMonitorIndex].IdentityKey -eq [string]$target.IdentityKey
+        if ($isSelected) {
+            $selectedPublished = $true
+            $script:UpdatingUI = $true
+            try {
+                foreach ($result in $successes) { Apply-MonitorSettingResult -Result $result }
+            } finally {
+                $script:UpdatingUI = $false
+            }
+            foreach ($failure in $failures) {
+                Register-DdcDiagnostic -Operation "Read" -Monitor ([string]$target.MonitorName) -Code ([int]$failure.Code) -Value $null -LastError ([int]$failure.LastError) -Attempts ([int]$failure.Attempts) -Message "Monitor setting refresh" -SuppressStatus | Out-Null
+            }
+            if ($failures.Count -gt 0) {
+                Update-Status ("{0} ({1}/{2} readable; DDC diagnostics captured)" -f ([string]$target.MonitorName), $successes.Count, @($target.Codes).Count)
+            } else {
+                Update-Status ([string]$target.MonitorName)
+            }
+            Update-TrayPopupState
+            Update-TrayIconText
+        }
+    }
+    if (-not $selectedPublished -and $workerName -and $script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) {
+        Update-SelectedMonitorRecoveryUi
     }
     Stop-MonitorSettingsWorker
 }
@@ -4089,8 +4369,10 @@ function Update-MonitorSettingsWorkerOutput {
 function Start-MonitorSettingsWorker {
     param([IntPtr]$Handle, [int]$MonitorIndex, [string]$MonitorName)
     Stop-MonitorSettingsWorker -Cancel
-    if ($Handle -eq [IntPtr]::Zero) { return }
-    $codes = @(
+    if ($Handle -ne [IntPtr]::Zero -and $MonitorIndex -ge 0 -and $MonitorIndex -lt $script:PhysicalMonitors.Count) {
+        if ($script:PhysicalMonitors[$MonitorIndex].Handle.ToInt64() -ne $Handle.ToInt64()) { return }
+    }
+    $selectedCodes = @(
         [int][MonitorAPI]::VCP_BRIGHTNESS,
         [int][MonitorAPI]::VCP_CONTRAST,
         [int][MonitorAPI]::VCP_RED_GAIN,
@@ -4099,39 +4381,68 @@ function Start-MonitorSettingsWorker {
         [int][MonitorAPI]::VCP_VOLUME,
         [int][MonitorAPI]::VCP_SHARPNESS
     )
+    $generation = [int]$script:DisplayRecoveryGeneration
+    $targets = @()
+    for ($index = 0; $index -lt $script:PhysicalMonitors.Count; $index++) {
+        $monitor = $script:PhysicalMonitors[$index]
+        if ($null -eq $monitor -or $monitor.Handle -eq [IntPtr]::Zero -or [string]::IsNullOrWhiteSpace([string]$monitor.IdentityKey)) { continue }
+        $state = if ($script:DisplayRecoveryStates.ContainsKey([string]$monitor.IdentityKey)) { $script:DisplayRecoveryStates[[string]$monitor.IdentityKey] } else { $null }
+        $codes = if ($index -eq $MonitorIndex) { $selectedCodes } else { @([int][MonitorAPI]::VCP_BRIGHTNESS) }
+        $targets += [PSCustomObject]@{
+            MonitorIndex = [int]$index
+            MonitorName = [string]$monitor.Name
+            IdentityKey = [string]$monitor.IdentityKey
+            Handle = $monitor.Handle
+            HandleValue = [int64]$monitor.Handle.ToInt64()
+            Generation = $generation
+            Codes = [object[]]$codes
+            ReadRetries = Get-DisplayRecoveryReadRetryCount -State $state -DefaultRetries $script:DdcReadRetryCount
+        }
+        Set-DisplayRecoveryOutcome -IdentityKey ([string]$monitor.IdentityKey) -Outcome "Retry" -Generation $generation | Out-Null
+    }
+    if ($targets.Count -eq 0) { return }
     $workerScript = {
-        param([IntPtr]$Handle, [int[]]$Codes, [string]$MonitorName, [int]$ReadRetries)
-        $index = 0
-        foreach ($code in $Codes) {
-            $index++
-            $vct = [uint32]0
-            $current = [uint32]0
-            $maximum = [uint32]0
-            $lastError = [int]0
-            $attempts = [int]0
-            $ok = [MonitorAPI]::ReadVCPWithRetry($Handle, [byte]$code, $ReadRetries, [ref]$vct, [ref]$current, [ref]$maximum, [ref]$lastError, [ref]$attempts)
-            [PSCustomObject]@{
-                Code = [int]$code
-                Success = [bool]$ok
-                Current = [uint32]$current
-                Maximum = [uint32]$maximum
-                Type = [uint32]$vct
-                LastError = [int]$lastError
-                Attempts = [int]$attempts
-                RetryCount = [Math]::Max(0, $attempts - 1)
-                MonitorName = [string]$MonitorName
-                Index = [int]$index
-                Count = [int]$Codes.Count
+        param([object[]]$Targets)
+        foreach ($target in $Targets) {
+            $index = 0
+            foreach ($code in @($target.Codes)) {
+                $index++
+                $vct = [uint32]0
+                $current = [uint32]0
+                $maximum = [uint32]0
+                $lastError = [int]0
+                $attempts = [int]0
+                $ok = [MonitorAPI]::ReadVCPWithRetry($target.Handle, [byte]$code, [int]$target.ReadRetries, [ref]$vct, [ref]$current, [ref]$maximum, [ref]$lastError, [ref]$attempts)
+                [PSCustomObject]@{
+                    Code = [int]$code
+                    Success = [bool]$ok
+                    Current = [uint32]$current
+                    Maximum = [uint32]$maximum
+                    Type = [uint32]$vct
+                    LastError = [int]$lastError
+                    Attempts = [int]$attempts
+                    RetryCount = [Math]::Max(0, $attempts - 1)
+                    MonitorName = [string]$target.MonitorName
+                    IdentityKey = [string]$target.IdentityKey
+                    MonitorIndex = [int]$target.MonitorIndex
+                    Generation = [int]$target.Generation
+                    HandleValue = [int64]$target.HandleValue
+                    Index = [int]$index
+                    Count = [int]@($target.Codes).Count
+                }
             }
         }
     }
     $script:MonitorSettingsWorkerIndex = $MonitorIndex
     $script:MonitorSettingsWorkerName = $MonitorName
+    $script:MonitorSettingsWorkerGeneration = $generation
+    $script:MonitorSettingsWorkerTargets = $targets
+    $script:MonitorSettingsWorkerTotalReads = [int](($targets | ForEach-Object { @($_.Codes).Count } | Measure-Object -Sum).Sum)
     $script:MonitorSettingsWorkerInput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
     $script:MonitorSettingsWorkerInput.Complete()
     $script:MonitorSettingsWorkerOutput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
     $script:MonitorSettingsWorker = [PowerShell]::Create()
-    $script:MonitorSettingsWorker.AddScript($workerScript.ToString()).AddArgument($Handle).AddArgument($codes).AddArgument($MonitorName).AddArgument($script:DdcReadRetryCount) | Out-Null
+    $script:MonitorSettingsWorker.AddScript($workerScript.ToString()).AddArgument($targets) | Out-Null
     $script:MonitorSettingsWorkerAsyncResult = $script:MonitorSettingsWorker.BeginInvoke($script:MonitorSettingsWorkerInput, $script:MonitorSettingsWorkerOutput)
     $script:MonitorSettingsWorkerLastOutputCount = 0
     if (-not $script:MonitorSettingsWorkerTimer) {
@@ -4139,7 +4450,7 @@ function Start-MonitorSettingsWorker {
         $script:MonitorSettingsWorkerTimer.Interval = [TimeSpan]::FromMilliseconds(150)
         $script:MonitorSettingsWorkerTimer.Add_Tick({ Update-MonitorSettingsWorkerOutput })
     }
-    Update-Status "Reading from $MonitorName... 0/$($codes.Count)"
+    Update-Status "Reading from $MonitorName... 0/$script:MonitorSettingsWorkerTotalReads"
     $script:MonitorSettingsWorkerTimer.Start()
 }
 
@@ -4598,8 +4909,8 @@ try {
             <StackPanel VerticalAlignment="Center">
                 <StackPanel Orientation="Horizontal">
                     <TextBlock x:Name="SelectedMonitorName" Text="No monitor selected" FontSize="14" Foreground="#f5f8fc" FontWeight="SemiBold"/>
-                    <Ellipse Width="7" Height="7" Fill="#42c77a" Margin="12,0,6,0" VerticalAlignment="Center"/>
-                    <TextBlock Text="Ready" FontSize="11" Foreground="#91a2b8" VerticalAlignment="Center"/>
+                    <Ellipse x:Name="SelectedMonitorHealthDot" Width="7" Height="7" Fill="#75869d" Margin="12,0,6,0" VerticalAlignment="Center"/>
+                    <TextBlock x:Name="SelectedMonitorHealthText" Text="Stale" FontSize="11" Foreground="#91a2b8" VerticalAlignment="Center"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="0,3,0,0">
                     <TextBlock x:Name="SelectedMonitorRes" FontSize="10" Foreground="#75869d"/>
@@ -4998,6 +5309,7 @@ $displayTab = $window.FindName("DisplayTab"); $monitorTab = $window.FindName("Mo
 $profilesTab = $window.FindName("ProfilesTab"); $scheduleTab = $window.FindName("ScheduleTab"); $systemTab = $window.FindName("SystemTab")
 $monitorCanvas = $window.FindName("MonitorCanvas"); $selectedMonitorName = $window.FindName("SelectedMonitorName")
 $selectedMonitorRes = $window.FindName("SelectedMonitorRes"); $selectedMonitorInfo = $window.FindName("SelectedMonitorInfo")
+$selectedMonitorHealthDot = $window.FindName("SelectedMonitorHealthDot"); $selectedMonitorHealthText = $window.FindName("SelectedMonitorHealthText")
 $monitorLabelBox = $window.FindName("MonitorLabelBox"); $monitorLabelSaveBtn = $window.FindName("MonitorLabelSaveBtn"); $monitorLabelResetBtn = $window.FindName("MonitorLabelResetBtn")
 $monitorIdentityText = $window.FindName("MonitorIdentityText")
 $applyAllCheckbox = $window.FindName("ApplyAllCheckbox"); $refreshBtn = $window.FindName("RefreshBtn"); $identifyBtn = $window.FindName("IdentifyBtn")
@@ -5068,6 +5380,40 @@ function Update-Status { param([string]$Message); $statusText.Text = $Message }
 if ($script:PendingStatusMessage) { Update-Status $script:PendingStatusMessage; $script:PendingStatusMessage = "" }
 Initialize-LocalizationAndAccessibility
 Start-DdcWriteResultTimer
+
+function Update-SelectedMonitorRecoveryUi {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Updates process-local WPF status controls only.')]
+    param()
+    if ($null -eq $selectedMonitorHealthDot -or $null -eq $selectedMonitorHealthText) { return }
+    $state = "Offline"
+    $lastSuccessUtc = $null
+    $failures = 0
+    $lastError = ""
+    if ($script:PhysicalMonitors.Count -gt 0 -and $script:CurrentMonitorIndex -ge 0 -and $script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) {
+        $monitor = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
+        if ($monitor.PSObject.Properties.Name -contains "RecoveryState") { $state = [string]$monitor.RecoveryState }
+        if ($monitor.PSObject.Properties.Name -contains "RecoveryLastSuccessUtc") { $lastSuccessUtc = $monitor.RecoveryLastSuccessUtc }
+        if ($monitor.PSObject.Properties.Name -contains "RecoveryConsecutiveFailures") { $failures = [int]$monitor.RecoveryConsecutiveFailures }
+        if ($monitor.PSObject.Properties.Name -contains "RecoveryLastError") { $lastError = [string]$monitor.RecoveryLastError }
+    }
+    $color = switch ($state) {
+        "Fresh" { [System.Windows.Media.Color]::FromRgb(66, 199, 122) }
+        "Retrying" { [System.Windows.Media.Color]::FromRgb(255, 184, 92) }
+        "Stale" { [System.Windows.Media.Color]::FromRgb(145, 162, 184) }
+        default { [System.Windows.Media.Color]::FromRgb(244, 105, 105) }
+    }
+    $lastSuccessText = "never"
+    if ($null -ne $lastSuccessUtc) {
+        try { $lastSuccessText = ([DateTime]$lastSuccessUtc).ToLocalTime().ToString("HH:mm:ss") } catch { $null = $_ }
+    }
+    $selectedMonitorHealthDot.Fill = [System.Windows.Media.SolidColorBrush]::new($color)
+    $selectedMonitorHealthText.Foreground = [System.Windows.Media.SolidColorBrush]::new($color)
+    $selectedMonitorHealthText.Text = if ($state -eq "Fresh") { "Fresh | $lastSuccessText" } else { "$state | last success $lastSuccessText" }
+    $tooltip = "Display recovery: $state`nLast successful hardware read: $lastSuccessText`nConsecutive failures: $failures"
+    if (-not [string]::IsNullOrWhiteSpace($lastError)) { $tooltip += "`n$lastError" }
+    $selectedMonitorHealthText.ToolTip = $tooltip
+    $selectedMonitorHealthDot.ToolTip = $tooltip
+}
 
 function Sync-CapabilitySafetyUi {
     if ($null -eq $capabilitiesDiscoveryEnabledCheckbox) { return }
@@ -5173,12 +5519,14 @@ function Draw-MonitorLayout {
         $selectedMonitorRes.Text = "$($mon.Width) x $($mon.Height) @ $($mon.RefreshRate)Hz"
         $selectedMonitorInfo.Text = "$($mon.DeviceName)$(if ($mon.IsPrimary) { ' (Primary)' } else { '' })"
         Update-MonitorIdentityControls
+        Update-SelectedMonitorRecoveryUi
     }
 }
 
 function Load-MonitorSettings {
     if ($script:PhysicalMonitors.Count -eq 0 -or $script:CurrentMonitorIndex -ge $script:PhysicalMonitors.Count) { return }
     $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]; $h = $mon.Handle
+    $wmiBrightness = $null
     Update-Status "Reading from $(Get-MonitorDisplayLabel -Monitor $mon)..."
     Stop-MonitorSettingsWorker -Cancel
     $script:UpdatingUI = $true
@@ -5197,15 +5545,17 @@ function Load-MonitorSettings {
                 foreach ($control in @($brightnessSlider,$presetDay,$presetNight,$presetAutoMode,$presetAmbientMode,$presetReset)) { if ($control) { $control.IsEnabled = $true; $control.ToolTip = "Integrated display brightness via WMI" } }
                 $brightnessSlider.Maximum = 100; $brightnessSlider.Value = $wmiBrightness; $brightnessValue.Text = $wmiBrightness
                 $capabilitiesBox.Text = "Integrated display brightness via WMI"
+                Set-DisplayRecoveryOutcome -IdentityKey ([string]$mon.IdentityKey) -Outcome "Success" -Generation $script:DisplayRecoveryGeneration | Out-Null
                 Update-Status "$(Get-MonitorDisplayLabel -Monitor $mon) via WMI"; Update-TrayPopupState; Update-TrayIconText
-                return
             }
         }
         if ($h -eq [IntPtr]::Zero) {
-            Update-Status "$(Get-MonitorDisplayLabel -Monitor $mon)"
+            if (-not $script:WmiBrightnessAvailable -or $null -eq $wmiBrightness) {
+                Set-DisplayRecoveryOutcome -IdentityKey ([string]$mon.IdentityKey) -Outcome "Failure" -Generation $script:DisplayRecoveryGeneration -ErrorMessage "No DDC/CI or WMI brightness path is available" | Out-Null
+                Update-Status "$(Get-MonitorDisplayLabel -Monitor $mon)"
+            }
             Update-TrayPopupState
             Update-TrayIconText
-            return
         }
     } finally {
         $script:UpdatingUI = $false
@@ -5214,11 +5564,30 @@ function Load-MonitorSettings {
 }
 
 function Refresh-Monitors {
+    param([int]$Generation = 0, [string]$Reason = "manual")
+    if ($Generation -le 0) {
+        $script:DisplayRecoveryGeneration++
+        $Generation = [int]$script:DisplayRecoveryGeneration
+        foreach ($monitor in @($script:PhysicalMonitors)) {
+            Set-DisplayRecoveryOutcome -IdentityKey ([string]$monitor.IdentityKey) -Outcome "Stale" -Generation $Generation | Out-Null
+        }
+    } elseif ($Generation -ne $script:DisplayRecoveryGeneration) {
+        return $false
+    }
     $previousIdentity = ""
     if ($script:PhysicalMonitors.Count -gt 0 -and $script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) {
         $previousIdentity = [string]$script:PhysicalMonitors[$script:CurrentMonitorIndex].IdentityKey
     }
-    Get-Monitors
+    try {
+        Get-Monitors
+    } catch {
+        foreach ($monitor in @($script:PhysicalMonitors)) {
+            Set-DisplayRecoveryOutcome -IdentityKey ([string]$monitor.IdentityKey) -Outcome "Failure" -Generation $Generation -ErrorMessage $_.Exception.Message | Out-Null
+        }
+        Update-Status "Display refresh failed after $Reason`: $($_.Exception.Message)"
+        Update-SelectedMonitorRecoveryUi
+        return $false
+    }
     $matchedIndex = Find-MonitorIndexByIdentity -IdentityKey $previousIdentity
     if ($matchedIndex -ge 0) {
         $script:CurrentMonitorIndex = $matchedIndex
@@ -5229,6 +5598,149 @@ function Refresh-Monitors {
     Load-MonitorSettings
     Start-CapabilitiesWorker
     Update-ProfilesList
+    return $true
+}
+
+function Invoke-PendingDisplayRecoveryRefresh {
+    if ($script:DisplayRecoveryPendingReasons.Count -eq 0) { return }
+    $generation = [int]$script:DisplayRecoveryGeneration
+    $reasons = @($script:DisplayRecoveryPendingReasons.Keys | Sort-Object)
+    $script:DisplayRecoveryPendingReasons = @{}
+    $reasonText = $reasons -join ", "
+    Refresh-Monitors -Generation $generation -Reason $reasonText | Out-Null
+}
+
+function Request-DisplayRecoveryRefresh {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Queues an in-process monitor refresh.')]
+    param([string]$Reason = "display-event")
+    if ([string]::IsNullOrWhiteSpace($Reason)) { $Reason = "display-event" }
+    $script:DisplayRecoveryGeneration++
+    $generation = [int]$script:DisplayRecoveryGeneration
+    $script:DisplayRecoveryPendingReasons[$Reason] = $true
+    foreach ($monitor in @($script:PhysicalMonitors)) {
+        Set-DisplayRecoveryOutcome -IdentityKey ([string]$monitor.IdentityKey) -Outcome "Stale" -Generation $generation | Out-Null
+    }
+    Stop-MonitorSettingsWorker -Cancel
+    Stop-VcpWorker -Cancel
+    Stop-DdcReportWorker -Cancel
+    if (-not $script:DisplayRecoveryDebounceTimer) {
+        $script:DisplayRecoveryDebounceTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:DisplayRecoveryDebounceTimer.Interval = [TimeSpan]::FromMilliseconds($script:DisplayRecoveryDebounceMilliseconds)
+        $script:DisplayRecoveryDebounceTimer.Add_Tick({
+            $script:DisplayRecoveryDebounceTimer.Stop()
+            Invoke-PendingDisplayRecoveryRefresh
+        })
+    }
+    $script:DisplayRecoveryDebounceTimer.Stop()
+    $script:DisplayRecoveryDebounceTimer.Start()
+    Update-Status "Display change detected; waiting for topology to settle"
+    Update-SelectedMonitorRecoveryUi
+}
+
+function Invoke-DisplayRecoveryEventPump {
+    $reason = ""
+    while ($script:DisplayRecoveryEventQueue.TryDequeue([ref]$reason)) {
+        Request-DisplayRecoveryRefresh -Reason $reason
+        $reason = ""
+    }
+    if ($script:DisplayRecoveryPendingReasons.Count -gt 0) { return }
+    if ($script:MonitorSettingsWorker -and $script:MonitorSettingsWorkerAsyncResult -and -not $script:MonitorSettingsWorkerAsyncResult.IsCompleted) { return }
+    $nowUtc = [DateTime]::UtcNow
+    $dueIdentities = @()
+    foreach ($monitor in @($script:PhysicalMonitors)) {
+        $identityKey = [string]$monitor.IdentityKey
+        if ([string]::IsNullOrWhiteSpace($identityKey) -or -not $script:DisplayRecoveryStates.ContainsKey($identityKey)) { continue }
+        $state = $script:DisplayRecoveryStates[$identityKey]
+        if ($null -ne $state.NextRetryUtc -and ([DateTime]$state.NextRetryUtc) -le $nowUtc) {
+            $dueIdentities += $identityKey
+        }
+    }
+    if ($dueIdentities.Count -eq 0) { return }
+    foreach ($identityKey in $dueIdentities) {
+        Set-DisplayRecoveryOutcome -IdentityKey $identityKey -Outcome "Retry" -Generation $script:DisplayRecoveryGeneration | Out-Null
+    }
+    Load-MonitorSettings
+}
+
+function Initialize-DisplayRecoveryEventPipeline {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Registers process-local Windows event listeners.')]
+    param()
+    if (-not $script:DisplayRecoveryEventPumpTimer) {
+        $script:DisplayRecoveryEventPumpTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:DisplayRecoveryEventPumpTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+        $script:DisplayRecoveryEventPumpTimer.Add_Tick({ Invoke-DisplayRecoveryEventPump })
+        $script:DisplayRecoveryEventPumpTimer.Start()
+    }
+    if ($null -eq $script:DisplayRecoveryHwndSource) {
+        try {
+            $interop = New-Object System.Windows.Interop.WindowInteropHelper($window)
+            $script:DisplayRecoveryHwndSource = [System.Windows.Interop.HwndSource]::FromHwnd($interop.Handle)
+            $script:DisplayRecoveryWindowHook = [System.Windows.Interop.HwndSourceHook]{
+                param([IntPtr]$hwnd, [int]$message, [IntPtr]$wParam, [IntPtr]$lParam, [ref]$handled)
+                $null = $hwnd
+                $null = $lParam
+                $handled.Value = $false
+                $reason = ""
+                switch ($message) {
+                    0x007E { $reason = "display-change" }
+                    0x0219 { $reason = "device-change" }
+                    0x0218 {
+                        $powerEvent = [int]$wParam.ToInt64()
+                        if ($powerEvent -in @(0x0006, 0x0007, 0x0012)) { $reason = "resume" }
+                    }
+                }
+                if ($reason) { Request-DisplayRecoveryRefresh -Reason $reason }
+                return [IntPtr]::Zero
+            }
+            if ($script:DisplayRecoveryHwndSource) {
+                $script:DisplayRecoveryHwndSource.AddHook($script:DisplayRecoveryWindowHook)
+            }
+        } catch {
+            $script:DisplayRecoveryHwndSource = $null
+            $script:DisplayRecoveryWindowHook = $null
+        }
+    }
+    if ($null -eq $script:WmiBrightnessEventWatcher) {
+        $watcher = $null
+        try {
+            Unregister-Event -SourceIdentifier $script:DisplayRecoveryEventSourceIdentifier -ErrorAction SilentlyContinue
+            $scope = New-Object System.Management.ManagementScope("\\.\root\WMI")
+            $query = New-Object System.Management.WqlEventQuery("SELECT * FROM WmiMonitorBrightnessEvent")
+            $watcher = New-Object System.Management.ManagementEventWatcher($scope, $query)
+            $script:WmiBrightnessEventSubscription = Register-ObjectEvent -InputObject $watcher -EventName EventArrived -SourceIdentifier $script:DisplayRecoveryEventSourceIdentifier -MessageData $script:DisplayRecoveryEventQueue -Action {
+                $event.MessageData.Enqueue("wmi-brightness")
+            }
+            $watcher.Start()
+            $script:WmiBrightnessEventWatcher = $watcher
+        } catch {
+            if ($watcher) { try { $watcher.Dispose() } catch { $null = $_ } }
+            $script:WmiBrightnessEventWatcher = $null
+            $script:WmiBrightnessEventSubscription = $null
+        }
+    }
+}
+
+function Stop-DisplayRecoveryEventPipeline {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Disposes process-local Windows event listeners.')]
+    param()
+    if ($script:DisplayRecoveryDebounceTimer) { $script:DisplayRecoveryDebounceTimer.Stop() }
+    if ($script:DisplayRecoveryEventPumpTimer) { $script:DisplayRecoveryEventPumpTimer.Stop() }
+    if ($script:DisplayRecoveryHwndSource -and $script:DisplayRecoveryWindowHook) {
+        try { $script:DisplayRecoveryHwndSource.RemoveHook($script:DisplayRecoveryWindowHook) } catch { $null = $_ }
+    }
+    $script:DisplayRecoveryHwndSource = $null
+    $script:DisplayRecoveryWindowHook = $null
+    if ($script:WmiBrightnessEventWatcher) {
+        try { $script:WmiBrightnessEventWatcher.Stop() } catch { $null = $_ }
+        try { $script:WmiBrightnessEventWatcher.Dispose() } catch { $null = $_ }
+    }
+    try { Unregister-Event -SourceIdentifier $script:DisplayRecoveryEventSourceIdentifier -ErrorAction SilentlyContinue } catch { $null = $_ }
+    if ($script:WmiBrightnessEventSubscription) {
+        try { Remove-Job -Job $script:WmiBrightnessEventSubscription -Force -ErrorAction SilentlyContinue } catch { $null = $_ }
+    }
+    $script:WmiBrightnessEventWatcher = $null
+    $script:WmiBrightnessEventSubscription = $null
+    $script:DisplayRecoveryPendingReasons = @{}
 }
 
 function Invoke-DelayedMonitorSettingsRefresh {
@@ -5236,11 +5748,19 @@ function Invoke-DelayedMonitorSettingsRefresh {
     $timer = New-Object System.Windows.Threading.DispatcherTimer
     $timer.Interval = [TimeSpan]::FromMilliseconds([Math]::Max(100, $DelayMs))
     $targetIndex = $MonitorIndex
+    $targetIdentity = if ($targetIndex -ge 0 -and $targetIndex -lt $script:PhysicalMonitors.Count) {
+        [string]$script:PhysicalMonitors[$targetIndex].IdentityKey
+    } else {
+        ""
+    }
     $timer.Add_Tick({
         param($sender, $args)
         $sender.Stop()
         $script:DeferredRefreshTimers = @($script:DeferredRefreshTimers | Where-Object { $_ -ne $sender })
-        if ($targetIndex -eq $script:CurrentMonitorIndex -and $script:PhysicalMonitors.Count -gt $targetIndex) {
+        if ($targetIndex -eq $script:CurrentMonitorIndex -and
+            $script:PhysicalMonitors.Count -gt $targetIndex -and
+            -not [string]::IsNullOrWhiteSpace($targetIdentity) -and
+            [string]$script:PhysicalMonitors[$targetIndex].IdentityKey -eq $targetIdentity) {
             Load-MonitorSettings
         }
     })
@@ -7071,7 +7591,7 @@ function Initialize-TrayIcon {
     $brightnessItem.Add_Click({ Show-TrayPopup })
     $script:TrayLinkMenuItem.Add_CheckedChanged({ Set-ApplyToAllMode -Enabled $script:TrayLinkMenuItem.Checked })
     $profileItem.Add_Click({ Invoke-NextProfile })
-    $refreshItem.Add_Click({ Refresh-Monitors })
+    $refreshItem.Add_Click({ Request-DisplayRecoveryRefresh -Reason "tray-refresh" })
     $exitItem.Add_Click({
         $script:IsQuitting = $true
         if ($script:TrayPopup -and $script:TrayPopup.IsVisible) { $script:TrayPopup.Hide() }
@@ -7228,7 +7748,7 @@ Update-VcpPresetItems -Monitor $null
 
 # Event handlers
 $applyAllCheckbox.Add_Checked({ Set-ApplyToAllMode -Enabled $true }); $applyAllCheckbox.Add_Unchecked({ Set-ApplyToAllMode -Enabled $false })
-$refreshBtn.Add_Click({ Refresh-Monitors }); $identifyBtn.Add_Click({ Show-IdentifyOverlays })
+$refreshBtn.Add_Click({ Request-DisplayRecoveryRefresh -Reason "manual-refresh" }); $identifyBtn.Add_Click({ Show-IdentifyOverlays })
 $monitorLabelSaveBtn.Add_Click({
     if ($script:PhysicalMonitors.Count -eq 0 -or $script:CurrentMonitorIndex -ge $script:PhysicalMonitors.Count) { return }
     $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
@@ -7318,7 +7838,7 @@ $vcpQueryBtn.Add_Click({
     try {
         $code = ConvertTo-VcpCode -Text $vcpCodeBox.Text
         if ($null -eq $code) { $vcpResultBox.Text = "Invalid VCP code"; return }
-        Start-VcpReadWorker -Handle $mon.Handle -Codes @($code) -Mode "Query" -MonitorName $mon.Name -ReadRetries $script:DdcReadRetryCount
+        Start-VcpReadWorker -Handle $mon.Handle -Codes @($code) -Mode "Query" -MonitorName $mon.Name -IdentityKey $mon.IdentityKey -MonitorIndex $script:CurrentMonitorIndex
     } catch { $vcpResultBox.Text = "Error: $_" }
 })
 $vcpSetBtn.Add_Click({
@@ -7343,7 +7863,7 @@ $vcpScanBtn.Add_Click({
     } else {
         $codes = @($script:VCPCodeDescriptions.Keys | Sort-Object)
     }
-    Start-VcpReadWorker -Handle $mon.Handle -Codes $codes -Mode "Scan" -MonitorName $mon.Name -ReadRetries $script:DdcScanRetryCount
+    Start-VcpReadWorker -Handle $mon.Handle -Codes $codes -Mode "Scan" -MonitorName $mon.Name -ReadRetries $script:DdcScanRetryCount -IdentityKey $mon.IdentityKey -MonitorIndex $script:CurrentMonitorIndex
 })
 
 $saveProfileBtn.Add_Click({
@@ -7747,6 +8267,10 @@ if (-not ($script:HasNvidia -or $script:HasAmd -or $script:HasCpuTempMonitor)) {
 
 Initialize-TrayIcon
 
+$window.Add_SourceInitialized({
+    Initialize-DisplayRecoveryEventPipeline
+})
+
 $window.Add_ContentRendered({
     if ($script:CapabilitiesConsentPromptHandled) { return }
     $script:CapabilitiesConsentPromptHandled = $true
@@ -7762,7 +8286,7 @@ $window.Add_StateChanged({
     if ($window.WindowState -eq [System.Windows.WindowState]::Minimized) { Hide-MainWindowToTray }
 })
 
-$window.Add_Closed({ if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AmbientLightTimer) { $script:AmbientLightTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }; if ($script:ProfileScheduleTimer) { $script:ProfileScheduleTimer.Stop() }; if ($script:IdleDimTimer) { $script:IdleDimTimer.Stop() }; if ($script:BatteryProfileTimer) { $script:BatteryProfileTimer.Stop() }; if ($script:FpsOverlayTimer) { $script:FpsOverlayTimer.Stop() }; if ($script:DdcWriteResultTimer) { $script:DdcWriteResultTimer.Stop() }; foreach ($timer in @($script:DeferredRefreshTimers)) { try { $timer.Stop() } catch {} }; $script:DeferredRefreshTimers = @(); Stop-AutomationBridge; Stop-VcpWorker -Cancel; Stop-MonitorSettingsWorker -Cancel; Stop-CapabilitiesWorker -Cancel; Stop-DdcReportWorker -Cancel
+$window.Add_Closed({ if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AmbientLightTimer) { $script:AmbientLightTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }; if ($script:ProfileScheduleTimer) { $script:ProfileScheduleTimer.Stop() }; if ($script:IdleDimTimer) { $script:IdleDimTimer.Stop() }; if ($script:BatteryProfileTimer) { $script:BatteryProfileTimer.Stop() }; if ($script:FpsOverlayTimer) { $script:FpsOverlayTimer.Stop() }; if ($script:DdcWriteResultTimer) { $script:DdcWriteResultTimer.Stop() }; foreach ($timer in @($script:DeferredRefreshTimers)) { try { $timer.Stop() } catch {} }; $script:DeferredRefreshTimers = @(); Stop-DisplayRecoveryEventPipeline; Stop-AutomationBridge; Stop-VcpWorker -Cancel; Stop-MonitorSettingsWorker -Cancel; Stop-CapabilitiesWorker -Cancel; Stop-DdcReportWorker -Cancel
     if ($script:FpsOverlayWindow) { try { $script:FpsOverlayWindow.Close() } catch {} }
     if ($script:HardwareMonitorComputer) { try { $script:HardwareMonitorComputer.Close() } catch {} }
     Dispose-TrayMode
