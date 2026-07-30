@@ -10,7 +10,7 @@
 
 param([switch]$StartMinimized, [string]$LoadProfile)
 
-Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing, System.IO.Compression.FileSystem
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing, System.IO.Compression, System.IO.Compression.FileSystem
 
 $nativeCode = @"
 using System;
@@ -669,6 +669,7 @@ function Get-SafeProfileName {
     if ($safeName.TrimEnd(" ", ".") -ne $safeName) { return "" }
     if ($safeName -eq "." -or $safeName -eq "..") { return "" }
     if ($safeName.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) { return "" }
+    if ($safeName.ToUpperInvariant() -match '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$') { return "" }
     if ($script:ProfileMetadataFiles -and $script:ProfileMetadataFiles -contains "$safeName.json") { return "" }
     return $safeName
 }
@@ -797,7 +798,14 @@ $script:IdleDimSettingsPath = Join-Path $script:ProfilesPath "idle-dim.json"
 $script:BatteryProfileSettingsPath = Join-Path $script:ProfilesPath "battery-profile.json"
 $script:MonitorIdentitySettingsPath = Join-Path $script:ProfilesPath "monitor-identities.json"
 $script:ProfileSchemaVersion = 3
-$script:ProfileBundleSchemaVersion = 1
+$script:ProfileBundleSchemaVersion = 2
+$script:ProfileBundleMaxProfiles = 100
+$script:ProfileBundleMaxArchiveBytes = 16777216
+$script:ProfileBundleMaxManifestBytes = 65536
+$script:ProfileBundleMaxEntryBytes = 262144
+$script:ProfileBundleMaxTotalBytes = 10485760
+$script:ProfileBundleMaxCompressionRatio = 100
+$script:ProfileBundleMaxMonitorSettings = 32
 $script:ProfileExportsPath = Join-Path $script:ProfilesPath "exports"
 $script:ProfileMetadataFiles = @("app-profile-rules.json", "profile-schedules.json", "idle-dim.json", "battery-profile.json", "profile-storage.json", "monitor-identities.json", "automation-bridge.json", "capabilities-safety.json", "capabilities-probe-pending.json")
 $script:MonitorIdentityRecords = @{}
@@ -5042,6 +5050,540 @@ function Read-ProfileObject {
     }
 }
 
+function Test-ProfileBundleEntryPath {
+    param([string]$EntryPath)
+    if ([string]::IsNullOrWhiteSpace($EntryPath) -or $EntryPath.Contains("\") -or $EntryPath.StartsWith("/") -or $EntryPath.Contains(":") -or $EntryPath.Contains([char]0)) {
+        return $false
+    }
+    $segments = $EntryPath.Split("/")
+    for ($i = 0; $i -lt $segments.Count; $i++) {
+        $segment = $segments[$i]
+        if ($segment -eq "." -or $segment -eq "..") { return $false }
+        if ([string]::IsNullOrEmpty($segment) -and $i -ne ($segments.Count - 1)) { return $false }
+    }
+    return $true
+}
+
+function Read-ProfileBundleEntryContent {
+    param($Entry, [int]$MaxBytes)
+    if ($null -eq $Entry -or [long]$Entry.Length -lt 0 -or [long]$Entry.Length -gt $MaxBytes) { return $null }
+    $stream = $null
+    $memory = $null
+    try {
+        $stream = $Entry.Open()
+        $memory = New-Object System.IO.MemoryStream
+        $buffer = New-Object byte[] 8192
+        $total = 0
+        while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $total += $read
+            if ($total -gt $MaxBytes) { return $null }
+            $memory.Write($buffer, 0, $read)
+        }
+        return ,$memory.ToArray()
+    } finally {
+        if ($memory) { $memory.Dispose() }
+        if ($stream) { $stream.Dispose() }
+    }
+}
+
+function Get-ByteSha256Hex {
+    param([byte[]]$Bytes)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return (($sha.ComputeHash($Bytes) | ForEach-Object { $_.ToString("x2") }) -join "")
+    } finally {
+        $sha.Dispose()
+    }
+}
+
+function Get-FileSha256Hex {
+    param([string]$Path)
+    $stream = $null
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        return (($sha.ComputeHash($stream) | ForEach-Object { $_.ToString("x2") }) -join "")
+    } finally {
+        if ($stream) { $stream.Dispose() }
+        $sha.Dispose()
+    }
+}
+
+function Test-ProfileBundleIntegerValue {
+    param($Value, [int]$Minimum, [int]$Maximum)
+    if ($null -eq $Value) { return $false }
+    $typeCode = [System.Type]::GetTypeCode($Value.GetType())
+    if ($typeCode -notin @(
+        [System.TypeCode]::Byte,
+        [System.TypeCode]::SByte,
+        [System.TypeCode]::Int16,
+        [System.TypeCode]::UInt16,
+        [System.TypeCode]::Int32,
+        [System.TypeCode]::UInt32,
+        [System.TypeCode]::Int64,
+        [System.TypeCode]::UInt64,
+        [System.TypeCode]::Single,
+        [System.TypeCode]::Double,
+        [System.TypeCode]::Decimal
+    )) {
+        return $false
+    }
+    try {
+        $number = [decimal]$Value
+        return ($number -eq [decimal]::Truncate($number) -and $number -ge $Minimum -and $number -le $Maximum)
+    } catch {
+        return $false
+    }
+}
+
+function Test-ProfileBundleTextValue {
+    param($Object, [string]$Property, [int]$MaxLength, [switch]$Required)
+    if ($null -eq $Object -or $Object.PSObject.Properties.Name -notcontains $Property) { return (-not $Required) }
+    $value = $Object.$Property
+    if ($null -eq $value -or $value -isnot [string]) { return $false }
+    if ($Required -and [string]::IsNullOrWhiteSpace($value)) { return $false }
+    return $value.Length -le $MaxLength
+}
+
+function Test-ProfileBundleNumberProperty {
+    param($Object, [string]$Property, [int]$Minimum, [int]$Maximum, [switch]$Required)
+    if ($null -eq $Object -or $Object.PSObject.Properties.Name -notcontains $Property) { return (-not $Required) }
+    return (Test-ProfileBundleIntegerValue -Value $Object.$Property -Minimum $Minimum -Maximum $Maximum)
+}
+
+function Test-ImportedProfileObject {
+    param($RawProfile, [string]$ExpectedName)
+    $failure = {
+        param([string]$Message)
+        return [PSCustomObject]@{ Valid = $false; Error = $Message; Profile = $null }
+    }
+    if ($null -eq $RawProfile -or $RawProfile -is [Array] -or $RawProfile -is [string]) { return (& $failure "Profile root must be a JSON object") }
+    $schema = 1
+    if ($RawProfile.PSObject.Properties.Name -contains "SchemaVersion") {
+        if (-not (Test-ProfileBundleIntegerValue -Value $RawProfile.SchemaVersion -Minimum 1 -Maximum $script:ProfileSchemaVersion)) {
+            return (& $failure "Profile schema is unsupported")
+        }
+        $schema = [int]$RawProfile.SchemaVersion
+    }
+    if (-not (Test-ProfileBundleTextValue -Object $RawProfile -Property "Name" -MaxLength 128)) {
+        return (& $failure "Profile name has an invalid type or length")
+    }
+    if ($RawProfile.PSObject.Properties.Name -contains "Name" -and -not [string]::IsNullOrWhiteSpace([string]$RawProfile.Name) -and [string]$RawProfile.Name -cne $ExpectedName) {
+        return (& $failure "Profile name does not match its declared destination")
+    }
+    $safeName = Get-SafeProfileName -Name $ExpectedName
+    if ([string]::IsNullOrWhiteSpace($safeName) -or $safeName -cne $ExpectedName -or $safeName.Length -gt 128) {
+        return (& $failure "Declared profile name is invalid")
+    }
+    foreach ($property in @("MonitorIdentityKey", "MonitorLabel", "MonitorName", "MonitorDevicePath")) {
+        $maxLength = if ($property -eq "MonitorDevicePath") { 1024 } elseif ($property -eq "MonitorIdentityKey") { 512 } else { 256 }
+        if (-not (Test-ProfileBundleTextValue -Object $RawProfile -Property $property -MaxLength $maxLength)) {
+            return (& $failure "Profile text field '$property' is invalid")
+        }
+    }
+    if ($RawProfile.PSObject.Properties.Name -contains "UpdatedAt") {
+        if (-not (Test-ProfileBundleTextValue -Object $RawProfile -Property "UpdatedAt" -MaxLength 64)) {
+            return (& $failure "Profile timestamp is invalid")
+        }
+        $timestamp = [DateTime]::MinValue
+        if (-not [DateTime]::TryParse([string]$RawProfile.UpdatedAt, [ref]$timestamp)) {
+            return (& $failure "Profile timestamp is invalid")
+        }
+    }
+    $requiredNumbers = $schema -ge $script:ProfileSchemaVersion
+    foreach ($property in @("Brightness", "Contrast", "Red", "Green", "Blue")) {
+        if (-not (Test-ProfileBundleNumberProperty -Object $RawProfile -Property $property -Minimum 0 -Maximum 100 -Required:$requiredNumbers)) {
+            return (& $failure "Profile numeric field '$property' is invalid")
+        }
+    }
+    foreach ($property in @("Gamma", "GammaRed", "GammaGreen", "GammaBlue")) {
+        if (-not (Test-ProfileBundleNumberProperty -Object $RawProfile -Property $property -Minimum 50 -Maximum 150 -Required:$requiredNumbers)) {
+            return (& $failure "Profile numeric field '$property' is invalid")
+        }
+    }
+    if ($RawProfile.PSObject.Properties.Name -contains "MonitorSettings") {
+        if ($null -eq $RawProfile.MonitorSettings -or $RawProfile.MonitorSettings -is [string]) {
+            return (& $failure "MonitorSettings must be an array of objects")
+        }
+        $monitorSettings = @($RawProfile.MonitorSettings)
+        if ($monitorSettings.Count -gt $script:ProfileBundleMaxMonitorSettings) {
+            return (& $failure "Profile has too many monitor settings")
+        }
+        $seenIdentityKeys = @{}
+        foreach ($setting in $monitorSettings) {
+            if ($null -eq $setting -or $setting -is [Array] -or $setting -is [string]) {
+                return (& $failure "Monitor setting must be a JSON object")
+            }
+            foreach ($property in @("IdentityKey", "MonitorLabel", "MonitorName", "DevicePath")) {
+                $maxLength = if ($property -eq "DevicePath") { 1024 } elseif ($property -eq "IdentityKey") { 512 } else { 256 }
+                if (-not (Test-ProfileBundleTextValue -Object $setting -Property $property -MaxLength $maxLength)) {
+                    return (& $failure "Monitor setting text field '$property' is invalid")
+                }
+            }
+            $identityKey = if ($setting.PSObject.Properties.Name -contains "IdentityKey") { [string]$setting.IdentityKey } else { "" }
+            if (-not [string]::IsNullOrWhiteSpace($identityKey)) {
+                if ($seenIdentityKeys.ContainsKey($identityKey)) { return (& $failure "Monitor setting identities must be unique") }
+                $seenIdentityKeys[$identityKey] = $true
+            }
+            foreach ($property in @("Brightness", "Contrast", "Red", "Green", "Blue")) {
+                if (-not (Test-ProfileBundleNumberProperty -Object $setting -Property $property -Minimum 0 -Maximum 100 -Required)) {
+                    return (& $failure "Monitor setting numeric field '$property' is invalid")
+                }
+            }
+            foreach ($property in @("Gamma", "GammaRed", "GammaGreen", "GammaBlue")) {
+                if (-not (Test-ProfileBundleNumberProperty -Object $setting -Property $property -Minimum 50 -Maximum 150 -Required)) {
+                    return (& $failure "Monitor setting numeric field '$property' is invalid")
+                }
+            }
+        }
+    }
+    try {
+        $converted = ConvertTo-CurrentProfileSchema -Profile $RawProfile -FallbackName $ExpectedName
+        $converted.Name = $ExpectedName
+        return [PSCustomObject]@{ Valid = $true; Error = ""; Profile = $converted }
+    } catch {
+        return (& $failure "Profile could not be normalized")
+    }
+}
+
+function Get-ProfileBundleImportPlan {
+    param([string]$BundlePath)
+    $failure = {
+        param([string]$Code, [string]$Message)
+        return [PSCustomObject]@{ Valid = $false; ErrorCode = $Code; Message = $Message; Items = @(); BundlePath = $BundlePath }
+    }
+    if ([string]::IsNullOrWhiteSpace($BundlePath) -or -not (Test-Path -LiteralPath $BundlePath -PathType Leaf)) {
+        return (& $failure "bundle_not_found" "Profile bundle was not found")
+    }
+    $bundleFile = Get-Item -LiteralPath $BundlePath
+    if ($bundleFile.Length -gt $script:ProfileBundleMaxArchiveBytes) {
+        return (& $failure "archive_too_large" "Profile bundle exceeds the archive size limit")
+    }
+
+    $archive = $null
+    try {
+        $archive = [System.IO.Compression.ZipFile]::OpenRead($bundleFile.FullName)
+        $entries = @($archive.Entries)
+        if ($entries.Count -gt ($script:ProfileBundleMaxProfiles + 2)) {
+            return (& $failure "too_many_entries" "Profile bundle contains too many entries")
+        }
+        $entryMap = @{}
+        $totalBytes = [long]0
+        foreach ($entry in $entries) {
+            $entryPath = [string]$entry.FullName
+            if (-not (Test-ProfileBundleEntryPath -EntryPath $entryPath)) {
+                return (& $failure "unsafe_entry_path" "Profile bundle contains an unsafe entry path")
+            }
+            if ($entryMap.ContainsKey($entryPath)) {
+                return (& $failure "duplicate_entry" "Profile bundle contains duplicate entry paths")
+            }
+            $entryMap[$entryPath] = $entry
+            $unixType = (([int64]$entry.ExternalAttributes -shr 16) -band 0xF000)
+            if ($unixType -eq 0xA000 -or (([int]$entry.ExternalAttributes -band 0x400) -ne 0)) {
+                return (& $failure "unsafe_entry_type" "Profile bundle contains a link or reparse entry")
+            }
+            if ([string]::IsNullOrEmpty([string]$entry.Name)) {
+                if ($entryPath -cne "profiles/") { return (& $failure "undeclared_entry" "Profile bundle contains an undeclared directory") }
+                continue
+            }
+            $totalBytes += [long]$entry.Length
+            if ($totalBytes -gt $script:ProfileBundleMaxTotalBytes) {
+                return (& $failure "entry_limit" "Profile bundle exceeds the total expanded size limit")
+            }
+            if ([long]$entry.Length -gt 0) {
+                $ratio = [double]$entry.Length / [double][Math]::Max(1, [long]$entry.CompressedLength)
+                if ($ratio -gt $script:ProfileBundleMaxCompressionRatio) {
+                    return (& $failure "entry_limit" "Profile bundle exceeds the compression-ratio limit")
+                }
+            }
+        }
+        if (-not $entryMap.ContainsKey("manifest.json") -or [string]$entryMap["manifest.json"].FullName -cne "manifest.json") {
+            return (& $failure "manifest_missing" "Profile bundle manifest is missing")
+        }
+        $manifestEntry = $entryMap["manifest.json"]
+        $manifestBytes = Read-ProfileBundleEntryContent -Entry $manifestEntry -MaxBytes $script:ProfileBundleMaxManifestBytes
+        if ($null -eq $manifestBytes) { return (& $failure "manifest_invalid" "Profile bundle manifest exceeds its size limit") }
+        try {
+            $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+            $manifestText = $utf8.GetString([byte[]]$manifestBytes).TrimStart([char]0xFEFF)
+            $manifest = $manifestText | ConvertFrom-Json
+        } catch {
+            return (& $failure "manifest_invalid" "Profile bundle manifest is not valid UTF-8 JSON")
+        }
+        if (
+            $null -eq $manifest -or
+            $manifest.PSObject.Properties.Name -notcontains "BundleSchemaVersion" -or
+            -not (Test-ProfileBundleIntegerValue -Value $manifest.BundleSchemaVersion -Minimum 1 -Maximum $script:ProfileBundleSchemaVersion)
+        ) {
+            return (& $failure "unsupported_bundle_schema" "Profile bundle schema is unsupported")
+        }
+        $bundleSchema = [int]$manifest.BundleSchemaVersion
+        if (
+            $manifest.PSObject.Properties.Name -notcontains "ProfileSchemaVersion" -or
+            -not (Test-ProfileBundleIntegerValue -Value $manifest.ProfileSchemaVersion -Minimum 1 -Maximum $script:ProfileSchemaVersion)
+        ) {
+            return (& $failure "unsupported_profile_schema" "Profile schema is unsupported")
+        }
+        $declaredProfileSchemaVersion = [int]$manifest.ProfileSchemaVersion
+        if ($manifest.PSObject.Properties.Name -notcontains "Profiles") {
+            return (& $failure "manifest_invalid" "Profile bundle manifest has no profile declarations")
+        }
+        $profileDeclarations = @($manifest.Profiles)
+        if ($profileDeclarations.Count -gt $script:ProfileBundleMaxProfiles) {
+            return (& $failure "too_many_entries" "Profile bundle declares too many profiles")
+        }
+        if (
+            $manifest.PSObject.Properties.Name -notcontains "ProfileCount" -or
+            -not (Test-ProfileBundleIntegerValue -Value $manifest.ProfileCount -Minimum 0 -Maximum $script:ProfileBundleMaxProfiles) -or
+            [int]$manifest.ProfileCount -ne $profileDeclarations.Count
+        ) {
+            return (& $failure "manifest_mismatch" "Profile bundle count does not match its declarations")
+        }
+
+        $declarations = @()
+        $declaredNames = @{}
+        $declaredFiles = @{}
+        foreach ($declaration in $profileDeclarations) {
+            if ($bundleSchema -eq 1) {
+                if ($declaration -isnot [string]) { return (& $failure "manifest_invalid" "Legacy profile declarations must be names") }
+                $name = [string]$declaration
+                $file = "profiles/$name.json"
+                $declaredHash = ""
+                $declaredLength = -1
+            } else {
+                if ($null -eq $declaration -or $declaration -is [string] -or $declaration -is [Array]) {
+                    return (& $failure "manifest_invalid" "Profile declarations must be objects")
+                }
+                if (
+                    -not (Test-ProfileBundleTextValue -Object $declaration -Property "Name" -MaxLength 128 -Required) -or
+                    -not (Test-ProfileBundleTextValue -Object $declaration -Property "File" -MaxLength 256 -Required) -or
+                    -not (Test-ProfileBundleTextValue -Object $declaration -Property "Sha256" -MaxLength 64 -Required) -or
+                    -not (Test-ProfileBundleNumberProperty -Object $declaration -Property "UncompressedBytes" -Minimum 1 -Maximum $script:ProfileBundleMaxEntryBytes -Required)
+                ) {
+                    return (& $failure "manifest_invalid" "Profile declaration fields are invalid")
+                }
+                $name = [string]$declaration.Name
+                $file = [string]$declaration.File
+                $declaredHash = ([string]$declaration.Sha256).ToLowerInvariant()
+                $declaredLength = [int]$declaration.UncompressedBytes
+                if ($declaredHash -notmatch '^[0-9a-f]{64}$') {
+                    return (& $failure "manifest_invalid" "Profile declaration checksum is invalid")
+                }
+            }
+            $safeName = Get-SafeProfileName -Name $name
+            if ([string]::IsNullOrWhiteSpace($safeName) -or $safeName -cne $name -or $safeName.Length -gt 128) {
+                return (& $failure "manifest_invalid" "Profile declaration name is invalid")
+            }
+            $expectedFile = "profiles/$safeName.json"
+            if ($file -cne $expectedFile -or -not (Test-ProfileBundleEntryPath -EntryPath $file)) {
+                return (& $failure "unsafe_entry_path" "Profile declaration path is invalid")
+            }
+            if ($declaredNames.ContainsKey($safeName) -or $declaredFiles.ContainsKey($file)) {
+                return (& $failure "duplicate_destination" "Profile bundle contains duplicate destinations")
+            }
+            $declaredNames[$safeName] = $true
+            $declaredFiles[$file] = $true
+            $declarations += [PSCustomObject]@{
+                Name = $safeName
+                File = $file
+                Sha256 = $declaredHash
+                UncompressedBytes = $declaredLength
+            }
+        }
+
+        foreach ($entry in $entries) {
+            if ([string]::IsNullOrEmpty([string]$entry.Name)) { continue }
+            if ([string]$entry.FullName -ceq "manifest.json") { continue }
+            if (-not $declaredFiles.ContainsKey([string]$entry.FullName)) {
+                return (& $failure "undeclared_entry" "Profile bundle contains an undeclared file")
+            }
+        }
+
+        $items = @()
+        foreach ($declaration in $declarations) {
+            if (-not $entryMap.ContainsKey($declaration.File)) {
+                return (& $failure "declared_entry_missing" "Profile bundle is missing a declared profile")
+            }
+            $entry = $entryMap[$declaration.File]
+            if ([long]$entry.Length -le 0 -or [long]$entry.Length -gt $script:ProfileBundleMaxEntryBytes) {
+                return (& $failure "entry_limit" "A profile entry exceeds its size limit")
+            }
+            if ($bundleSchema -ge 2 -and [long]$entry.Length -ne [long]$declaration.UncompressedBytes) {
+                return (& $failure "manifest_mismatch" "A profile entry length does not match its declaration")
+            }
+            $profileBytes = Read-ProfileBundleEntryContent -Entry $entry -MaxBytes $script:ProfileBundleMaxEntryBytes
+            if ($null -eq $profileBytes) { return (& $failure "entry_limit" "A profile entry exceeds its read limit") }
+            $actualHash = Get-ByteSha256Hex -Bytes ([byte[]]$profileBytes)
+            if ($bundleSchema -ge 2 -and $actualHash -cne $declaration.Sha256) {
+                return (& $failure "checksum_mismatch" "A profile entry checksum does not match its declaration")
+            }
+            try {
+                $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+                $profileText = $utf8.GetString([byte[]]$profileBytes).TrimStart([char]0xFEFF)
+                $rawProfile = $profileText | ConvertFrom-Json
+            } catch {
+                return (& $failure "invalid_profile" "A profile entry is not valid UTF-8 JSON")
+            }
+            if ($null -eq $rawProfile -or $rawProfile -is [Array] -or $rawProfile -is [string]) {
+                return (& $failure "invalid_profile" "Profile root must be a JSON object")
+            }
+            $rawProfileSchema = if ($rawProfile.PSObject.Properties.Name -contains "SchemaVersion") { $rawProfile.SchemaVersion } else { 1 }
+            if (
+                -not (Test-ProfileBundleIntegerValue -Value $rawProfileSchema -Minimum 1 -Maximum $script:ProfileSchemaVersion) -or
+                [int]$rawProfileSchema -gt $declaredProfileSchemaVersion
+            ) {
+                return (& $failure "manifest_mismatch" "A profile schema exceeds the manifest declaration")
+            }
+            $validation = Test-ImportedProfileObject -RawProfile $rawProfile -ExpectedName $declaration.Name
+            if (-not $validation.Valid) {
+                return (& $failure "invalid_profile" $validation.Error)
+            }
+            $canonicalText = (($validation.Profile | ConvertTo-Json -Depth 6) + [Environment]::NewLine)
+            $canonicalBytes = [System.Text.Encoding]::UTF8.GetBytes($canonicalText)
+            if ($canonicalBytes.Length -gt $script:ProfileBundleMaxEntryBytes) {
+                return (& $failure "entry_limit" "A normalized profile exceeds its size limit")
+            }
+            $destinationPath = Join-Path $script:ProfilesPath "$($declaration.Name).json"
+            $exists = Test-Path -LiteralPath $destinationPath -PathType Leaf
+            $existingHash = if ($exists) { Get-FileSha256Hex -Path $destinationPath } else { "" }
+            $items += [PSCustomObject]@{
+                Name = [string]$declaration.Name
+                File = [string]$declaration.File
+                DestinationPath = $destinationPath
+                Action = if ($exists) { "Replace" } else { "Create" }
+                ExistingHash = $existingHash
+                Content = [byte[]]$canonicalBytes
+            }
+        }
+        return [PSCustomObject]@{
+            Valid = $true
+            ErrorCode = ""
+            Message = ""
+            Items = @($items)
+            BundlePath = $bundleFile.FullName
+            BundleSchemaVersion = $bundleSchema
+        }
+    } catch {
+        return (& $failure "archive_invalid" "Profile bundle could not be safely read")
+    } finally {
+        if ($archive) { $archive.Dispose() }
+    }
+}
+
+function Format-ProfileBundleImportPreview {
+    param($Plan, [ValidateSet("Replace", "Skip")] [string]$ConflictMode = "Replace")
+    if ($null -eq $Plan -or -not $Plan.Valid) { return "Profile bundle is invalid." }
+    $creates = @($Plan.Items | Where-Object Action -eq "Create")
+    $replaces = @($Plan.Items | Where-Object Action -eq "Replace")
+    $skips = @(if ($ConflictMode -eq "Skip") { $replaces })
+    if ($ConflictMode -eq "Skip") { $replaces = @() }
+    $lines = @(
+        "Create ($($creates.Count)): $(if ($creates.Count) { ($creates.Name | Select-Object -First 12) -join ', ' } else { 'none' })",
+        "Replace ($($replaces.Count)): $(if ($replaces.Count) { ($replaces.Name | Select-Object -First 12) -join ', ' } else { 'none' })",
+        "Skip ($($skips.Count)): $(if ($skips.Count) { ($skips.Name | Select-Object -First 12) -join ', ' } else { 'none' })"
+    )
+    return ($lines -join [Environment]::NewLine)
+}
+
+function Invoke-ProfileBundleImportCommit {
+    param(
+        $Plan,
+        [ValidateSet("Replace", "Skip")] [string]$ConflictMode = "Replace",
+        [scriptblock]$AfterCommit
+    )
+    if ($null -eq $Plan -or -not $Plan.Valid) {
+        return [PSCustomObject]@{ Success = $false; Count = 0; Skipped = 0; ErrorCode = "invalid_plan" }
+    }
+    $accepted = @($Plan.Items | Where-Object { $_.Action -eq "Create" -or ($_.Action -eq "Replace" -and $ConflictMode -eq "Replace") })
+    $skipped = @($Plan.Items | Where-Object { $_.Action -eq "Replace" -and $ConflictMode -eq "Skip" }).Count
+    if ($accepted.Count -eq 0) {
+        return [PSCustomObject]@{ Success = $true; Count = 0; Skipped = $skipped; ErrorCode = "" }
+    }
+    if (-not (Test-Path -LiteralPath $script:ProfilesPath)) { New-Item -ItemType Directory -Path $script:ProfilesPath -Force | Out-Null }
+    $stageRoot = Join-Path $script:ProfilesPath (".profile-import-" + [guid]::NewGuid().ToString("N"))
+    $stageProfiles = Join-Path $stageRoot "profiles"
+    $rollbackRoot = Join-Path $stageRoot "rollback"
+    $committed = New-Object System.Collections.Generic.List[object]
+    $rollbackFailed = $false
+    $preserveStage = $false
+    try {
+        New-Item -ItemType Directory -Path $stageProfiles -Force | Out-Null
+        New-Item -ItemType Directory -Path $rollbackRoot -Force | Out-Null
+        foreach ($item in $accepted) {
+            $stagePath = Join-Path $stageProfiles "$($item.Name).json"
+            [System.IO.File]::WriteAllBytes($stagePath, [byte[]]$item.Content)
+            $item | Add-Member -NotePropertyName StagePath -NotePropertyValue $stagePath -Force
+            $item | Add-Member -NotePropertyName RollbackPath -NotePropertyValue (Join-Path $rollbackRoot "$($item.Name).json") -Force
+        }
+        foreach ($item in $accepted) {
+            $exists = Test-Path -LiteralPath $item.DestinationPath -PathType Leaf
+            if ($item.Action -eq "Create" -and $exists) { throw "destination_changed" }
+            if ($item.Action -eq "Replace") {
+                if (-not $exists -or (Get-FileSha256Hex -Path $item.DestinationPath) -cne [string]$item.ExistingHash) {
+                    throw "destination_changed"
+                }
+            }
+        }
+        foreach ($item in $accepted) {
+            if ($item.Action -eq "Replace") {
+                [System.IO.File]::Replace($item.StagePath, $item.DestinationPath, $item.RollbackPath, $true)
+            } else {
+                [System.IO.File]::Move($item.StagePath, $item.DestinationPath)
+            }
+            $committed.Add($item)
+            if ($AfterCommit) { & $AfterCommit $committed.Count $item }
+        }
+        return [PSCustomObject]@{ Success = $true; Count = $accepted.Count; Skipped = $skipped; ErrorCode = "" }
+    } catch {
+        for ($i = $committed.Count - 1; $i -ge 0; $i--) {
+            $item = $committed[$i]
+            try {
+                if ($item.Action -eq "Replace") {
+                    if (-not (Test-Path -LiteralPath $item.RollbackPath -PathType Leaf)) { throw "rollback_missing" }
+                    $failedImportPath = "$($item.RollbackPath).failed"
+                    $restoredAtomically = $false
+                    try {
+                        [System.IO.File]::Replace($item.RollbackPath, $item.DestinationPath, $failedImportPath, $true)
+                        $restoredAtomically = $true
+                    } catch {
+                        [System.IO.File]::Copy($item.RollbackPath, $item.DestinationPath, $true)
+                    }
+                    if ($restoredAtomically -and (Test-Path -LiteralPath $failedImportPath)) {
+                        Remove-Item -LiteralPath $failedImportPath -Force -ErrorAction SilentlyContinue
+                    }
+                } elseif (Test-Path -LiteralPath $item.DestinationPath) {
+                    Remove-Item -LiteralPath $item.DestinationPath -Force
+                }
+            } catch {
+                $rollbackFailed = $true
+            }
+        }
+        foreach ($item in $committed) {
+            if ($item.Action -eq "Replace") {
+                try {
+                    if ((Get-FileSha256Hex -Path $item.DestinationPath) -cne [string]$item.ExistingHash) { $rollbackFailed = $true }
+                } catch {
+                    $rollbackFailed = $true
+                }
+            } elseif (Test-Path -LiteralPath $item.DestinationPath) {
+                $rollbackFailed = $true
+            }
+        }
+        $preserveStage = $rollbackFailed
+        return [PSCustomObject]@{
+            Success = $false
+            Count = 0
+            Skipped = $skipped
+            ErrorCode = if ($rollbackFailed) { "rollback_failed" } else { "commit_failed" }
+            RecoveryPath = if ($rollbackFailed) { $stageRoot } else { "" }
+        }
+    } finally {
+        if (-not $preserveStage -and (Test-Path -LiteralPath $stageRoot)) {
+            Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Export-ProfileBundle {
     param([string]$OutputPath)
     $profileFiles = @(Get-UserProfileFiles)
@@ -5049,14 +5591,18 @@ function Export-ProfileBundle {
         Update-Status "No profiles to export"
         return $null
     }
+    if ($profileFiles.Count -gt $script:ProfileBundleMaxProfiles) {
+        Update-Status "Profile export exceeds the $script:ProfileBundleMaxProfiles-profile bundle limit"
+        return $null
+    }
 
     if ([string]::IsNullOrWhiteSpace($OutputPath)) {
-        if (-not (Test-Path $script:ProfileExportsPath)) { New-Item -ItemType Directory -Path $script:ProfileExportsPath -Force | Out-Null }
+        if (-not (Test-Path -LiteralPath $script:ProfileExportsPath)) { New-Item -ItemType Directory -Path $script:ProfileExportsPath -Force | Out-Null }
         $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
         $OutputPath = Join-Path $script:ProfileExportsPath "monitorcontrol-profiles-$timestamp.zip"
     } else {
         $parent = Split-Path -Path $OutputPath -Parent
-        if (-not [string]::IsNullOrWhiteSpace($parent) -and -not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+        if (-not [string]::IsNullOrWhiteSpace($parent) -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
     }
 
     $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("MonitorControlProfileExport-" + [guid]::NewGuid())
@@ -5068,8 +5614,25 @@ function Export-ProfileBundle {
             $profile = Read-ProfileObject -Name $profileFile.BaseName
             if ($null -eq $profile) { continue }
             $safeName = $profileFile.BaseName
-            $profile | ConvertTo-Json -Depth 6 | Set-Content -Path (Join-Path $tempProfiles "$safeName.json") -Encoding UTF8
-            $exportedProfiles += $safeName
+            $validation = Test-ImportedProfileObject -RawProfile $profile -ExpectedName $safeName
+            if (-not $validation.Valid) {
+                Update-Status "Profile export stopped because '$safeName' is invalid"
+                return $null
+            }
+            $profileText = (($validation.Profile | ConvertTo-Json -Depth 6) + [Environment]::NewLine)
+            $profileBytes = [System.Text.Encoding]::UTF8.GetBytes($profileText)
+            if ($profileBytes.Length -gt $script:ProfileBundleMaxEntryBytes) {
+                Update-Status "Profile export stopped because '$safeName' exceeds the entry size limit"
+                return $null
+            }
+            $relativeFile = "profiles/$safeName.json"
+            [System.IO.File]::WriteAllBytes((Join-Path $tempProfiles "$safeName.json"), $profileBytes)
+            $exportedProfiles += [PSCustomObject]@{
+                Name = $safeName
+                File = $relativeFile
+                Sha256 = Get-ByteSha256Hex -Bytes $profileBytes
+                UncompressedBytes = $profileBytes.Length
+            }
         }
 
         if ($exportedProfiles.Count -eq 0) {
@@ -5083,68 +5646,122 @@ function Export-ProfileBundle {
             ProfileSchemaVersion = $script:ProfileSchemaVersion
             ExportedAt = (Get-Date).ToString("o")
             ProfileCount = $exportedProfiles.Count
-            Profiles = $exportedProfiles
+            Profiles = @($exportedProfiles)
         }
-        $manifest | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $tempRoot "manifest.json") -Encoding UTF8
-        if (Test-Path $OutputPath) { Remove-Item -Path $OutputPath -Force }
-        [System.IO.Compression.ZipFile]::CreateFromDirectory($tempRoot, $OutputPath)
+        $manifestText = (($manifest | ConvertTo-Json -Depth 5) + [Environment]::NewLine)
+        $manifestBytes = [System.Text.Encoding]::UTF8.GetBytes($manifestText)
+        if ($manifestBytes.Length -gt $script:ProfileBundleMaxManifestBytes) {
+            Update-Status "Profile bundle manifest exceeds its size limit"
+            return $null
+        }
+        [System.IO.File]::WriteAllBytes((Join-Path $tempRoot "manifest.json"), $manifestBytes)
+        if (Test-Path -LiteralPath $OutputPath) { Remove-Item -LiteralPath $OutputPath -Force }
+        $archive = [System.IO.Compression.ZipFile]::Open($OutputPath, [System.IO.Compression.ZipArchiveMode]::Create)
+        try {
+            foreach ($declaration in $exportedProfiles) {
+                $entry = $archive.CreateEntry([string]$declaration.File, [System.IO.Compression.CompressionLevel]::Optimal)
+                $entryStream = $entry.Open()
+                try {
+                    $bytes = [System.IO.File]::ReadAllBytes((Join-Path $tempProfiles "$($declaration.Name).json"))
+                    $entryStream.Write($bytes, 0, $bytes.Length)
+                } finally {
+                    $entryStream.Dispose()
+                }
+            }
+            $manifestEntry = $archive.CreateEntry("manifest.json", [System.IO.Compression.CompressionLevel]::Optimal)
+            $manifestStream = $manifestEntry.Open()
+            try {
+                $manifestStream.Write($manifestBytes, 0, $manifestBytes.Length)
+            } finally {
+                $manifestStream.Dispose()
+            }
+        } finally {
+            $archive.Dispose()
+        }
         Update-Status "Exported $($exportedProfiles.Count) profiles to $(Split-Path -Path $OutputPath -Leaf)"
         return $OutputPath
     } catch {
-        Update-Status "Profile export failed: $($_.Exception.Message)"
+        Update-Status "Profile export failed"
         return $null
     } finally {
-        if (Test-Path $tempRoot) { Remove-Item -Path $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
     }
 }
 
 function Import-ProfileBundle {
-    param([string]$BundlePath)
-    if ([string]::IsNullOrWhiteSpace($BundlePath) -or -not (Test-Path $BundlePath)) {
-        Update-Status "Profile bundle not found"
+    param(
+        [string]$BundlePath,
+        [ValidateSet("Prompt", "Replace", "Skip")] [string]$ConflictMode = "Prompt"
+    )
+    $plan = Get-ProfileBundleImportPlan -BundlePath $BundlePath
+    if (-not $plan.Valid) {
+        Update-Status "Profile bundle rejected: $($plan.Message)"
         return 0
     }
 
-    $archive = $null
-    $imported = 0
-    $skipped = 0
-    try {
-        $archive = [System.IO.Compression.ZipFile]::OpenRead($BundlePath)
-        $entries = @($archive.Entries | Where-Object {
-            -not [string]::IsNullOrWhiteSpace($_.Name) -and
-            $_.Name.ToLowerInvariant().EndsWith(".json") -and
-            $_.Name -ne "manifest.json" -and
-            $script:ProfileMetadataFiles -notcontains $_.Name
-        })
+    $replaceCount = @($plan.Items | Where-Object Action -eq "Replace").Count
+    if ($ConflictMode -eq "Prompt") {
+        $replacePreview = Format-ProfileBundleImportPreview -Plan $plan -ConflictMode "Replace"
+        if ($replaceCount -gt 0) {
+            $skipPreview = Format-ProfileBundleImportPreview -Plan $plan -ConflictMode "Skip"
+            $message = @"
+Replace-conflicts plan:
+$replacePreview
 
-        foreach ($entry in $entries) {
-            $fallbackName = [System.IO.Path]::GetFileNameWithoutExtension($entry.Name)
-            $safeFallbackName = Get-SafeProfileName -Name $fallbackName
-            if ([string]::IsNullOrWhiteSpace($safeFallbackName)) { $skipped++; continue }
-            $reader = $null
-            try {
-                $reader = New-Object System.IO.StreamReader($entry.Open())
-                $rawProfile = $reader.ReadToEnd() | ConvertFrom-Json
-                $profile = ConvertTo-CurrentProfileSchema -Profile $rawProfile -FallbackName $safeFallbackName
-                if (Save-ProfileObject -Profile $profile) { $imported++ } else { $skipped++ }
-            } catch {
-                $skipped++
-            } finally {
-                if ($reader) { $reader.Dispose() }
+Skip-conflicts plan:
+$skipPreview
+
+Yes: create new profiles and replace conflicts.
+No: create new profiles and skip conflicts.
+Cancel: import nothing.
+
+All accepted profiles are staged and committed together.
+"@
+            $choice = [System.Windows.MessageBox]::Show(
+                $message,
+                "Preview profile bundle import",
+                [System.Windows.MessageBoxButton]::YesNoCancel,
+                [System.Windows.MessageBoxImage]::Question
+            )
+            if ($choice -eq [System.Windows.MessageBoxResult]::Cancel) {
+                Update-Status "Profile bundle import cancelled"
+                return 0
             }
+            $ConflictMode = if ($choice -eq [System.Windows.MessageBoxResult]::Yes) { "Replace" } else { "Skip" }
+        } else {
+            $choice = [System.Windows.MessageBox]::Show(
+                "$replacePreview`n`nImport these profiles as one transaction?",
+                "Preview profile bundle import",
+                [System.Windows.MessageBoxButton]::OKCancel,
+                [System.Windows.MessageBoxImage]::Question
+            )
+            if ($choice -ne [System.Windows.MessageBoxResult]::OK) {
+                Update-Status "Profile bundle import cancelled"
+                return 0
+            }
+            $ConflictMode = "Replace"
         }
-
-        Update-ProfilesList
-        $status = if ($imported -gt 0) { "Imported $imported profiles from $(Split-Path -Path $BundlePath -Leaf)" } else { "No profiles imported" }
-        if ($skipped -gt 0) { $status = "$status ($skipped skipped)" }
-        Update-Status $status
-        return $imported
-    } catch {
-        Update-Status "Profile import failed: $($_.Exception.Message)"
-        return 0
-    } finally {
-        if ($archive) { $archive.Dispose() }
     }
+    $result = Invoke-ProfileBundleImportCommit -Plan $plan -ConflictMode $ConflictMode
+    if (-not $result.Success) {
+        if ($result.ErrorCode -eq "rollback_failed") {
+            Update-Status "Profile import failed and rollback needs manual recovery"
+        } else {
+            Update-Status "Profile import failed; existing profiles were restored"
+        }
+        return 0
+    }
+    if ($result.Count -gt 0) {
+        Update-ProfilesList
+    }
+    $status = if ($result.Count -gt 0) {
+        "Imported $($result.Count) profiles from $(Split-Path -Path $BundlePath -Leaf)"
+    } else {
+        "No profiles imported"
+    }
+    if ($result.Skipped -gt 0) { $status = "$status ($($result.Skipped) conflicts skipped)" }
+    Update-Status $status
+    return [int]$result.Count
 }
 
 function Set-ProfileStorageRoot {

@@ -301,8 +301,9 @@ Profiles are saved as JSON files in `%APPDATA%\MonitorControlPro\`
 
 Profiles without `SchemaVersion` are treated as v1 and migrated to the current schema on load.
 
-Use **Export Bundle** on the Profiles tab to create a timestamped ZIP in `%APPDATA%\MonitorControlPro\exports`.
-Use **Import Bundle** to restore every profile JSON from a bundle; corrupt entries are skipped without blocking valid profiles.
+Use **Export Bundle** on the Profiles tab to create a manifest-declared, SHA-256 checksummed ZIP in `%APPDATA%\MonitorControlPro\exports`.
+Use **Import Bundle** to preview creates, replacements, and skipped conflicts before writing. Imports reject unsafe paths, undeclared or duplicate entries, unsupported schemas, invalid values, oversized content, and suspicious compression ratios.
+Accepted profiles are staged on the profile volume and committed as one transaction; a write failure restores every prior profile byte-for-byte and removes newly created destinations.
 Use **Sync Folder** to point profile storage at a OneDrive or Dropbox folder. The pointer is stored in `%APPDATA%\MonitorControlPro\profile-storage.json`; **Use Local** switches back to `%APPDATA%\MonitorControlPro`.
 
 ### Example Profiles
