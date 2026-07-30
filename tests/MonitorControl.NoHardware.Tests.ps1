@@ -113,7 +113,13 @@ BeforeAll {
         "Normalize-ScheduleTime",
         "Get-ScheduleMinutes",
         "Get-ActiveScheduleRule",
-        "Get-IdleSecondsFromTicks"
+        "Get-IdleSecondsFromTicks",
+        "Get-AccessibilityThemePalette",
+        "Get-WcagRelativeLuminance",
+        "Get-WcagContrastRatio",
+        "Resolve-TextScaleFactor",
+        "Get-StatusMessageSeverity",
+        "Get-NavigationShortcutTarget"
     )
 
     function Start-TestAutomationBridge {
@@ -1384,6 +1390,76 @@ Describe "Modern control-center shell" {
         [int]$window.Width | Should -BeGreaterOrEqual 1000
         [int]$window.MinWidth | Should -BeGreaterOrEqual 900
         $window.GetAttribute("TextOptions.TextRenderingMode") | Should -Be "ClearType"
+    }
+}
+
+Describe "System-aware accessibility contract" {
+    BeforeAll {
+        $script:AccessibilitySource = Get-Content -LiteralPath $script:AppPath -Raw
+        $xamlMatch = [regex]::Match($script:AccessibilitySource, '(?s)\[xml\]\$xaml = @"\r?\n(.*?)\r?\n"@')
+        if (-not $xamlMatch.Success) { throw "Main XAML block not found." }
+        $script:AccessibilityXaml = $xamlMatch.Groups[1].Value
+    }
+
+    It "meets WCAG AA text contrast and non-text control contrast in the dark palette" {
+        $palette = Get-AccessibilityThemePalette
+        $textPairs = @(
+            @($palette.Text, $palette.Canvas),
+            @($palette.Text, $palette.Surface),
+            @($palette.MutedText, $palette.Canvas),
+            @($palette.MutedText, $palette.Card),
+            @($palette.OnAccent, $palette.Accent),
+            @($palette.OnAccent, $palette.AccentHover),
+            @($palette.OnAccent, $palette.AccentPressed),
+            @($palette.Danger, $palette.DangerSurface),
+            @($palette.Warning, $palette.WarningSurface)
+        )
+        foreach ($pair in $textPairs) {
+            (Get-WcagContrastRatio -Foreground $pair[0] -Background $pair[1]) |
+                Should -BeGreaterOrEqual 4.5 -Because "$($pair[0]) on $($pair[1]) is normal-sized text"
+        }
+        foreach ($background in @($palette.Canvas, $palette.Card, $palette.Control)) {
+            (Get-WcagContrastRatio -Foreground $palette.Border -Background $background) |
+                Should -BeGreaterOrEqual 3.0 -Because "control boundaries must remain distinguishable"
+        }
+    }
+
+    It "resolves system text scaling deterministically through 200 percent" {
+        Resolve-TextScaleFactor -SystemPercent 100 | Should -Be 1.0
+        Resolve-TextScaleFactor -SystemPercent 150 | Should -Be 1.5
+        Resolve-TextScaleFactor -SystemPercent 200 | Should -Be 2.0
+        Resolve-TextScaleFactor -SystemPercent 125 -OverridePercent 200 | Should -Be 2.0
+        Resolve-TextScaleFactor -SystemPercent 400 | Should -Be 2.0
+    }
+
+    It "keeps shell text at 12 DIPs or larger and makes palette resources dynamic" {
+        $fontSizes = @([regex]::Matches($script:AccessibilityXaml, 'FontSize="([0-9]+(?:\.[0-9]+)?)"') | ForEach-Object {
+            [double]$_.Groups[1].Value
+        })
+        ($fontSizes | Measure-Object -Minimum).Minimum | Should -BeGreaterOrEqual 12
+        $script:AccessibilityXaml | Should -Match '\{DynamicResource CanvasBrush\}'
+        $script:AccessibilityXaml | Should -Match '\{DynamicResource TextBrush\}'
+        $script:AccessibilityXaml | Should -Match 'x:Key="KeyboardFocusVisual"'
+        $script:AccessibilityXaml | Should -Match 'FocusVisualStyle'
+    }
+
+    It "wires live high contrast, per-monitor DPI, keyboard navigation, and assertive errors" {
+        $script:AccessibilitySource | Should -Match 'SetProcessDpiAwarenessContext\(\[IntPtr\]\(-4\)\)'
+        $script:AccessibilitySource | Should -Match 'SystemEvents\]::add_UserPreferenceChanged'
+        $script:AccessibilitySource | Should -Match 'SystemEvents\]::remove_UserPreferenceChanged'
+        $script:AccessibilitySource | Should -Match 'AutomationEvents\]::LiveRegionChanged'
+        $script:AccessibilityXaml | Should -Match 'AutomationProperties\.LiveSetting="Assertive"'
+        $script:AccessibilitySource | Should -Match 'New-Object System\.Windows\.Controls\.Button'
+        $script:AccessibilitySource | Should -Match 'Get-NavigationShortcutTarget -Key'
+    }
+
+    It "classifies actionable alerts and exposes stable navigation shortcuts" {
+        Get-StatusMessageSeverity -Message "Profile import failed" | Should -Be "Error"
+        Get-StatusMessageSeverity -Message "VCP write queue is busy; try again" | Should -Be "Warning"
+        Get-StatusMessageSeverity -Message "Saved profile" | Should -Be "Info"
+        Get-NavigationShortcutTarget -Key "d" | Should -Be "Display"
+        Get-NavigationShortcutTarget -Key "S" | Should -Be "System"
+        Get-NavigationShortcutTarget -Key "x" | Should -Be ""
     }
 }
 

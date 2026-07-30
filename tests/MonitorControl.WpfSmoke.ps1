@@ -1,5 +1,12 @@
 param(
     [int]$LaunchTimeoutSeconds = 45,
+    [ValidateSet("System", "Dark", "HighContrast")]
+    [string]$AppTheme = "System",
+    [ValidateRange(100, 200)]
+    [int]$TextScalePercent = 100,
+    [switch]$ResizeToMinimum,
+    [switch]$ExerciseValidationAlert,
+    [string]$ScreenshotPath = "",
     [switch]$Quiet
 )
 
@@ -70,6 +77,53 @@ function Get-TabByName {
     return $null
 }
 
+function Get-ControlByName {
+    param($Root, [string]$Name, $ControlType)
+    $conditions = @(
+        (New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::NameProperty,
+            $Name
+        ))
+    )
+    if ($null -ne $ControlType) {
+        $conditions += New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            $ControlType
+        )
+    }
+    $condition = if ($conditions.Count -eq 1) {
+        $conditions[0]
+    } else {
+        New-Object System.Windows.Automation.AndCondition($conditions)
+    }
+    return $Root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
+}
+
+function Save-WindowScreenshot {
+    param($Root, [string]$Path)
+    Add-Type -AssemblyName System.Drawing
+    $Root.SetFocus()
+    Start-Sleep -Milliseconds 250
+    $bounds = $Root.Current.BoundingRectangle
+    $width = [Math]::Max(1, [int][Math]::Ceiling($bounds.Width))
+    $height = [Math]::Max(1, [int][Math]::Ceiling($bounds.Height))
+    $bitmap = New-Object System.Drawing.Bitmap($width, $height)
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    try {
+        $graphics.CopyFromScreen(
+            [int][Math]::Floor($bounds.Left),
+            [int][Math]::Floor($bounds.Top),
+            0,
+            0,
+            (New-Object System.Drawing.Size($width, $height))
+        )
+        $bitmap.Save([System.IO.Path]::GetFullPath($Path), [System.Drawing.Imaging.ImageFormat]::Png)
+    } finally {
+        $graphics.Dispose()
+        $bitmap.Dispose()
+    }
+}
+
 $realAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)
 $realProfileRoot = Join-Path $realAppData "MonitorControlPro"
 $realProfileBefore = Get-DirectorySnapshot -Path $realProfileRoot
@@ -80,6 +134,7 @@ $sandboxProfileRoot = Join-Path $sandboxAppData "MonitorControlPro"
 $process = $null
 $navigated = New-Object System.Collections.Generic.List[string]
 $exitCode = $null
+$screenshotWritten = $false
 
 try {
     New-Item -ItemType Directory -Path $sandboxProfileRoot, $sandboxLocalAppData -Force | Out-Null
@@ -102,7 +157,7 @@ try {
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = $windowsPowerShell
     $escapedAppPath = $appPath.Replace('"', '\"')
-    $startInfo.Arguments = "-NoLogo -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$escapedAppPath`""
+    $startInfo.Arguments = "-NoLogo -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$escapedAppPath`" -Theme $AppTheme -TextScalePercent $TextScalePercent"
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $false
     $startInfo.EnvironmentVariables["APPDATA"] = $sandboxAppData
@@ -120,9 +175,156 @@ try {
     if ($process.MainWindowHandle -eq [IntPtr]::Zero) { throw "The WPF window did not appear within $LaunchTimeoutSeconds seconds." }
 
     Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+    if (-not ("MonitorControlLiveRegionProbe" -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Threading;
+
+public sealed class MonitorControlLiveRegionProbe : IDisposable
+{
+    private const uint LiveRegionChanged = 0x8019;
+    private const uint WmQuit = 0x0012;
+    private readonly uint processId;
+    private readonly ManualResetEvent ready = new ManualResetEvent(false);
+    private readonly ManualResetEvent signal = new ManualResetEvent(false);
+    private readonly Thread eventThread;
+    private WinEventDelegate callback;
+    private IntPtr hook;
+    private uint eventThreadId;
+    private Exception startupError;
+    private bool disposed;
+
+    private delegate void WinEventDelegate(
+        IntPtr hook,
+        uint eventType,
+        IntPtr window,
+        int objectId,
+        int childId,
+        uint sourceThreadId,
+        uint eventTime);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeMessage
+    {
+        public IntPtr Window;
+        public uint Message;
+        public IntPtr WParam;
+        public IntPtr LParam;
+        public uint Time;
+        public int X;
+        public int Y;
+        public uint Private;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SetWinEventHook(
+        uint eventMin,
+        uint eventMax,
+        IntPtr module,
+        WinEventDelegate callback,
+        uint processId,
+        uint threadId,
+        uint flags);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool UnhookWinEvent(IntPtr hook);
+
+    [DllImport("user32.dll")]
+    private static extern int GetMessage(out NativeMessage message, IntPtr window, uint min, uint max);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PostThreadMessage(uint threadId, uint message, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    public MonitorControlLiveRegionProbe(int processId)
+    {
+        this.processId = unchecked((uint)processId);
+        eventThread = new Thread(RunEventLoop);
+        eventThread.IsBackground = true;
+        eventThread.Name = "MonitorControl live-region probe";
+        eventThread.SetApartmentState(ApartmentState.MTA);
+        eventThread.Start();
+        if (!ready.WaitOne(5000)) throw new TimeoutException("The native accessibility event hook did not initialize.");
+        if (startupError != null) throw new InvalidOperationException("The native accessibility event hook failed.", startupError);
+    }
+
+    private void RunEventLoop()
+    {
+        try
+        {
+            eventThreadId = GetCurrentThreadId();
+            callback = OnWinEvent;
+            hook = SetWinEventHook(LiveRegionChanged, LiveRegionChanged, IntPtr.Zero, callback, processId, 0, 0);
+            if (hook == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+        catch (Exception exception)
+        {
+            startupError = exception;
+        }
+        finally
+        {
+            ready.Set();
+        }
+
+        if (hook == IntPtr.Zero) return;
+        NativeMessage message;
+        while (GetMessage(out message, IntPtr.Zero, 0, 0) > 0) { }
+    }
+
+    private void OnWinEvent(
+        IntPtr eventHook,
+        uint eventType,
+        IntPtr window,
+        int objectId,
+        int childId,
+        uint sourceThreadId,
+        uint eventTime)
+    {
+        if (eventType == LiveRegionChanged) signal.Set();
+    }
+
+    public bool Wait(int millisecondsTimeout)
+    {
+        return signal.WaitOne(millisecondsTimeout);
+    }
+
+    public void Dispose()
+    {
+        if (disposed) return;
+        if (hook != IntPtr.Zero) UnhookWinEvent(hook);
+        if (eventThreadId != 0) PostThreadMessage(eventThreadId, WmQuit, IntPtr.Zero, IntPtr.Zero);
+        eventThread.Join(3000);
+        ready.Dispose();
+        signal.Dispose();
+        disposed = true;
+    }
+}
+"@
+    }
     $root = [System.Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
     if ($null -eq $root -or $root.Current.Name -notlike "MonitorControl Pro*") {
         throw "The launched window does not expose the expected MonitorControl Pro UI Automation root."
+    }
+    $expectedThemeText = if ($AppTheme -eq "HighContrast") { "High contrast colors are active." } else { "Dark application colors are active." }
+    if ($root.Current.HelpText -notlike "$expectedThemeText*Text scale: $TextScalePercent%.*") {
+        throw "The UI Automation root did not report the active theme and text scale."
+    }
+
+    if ($ResizeToMinimum) {
+        $transformObject = $null
+        if (-not $root.TryGetCurrentPattern([System.Windows.Automation.TransformPattern]::Pattern, [ref]$transformObject)) {
+            throw "The main window does not expose the resize pattern."
+        }
+        $transform = [System.Windows.Automation.TransformPattern]$transformObject
+        if (-not $transform.Current.CanResize) { throw "The main window cannot be resized for minimum-size verification." }
+        $transform.Resize(920, 640)
+        Start-Sleep -Milliseconds 250
     }
 
     foreach ($name in @("Display", "Monitor", "VCP Explorer", "Profiles", "Automation", "System")) {
@@ -136,7 +338,99 @@ try {
         $selection.Select()
         Start-Sleep -Milliseconds 125
         if (-not $selection.Current.IsSelected) { throw "Navigation destination '$name' did not become selected." }
+        if ($tab.Current.IsOffscreen) { throw "Navigation destination '$name' remained offscreen after selection." }
         $navigated.Add($name)
+    }
+
+    $displayTab = Get-TabByName -Root $root -Name "Display"
+    $displayPattern = $null
+    if ($displayTab.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$displayPattern)) {
+        ([System.Windows.Automation.SelectionItemPattern]$displayPattern).Select()
+        Start-Sleep -Milliseconds 125
+        $monitorButtonCondition = New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::HelpTextProperty,
+            "Select this display"
+        )
+        $monitorButton = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $monitorButtonCondition)
+        if ($null -ne $monitorButton) {
+            $invokeObject = $null
+            if (-not $monitorButton.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$invokeObject)) {
+                throw "A display selector does not expose keyboard-equivalent invocation."
+            }
+            ([System.Windows.Automation.InvokePattern]$invokeObject).Invoke()
+            Start-Sleep -Milliseconds 125
+        }
+    }
+
+    if ($ExerciseValidationAlert) {
+        $vcpTab = Get-TabByName -Root $root -Name "VCP Explorer"
+        $vcpTabPattern = $null
+        if (-not $vcpTab.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$vcpTabPattern)) {
+            throw "VCP Explorer cannot be selected for validation testing."
+        }
+        ([System.Windows.Automation.SelectionItemPattern]$vcpTabPattern).Select()
+        Start-Sleep -Milliseconds 125
+        $codeBox = Get-ControlByName -Root $root -Name "VCP code" -ControlType ([System.Windows.Automation.ControlType]::Edit)
+        $queryButton = Get-ControlByName -Root $root -Name "Query" -ControlType ([System.Windows.Automation.ControlType]::Button)
+        if ($null -eq $codeBox -or $null -eq $queryButton) {
+            $editCondition = New-Object System.Windows.Automation.PropertyCondition(
+                [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+                [System.Windows.Automation.ControlType]::Edit
+            )
+            $buttonCondition = New-Object System.Windows.Automation.PropertyCondition(
+                [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+                [System.Windows.Automation.ControlType]::Button
+            )
+            $editNames = @($root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $editCondition) | ForEach-Object { $_.Current.Name })
+            $buttonNames = @($root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $buttonCondition) | ForEach-Object { $_.Current.Name })
+            throw "VCP validation controls are not exposed through UI Automation. Edits: $($editNames -join ', '); Buttons: $($buttonNames -join ', ')"
+        }
+        $valueObject = $null
+        $invokeObject = $null
+        if (-not $codeBox.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$valueObject) -or
+            -not $queryButton.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$invokeObject)) {
+            throw "VCP validation controls do not expose keyboard-equivalent patterns."
+        }
+        $valuePattern = [System.Windows.Automation.ValuePattern]$valueObject
+        $valuePattern.SetValue("not-a-code")
+        Start-Sleep -Milliseconds 125
+        if ($valuePattern.Current.Value -ne "not-a-code") { throw "The VCP code field did not accept an automation value." }
+        $liveRegionProbe = New-Object MonitorControlLiveRegionProbe($process.Id)
+        Start-Sleep -Milliseconds 500
+        $liveRegionRaised = $false
+        try {
+            ([System.Windows.Automation.InvokePattern]$invokeObject).Invoke()
+            $liveRegionRaised = $liveRegionProbe.Wait(3000)
+        } finally {
+            $liveRegionProbe.Dispose()
+        }
+        Start-Sleep -Milliseconds 250
+        $root = [System.Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
+        $alert = Get-ControlByName -Root $root -Name "Error: Invalid VCP code" -ControlType ([System.Windows.Automation.ControlType]::Text)
+        if ($null -eq $alert) {
+            $textCondition = New-Object System.Windows.Automation.PropertyCondition(
+                [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+                [System.Windows.Automation.ControlType]::Text
+            )
+            $textNames = @($root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $textCondition) | ForEach-Object { $_.Current.Name })
+            throw "The invalid VCP value did not expose an inline alert through UI Automation. Text: $($textNames -join ', ')"
+        }
+        if ($alert.Current.IsOffscreen) { throw "The inline validation alert exists but UI Automation reports it as offscreen." }
+        if (-not $liveRegionRaised) {
+            throw "The invalid VCP value did not raise a UI Automation live-region event."
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ScreenshotPath)) {
+            Save-WindowScreenshot -Root $root -Path $ScreenshotPath
+            $screenshotWritten = $true
+        }
+        $dismissButton = Get-ControlByName -Root $root -Name "Dismiss" -ControlType ([System.Windows.Automation.ControlType]::Button)
+        if ($null -eq $dismissButton) { throw "The inline validation alert has no keyboard-accessible dismiss action." }
+        $dismissObject = $null
+        if (-not $dismissButton.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$dismissObject)) {
+            throw "The alert dismiss action does not expose InvokePattern."
+        }
+        ([System.Windows.Automation.InvokePattern]$dismissObject).Invoke()
+        Start-Sleep -Milliseconds 125
     }
 
     $hardwareTab = Get-TabByName -Root $root -Name "Hardware"
@@ -150,6 +444,11 @@ try {
             }
             $navigated.Add("Hardware")
         }
+    }
+
+    if (-not $screenshotWritten -and -not [string]::IsNullOrWhiteSpace($ScreenshotPath)) {
+        Save-WindowScreenshot -Root $root -Path $ScreenshotPath
+        $screenshotWritten = $true
     }
 
     if (-not $process.CloseMainWindow()) { throw "The WPF window rejected a normal close request." }
@@ -175,6 +474,5 @@ try {
 }
 
 if (-not $Quiet) {
-    Write-Host "WPF smoke passed: navigated $($navigated -join ', '); clean exit $exitCode; real profile unchanged."
+    Write-Host "WPF smoke passed: $AppTheme theme, $TextScalePercent% text, navigated $($navigated -join ', '); clean exit $exitCode; real profile unchanged."
 }
-
