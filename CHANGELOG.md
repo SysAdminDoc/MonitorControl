@@ -4,6 +4,10 @@ All notable changes to MonitorControl will be documented in this file.
 
 ## [Unreleased]
 
+- Added: live Windows high-contrast colors, text-only scaling through 200%, per-monitor DPI awareness, reflowed headers, and independently scrollable navigation and tab content.
+- Added: visible keyboard focus, access-key navigation, keyboard-invokable monitor tiles, complete UI Automation names, and inline dismissible error banners.
+- Added: assertive WPF live regions with a native UI Automation provider fallback, plus an out-of-process accessibility-event smoke assertion.
+- Added: automated WCAG 2.2 AA palette contrast checks and standard/high-contrast minimum-window visual smoke coverage.
 - Added: pinned Windows PowerShell 5.1 verification with Pester 5.8.0, PSScriptAnalyzer 1.25.0, an isolated WPF UI Automation smoke test, and an unsigned release build.
 - Added: regression coverage for every legacy profile schema, deterministic same-time schedule precedence, unique native-handle cleanup, and future-schema rejection.
 - Added: one debounced display recovery pipeline for display, device, resume, and WMI brightness events, with per-identity fresh, stale, retrying, and offline status.

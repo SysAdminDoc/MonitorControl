@@ -57,7 +57,7 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 - **Capabilities-Aware Controls** — Parses monitor `vcp(...)` capabilities, disables controls that are known unsupported, and can scan either reported capabilities or the full probe table
 - **Crash-Safe Capability Discovery** — Requires explicit consent, persists a per-probe crash sentinel, automatically excludes an interrupted monitor identity, and offers a maximum-compatibility mode that never requests capability strings
 - **Stable Monitor Identity** — Stores EDID/device-path backed monitor identities, supports custom display labels, and targets saved profiles by identity after reordering
-- **Accessibility & Localization Baseline** — Applies English UI string keys, explicit automation names, and stable tab order for screen-reader friendly control surfaces
+- **System-Aware Accessibility** — Follows Windows high contrast live, supports 100–200% text scaling with independently scrollable content and navigation, exposes visible keyboard focus and UI Automation names, and raises native live-region events for inline errors
 - **Portable Release ZIP** — Local release builds package the script, icon, README, LICENSE, signature status, and SHA256 checksums
 - **Verified Risky Writes** — Power, input, reset, PiP/PbP, and arbitrary commands require a per-monitor identity unlock plus an exact code/value confirmation; readback reports verified, mismatched, or unavailable outcomes
 - **Async Capabilities Reads** — Monitor `vcp(...)` capabilities load from a background worker after enumeration, keeping refresh responsive
@@ -135,7 +135,7 @@ Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser
 .\tools\verify.ps1
 ```
 
-This is the same pinned lane used by CI. It gates static-analysis errors, deterministic protocol/persistence/concurrency tests, an isolated UI Automation launch/navigation/close smoke test, and an unsigned portable ZIP build. The WPF smoke test redirects `APPDATA` and `LOCALAPPDATA` to a disposable directory and verifies that the real `%APPDATA%\MonitorControlPro` tree is unchanged.
+This is the same pinned lane used by CI. It gates static-analysis errors, deterministic protocol/persistence/concurrency tests, isolated standard and high-contrast/200%-text UI Automation smokes, native accessibility-event delivery, and an unsigned portable ZIP build. The WPF smoke tests redirect `APPDATA` and `LOCALAPPDATA` to disposable directories and verify that the real `%APPDATA%\MonitorControlPro` tree is unchanged.
 
 ## Usage
 
@@ -154,7 +154,12 @@ This is the same pinned lane used by CI. It gates static-analysis errors, determ
 
 # Combined
 .\MonitorControlPro.ps1 -StartMinimized -LoadProfile "Night Mode"
+
+# Force an accessibility theme or text scale for validation
+.\MonitorControlPro.ps1 -Theme HighContrast -TextScalePercent 200
 ```
+
+`-Theme System` (the default) follows live Windows high-contrast changes. `-Theme Dark` and `-Theme HighContrast` are explicit overrides. `-TextScalePercent 0` (the default) follows the Windows text-size setting; values from 100 through 200 override it.
 
 ### Tray Mode
 - Minimize the window to keep MonitorControl running from the notification area
@@ -208,7 +213,9 @@ This is the same pinned lane used by CI. It gates static-analysis errors, determ
 
 ### Navigation
 - Click on monitor rectangles to select different displays
-- Use Tab to navigate between controls
+- Use Tab and Shift+Tab to navigate every interactive control; focus has a visible system-aware outline
+- Use Alt+D/M/H/V/P/A/S to open Display, Monitor, Hardware, VCP Explorer, Profiles, Automation, or System
+- Use Ctrl+R to refresh displays and Escape to dismiss an inline alert
 - Slider values update in real-time
 
 ## VCP Code Reference
