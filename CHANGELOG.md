@@ -7,6 +7,8 @@ All notable changes to MonitorControl will be documented in this file.
 - Added: one debounced display recovery pipeline for display, device, resume, and WMI brightness events, with per-identity fresh, stale, retrying, and offline status.
 - Changed: monitor settings, capability, VCP Explorer, and DDC report workers now reject obsolete generations and mismatched stable identities before publishing results.
 - Added: per-monitor DDC failure backoff, adaptive read retries, last-success diagnostics, and no-hardware reconnect regression coverage.
+- Added: previewed copy-or-merge profile-storage migration with staged commits, named conflict copies, atomic pointer cutover, and byte-for-byte rollback.
+- Changed: unavailable synchronized storage now exposes a red offline state and the last available library read-only instead of presenting an empty profile list.
 
 ## [v3.34.0] - 2026-06-30
 
