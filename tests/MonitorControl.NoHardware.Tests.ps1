@@ -142,6 +142,9 @@ BeforeAll {
         "Import-VcpWriteSafetyState",
         "Test-VcpWriteEnabledForMonitor",
         "Set-VcpWriteEnabledForMonitor",
+        "Get-VcpWriteSafetyStatusText",
+        "Sync-VcpWriteSafetyUi",
+        "Update-RiskyVcpControlState",
         "Set-ControlVcpSupport",
         "Get-VcpWriteOperation",
         "Test-VcpCodeIsScaled",
@@ -1159,6 +1162,10 @@ Describe "Verified risky VCP write safety" {
         $script:PendingStatusMessage = ""
     }
 
+    AfterEach {
+        Remove-Variable -Name vcpSetBtn, allMonitorsStandbyBtn, riskyVcpEnabledCheckbox, riskyVcpStatusText -Scope Global -ErrorAction SilentlyContinue
+    }
+
     It "persists unlocks only for stable identities and fails closed on future settings" {
         $stable = [pscustomobject]@{ IdentityKey = "edid:stable"; Name = "Stable monitor" }
         $unstable = [pscustomobject]@{ IdentityKey = ""; Name = "Unknown monitor" }
@@ -1195,6 +1202,54 @@ Describe "Verified risky VCP write safety" {
         $script:RiskyVcpEnabledIdentityKeys[$monitor.IdentityKey] = $true
         Set-ControlVcpSupport -Control $control -Monitor $monitor -Code 0xD6 -Value 4 -Risky
         $control.IsEnabled | Should -BeTrue
+    }
+
+    It "follows the selected monitor when displaying and gating risky-write state" {
+        $left = [pscustomobject]@{
+            IdentityKey = "edid:left"
+            UserLabel = "Desk Left"
+            IdentityDefaultLabel = "Left default"
+            Name = "Left monitor"
+            Index = 1
+            Handle = [IntPtr]101
+        }
+        $right = [pscustomobject]@{
+            IdentityKey = "edid:right"
+            UserLabel = "Desk Right"
+            IdentityDefaultLabel = "Right default"
+            Name = "Right monitor"
+            Index = 2
+            Handle = [IntPtr]202
+        }
+        $script:PhysicalMonitors = @($left, $right)
+        $script:RiskyVcpEnabledIdentityKeys = @{ "edid:left" = $true }
+        $vcpSetControl = [pscustomobject]@{ IsEnabled = $false; ToolTip = "" }
+        $allStandbyControl = [pscustomobject]@{ IsEnabled = $true; ToolTip = "" }
+        $riskyEnabledControl = [pscustomobject]@{ IsEnabled = $false; IsChecked = $false }
+        $riskyStatusControl = [pscustomobject]@{ Text = "" }
+        Set-Variable -Name vcpSetBtn -Value $vcpSetControl -Scope Global
+        Set-Variable -Name allMonitorsStandbyBtn -Value $allStandbyControl -Scope Global
+        Set-Variable -Name riskyVcpEnabledCheckbox -Value $riskyEnabledControl -Scope Global
+        Set-Variable -Name riskyVcpStatusText -Value $riskyStatusControl -Scope Global
+
+        $script:CurrentMonitorIndex = 0
+        Update-RiskyVcpControlState -Monitor $left
+
+        $vcpSetControl.IsEnabled | Should -BeTrue
+        $riskyEnabledControl.IsChecked | Should -BeTrue
+        $riskyStatusControl.Text | Should -Be "Enabled for Desk Left"
+        $allStandbyControl.IsEnabled | Should -BeFalse
+        $allStandbyControl.ToolTip | Should -Match "every connected DDC/CI monitor"
+
+        $allStandbyControl.IsEnabled = $true
+        $script:CurrentMonitorIndex = 1
+        Update-RiskyVcpControlState -Monitor $right
+
+        $vcpSetControl.IsEnabled | Should -BeFalse
+        $vcpSetControl.ToolTip | Should -Match "selected stable monitor identity"
+        $riskyEnabledControl.IsChecked | Should -BeFalse
+        $riskyStatusControl.Text | Should -Be "Disabled for Desk Right"
+        $allStandbyControl.IsEnabled | Should -BeFalse
     }
 
     It "snapshots and verifies every readable value in a successful transaction" {
