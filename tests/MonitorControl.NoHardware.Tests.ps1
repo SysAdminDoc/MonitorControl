@@ -2758,10 +2758,18 @@ Describe "Modern control-center shell" {
     }
 
     It "keeps every primary destination in the persistent navigation" {
-        $tabs = @($script:MainXaml.SelectNodes("//*[local-name()='TabItem']"))
+        $tabs = @($script:MainXaml.SelectNodes("//*[local-name()='TabControl' and @TabStripPlacement='Left']/*[local-name()='TabItem']"))
 
         $tabs.Count | Should -Be 7
         ($tabs.Header -join "|") | Should -Be "Display|Monitor|Hardware|VCP Explorer|Profiles|Automation|System"
+    }
+
+    It "groups System settings into named categories" {
+        $categories = @($script:MainXaml.SelectNodes("//*[@*[local-name()='Name']='SystemCategoryTabs']/*[local-name()='TabItem']"))
+
+        $categories.Count | Should -Be 6
+        ($categories.Header -join "|") | Should -Be "Overview|Display & DDC|Safety|Automation|Diagnostics|Integrations"
+        ($categories | Where-Object { $_.IsSelected -eq "True" }).Header | Should -Be "Display & DDC"
     }
 
     It "keeps one display-layout canvas and a widescreen DPI-aware window" {

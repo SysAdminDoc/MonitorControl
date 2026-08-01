@@ -7,6 +7,7 @@ param(
     [switch]$ResizeToMinimum,
     [switch]$ExerciseValidationAlert,
     [string]$ScreenshotPath = "",
+    [string]$ScreenshotDirectory = "",
     [switch]$Quiet
 )
 
@@ -102,26 +103,60 @@ function Get-ControlByName {
 function Save-WindowScreenshot {
     param($Root, [string]$Path)
     Add-Type -AssemblyName System.Drawing
-    $Root.SetFocus()
-    Start-Sleep -Milliseconds 250
+    if (-not ("MonitorControlOffscreenCapture" -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class MonitorControlOffscreenCapture
+{
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PrintWindow(IntPtr window, IntPtr deviceContext, uint flags);
+
+    public static bool Capture(IntPtr window, IntPtr deviceContext)
+    {
+        const uint RenderFullContent = 2;
+        return PrintWindow(window, deviceContext, RenderFullContent);
+    }
+}
+"@
+    }
     $bounds = $Root.Current.BoundingRectangle
     $width = [Math]::Max(1, [int][Math]::Ceiling($bounds.Width))
     $height = [Math]::Max(1, [int][Math]::Ceiling($bounds.Height))
     $bitmap = New-Object System.Drawing.Bitmap($width, $height)
-    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
     try {
-        $graphics.CopyFromScreen(
-            [int][Math]::Floor($bounds.Left),
-            [int][Math]::Floor($bounds.Top),
-            0,
-            0,
-            (New-Object System.Drawing.Size($width, $height))
-        )
-        $bitmap.Save([System.IO.Path]::GetFullPath($Path), [System.Drawing.Imaging.ImageFormat]::Png)
+        $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+        $deviceContext = [IntPtr]::Zero
+        try {
+            $deviceContext = $graphics.GetHdc()
+            $windowHandle = [IntPtr][int64]$Root.Current.NativeWindowHandle
+            if (-not [MonitorControlOffscreenCapture]::Capture($windowHandle, $deviceContext)) {
+                throw "PrintWindow could not render the private-desktop application window."
+            }
+        } finally {
+            if ($deviceContext -ne [IntPtr]::Zero) { $graphics.ReleaseHdc($deviceContext) }
+            $graphics.Dispose()
+        }
+        $fullPath = [System.IO.Path]::GetFullPath($Path)
+        $parentPath = [System.IO.Path]::GetDirectoryName($fullPath)
+        if (-not [string]::IsNullOrWhiteSpace($parentPath)) {
+            [System.IO.Directory]::CreateDirectory($parentPath) | Out-Null
+        }
+        $bitmap.Save($fullPath, [System.Drawing.Imaging.ImageFormat]::Png)
     } finally {
-        $graphics.Dispose()
         $bitmap.Dispose()
     }
+}
+
+function Get-PageScreenshotFileName {
+    param([string]$PageName)
+    $fileName = switch ($PageName) {
+        "VCP Explorer" { "vcp-explorer.png" }
+        default { ($PageName.ToLowerInvariant() -replace '[^a-z0-9]+', '-') + ".png" }
+    }
+    return $fileName
 }
 
 $realAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)
@@ -132,6 +167,7 @@ $sandboxAppData = Join-Path $smokeRoot "AppData\Roaming"
 $sandboxLocalAppData = Join-Path $smokeRoot "AppData\Local"
 $sandboxProfileRoot = Join-Path $sandboxAppData "MonitorControlPro"
 $process = $null
+$appWindowHandle = [IntPtr]::Zero
 $navigated = New-Object System.Collections.Generic.List[string]
 $exitCode = $null
 $screenshotWritten = $false
@@ -158,6 +194,10 @@ try {
     $startInfo.FileName = $windowsPowerShell
     $escapedAppPath = $appPath.Replace('"', '\"')
     $startInfo.Arguments = "-NoLogo -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$escapedAppPath`" -Theme $AppTheme -TextScalePercent $TextScalePercent"
+    if (-not [string]::IsNullOrWhiteSpace($ScreenshotDirectory)) {
+        $escapedRenderDirectory = ([System.IO.Path]::GetFullPath($ScreenshotDirectory)).Replace('"', '\"')
+        $startInfo.Arguments += " -RenderDirectory `"$escapedRenderDirectory`""
+    }
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $false
     $startInfo.EnvironmentVariables["APPDATA"] = $sandboxAppData
@@ -166,13 +206,66 @@ try {
     $process.StartInfo = $startInfo
     if (-not $process.Start()) { throw "Windows PowerShell did not start." }
 
+    if (-not ("MonitorControlWindowProbe" -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class MonitorControlWindowProbe
+{
+    private delegate bool EnumWindowsCallback(IntPtr window, IntPtr state);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWindowsCallback callback, IntPtr state);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindowVisible(IntPtr window);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowTextW(IntPtr window, StringBuilder text, int maximumLength);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PostMessageW(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+
+    public static IntPtr Find(int processId, string titlePrefix)
+    {
+        IntPtr match = IntPtr.Zero;
+        EnumWindows(delegate(IntPtr window, IntPtr state) {
+            uint owner;
+            GetWindowThreadProcessId(window, out owner);
+            if (owner != unchecked((uint)processId) || !IsWindowVisible(window)) return true;
+            StringBuilder title = new StringBuilder(512);
+            GetWindowTextW(window, title, title.Capacity);
+            if (!title.ToString().StartsWith(titlePrefix, StringComparison.Ordinal)) return true;
+            match = window;
+            return false;
+        }, IntPtr.Zero);
+        return match;
+    }
+
+    public static bool RequestClose(IntPtr window)
+    {
+        const uint Close = 0x0010;
+        return PostMessageW(window, Close, IntPtr.Zero, IntPtr.Zero);
+    }
+}
+"@
+    }
+
     $deadline = [DateTime]::UtcNow.AddSeconds($LaunchTimeoutSeconds)
     do {
         Start-Sleep -Milliseconds 100
         $process.Refresh()
         if ($process.HasExited) { throw "The WPF process exited during launch with code $($process.ExitCode)." }
-    } while ($process.MainWindowHandle -eq [IntPtr]::Zero -and [DateTime]::UtcNow -lt $deadline)
-    if ($process.MainWindowHandle -eq [IntPtr]::Zero) { throw "The WPF window did not appear within $LaunchTimeoutSeconds seconds." }
+        $appWindowHandle = [MonitorControlWindowProbe]::Find($process.Id, "MonitorControl Pro")
+    } while ($appWindowHandle -eq [IntPtr]::Zero -and [DateTime]::UtcNow -lt $deadline)
+    if ($appWindowHandle -eq [IntPtr]::Zero) { throw "The WPF window did not appear within $LaunchTimeoutSeconds seconds." }
 
     Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
     if (-not ("MonitorControlLiveRegionProbe" -as [type])) {
@@ -307,13 +400,30 @@ public sealed class MonitorControlLiveRegionProbe : IDisposable
 }
 "@
     }
-    $root = [System.Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
+    $root = [System.Windows.Automation.AutomationElement]::FromHandle($appWindowHandle)
     if ($null -eq $root -or $root.Current.Name -notlike "MonitorControl Pro*") {
-        throw "The launched window does not expose the expected MonitorControl Pro UI Automation root."
+        $actualName = if ($null -eq $root) { "<null>" } else { [string]$root.Current.Name }
+        throw "The launched window does not expose the expected MonitorControl Pro UI Automation root (actual: '$actualName', handle: $appWindowHandle)."
     }
     $expectedThemeText = if ($AppTheme -eq "HighContrast") { "High contrast colors are active." } else { "Dark application colors are active." }
     if ($root.Current.HelpText -notlike "$expectedThemeText*Text scale: $TextScalePercent%.*") {
         throw "The UI Automation root did not report the active theme and text scale."
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($ScreenshotDirectory)) {
+        $renderDeadline = [DateTime]::UtcNow.AddSeconds(30)
+        $renderCompletePath = Join-Path $ScreenshotDirectory "render.complete"
+        $renderErrorPath = Join-Path $ScreenshotDirectory "render.error.txt"
+        while (-not (Test-Path -LiteralPath $renderCompletePath -PathType Leaf) -and [DateTime]::UtcNow -lt $renderDeadline) {
+            if (Test-Path -LiteralPath $renderErrorPath -PathType Leaf) {
+                throw "The app-native render failed: $([System.IO.File]::ReadAllText($renderErrorPath))"
+            }
+            if ($process.HasExited) { throw "The WPF process exited before app-native renders completed." }
+            Start-Sleep -Milliseconds 100
+        }
+        if (-not (Test-Path -LiteralPath $renderCompletePath -PathType Leaf)) {
+            throw "The app-native render did not complete within 30 seconds."
+        }
     }
 
     if ($ResizeToMinimum) {
@@ -327,6 +437,9 @@ public sealed class MonitorControlLiveRegionProbe : IDisposable
         Start-Sleep -Milliseconds 250
     }
 
+    $persistentBrand = Get-ControlByName -Root $root -Name "MonitorControl Pro" -ControlType ([System.Windows.Automation.ControlType]::Text)
+    if ($null -eq $persistentBrand) { throw "The persistent application brand was not exposed through UI Automation." }
+
     foreach ($name in @("Display", "Monitor", "VCP Explorer", "Profiles", "Automation", "System")) {
         $tab = Get-TabByName -Root $root -Name $name
         if ($null -eq $tab) { throw "Required navigation destination '$name' was not exposed through UI Automation." }
@@ -339,6 +452,7 @@ public sealed class MonitorControlLiveRegionProbe : IDisposable
         Start-Sleep -Milliseconds 125
         if (-not $selection.Current.IsSelected) { throw "Navigation destination '$name' did not become selected." }
         if ($tab.Current.IsOffscreen) { throw "Navigation destination '$name' remained offscreen after selection." }
+        if ($persistentBrand.Current.IsOffscreen) { throw "The persistent header scrolled offscreen after selecting '$name'." }
         $navigated.Add($name)
     }
 
@@ -349,6 +463,17 @@ public sealed class MonitorControlLiveRegionProbe : IDisposable
     if ($systemTab.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$systemTabPattern)) {
         ([System.Windows.Automation.SelectionItemPattern]$systemTabPattern).Select()
         Start-Sleep -Milliseconds 150
+        $displayDdcCategory = Get-TabByName -Root $root -Name "Display and DDC system settings"
+        if ($null -eq $displayDdcCategory) { throw "The System page did not expose its Display and DDC category." }
+        $displayDdcCategoryPattern = $null
+        if (-not $displayDdcCategory.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$displayDdcCategoryPattern)) {
+            throw "The Display and DDC category does not expose SelectionItemPattern."
+        }
+        ([System.Windows.Automation.SelectionItemPattern]$displayDdcCategoryPattern).Select()
+        Start-Sleep -Milliseconds 150
+        if (-not ([System.Windows.Automation.SelectionItemPattern]$displayDdcCategoryPattern).Current.IsSelected) {
+            throw "The Display and DDC category did not become selected."
+        }
         $adaptiveRadio = Get-ControlByName -Root $root -Name "Adaptive DDC timing" -ControlType ([System.Windows.Automation.ControlType]::RadioButton)
         $manualRadio = Get-ControlByName -Root $root -Name "Manual DDC timing" -ControlType ([System.Windows.Automation.ControlType]::RadioButton)
         if ($null -eq $adaptiveRadio -or $null -eq $manualRadio) { throw "The DDC timing mode controls were not exposed through UI Automation." }
@@ -383,6 +508,20 @@ public sealed class MonitorControlLiveRegionProbe : IDisposable
         if (([System.Windows.Automation.SelectionItemPattern]$manualPattern).Current.IsSelected) {
             throw "Manual DDC timing stayed selected after switching back to adaptive."
         }
+
+        $diagnosticsCategory = Get-TabByName -Root $root -Name "Diagnostics system settings"
+        if ($null -eq $diagnosticsCategory) { throw "The System page did not expose its Diagnostics category." }
+        $diagnosticsCategoryPattern = $null
+        if (-not $diagnosticsCategory.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$diagnosticsCategoryPattern)) {
+            throw "The Diagnostics category does not expose SelectionItemPattern."
+        }
+        ([System.Windows.Automation.SelectionItemPattern]$diagnosticsCategoryPattern).Select()
+        Start-Sleep -Milliseconds 150
+        if ($null -eq (Get-ControlByName -Root $root -Name "Build DDC compatibility report" -ControlType ([System.Windows.Automation.ControlType]::Button))) {
+            throw "The Diagnostics category did not expose its named DDC report action."
+        }
+        ([System.Windows.Automation.SelectionItemPattern]$displayDdcCategoryPattern).Select()
+        Start-Sleep -Milliseconds 150
     }
 
     $displayTab = Get-TabByName -Root $root -Name "Display"
@@ -448,7 +587,7 @@ public sealed class MonitorControlLiveRegionProbe : IDisposable
             $liveRegionProbe.Dispose()
         }
         Start-Sleep -Milliseconds 250
-        $root = [System.Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
+        $root = [System.Windows.Automation.AutomationElement]::FromHandle($appWindowHandle)
         $alert = Get-ControlByName -Root $root -Name "Error: Invalid VCP code" -ControlType ([System.Windows.Automation.ControlType]::Text)
         if ($null -eq $alert) {
             $textCondition = New-Object System.Windows.Automation.PropertyCondition(
@@ -489,12 +628,21 @@ public sealed class MonitorControlLiveRegionProbe : IDisposable
         }
     }
 
+    if (-not [string]::IsNullOrWhiteSpace($ScreenshotDirectory)) {
+        foreach ($pageName in @($navigated | Select-Object -Unique)) {
+            $renderPath = Join-Path $ScreenshotDirectory (Get-PageScreenshotFileName -PageName $pageName)
+            if (-not (Test-Path -LiteralPath $renderPath -PathType Leaf) -or (Get-Item -LiteralPath $renderPath).Length -lt 1024) {
+                throw "The app-native render for '$pageName' was not produced."
+            }
+        }
+    }
+
     if (-not $screenshotWritten -and -not [string]::IsNullOrWhiteSpace($ScreenshotPath)) {
         Save-WindowScreenshot -Root $root -Path $ScreenshotPath
         $screenshotWritten = $true
     }
 
-    if (-not $process.CloseMainWindow()) { throw "The WPF window rejected a normal close request." }
+    if (-not [MonitorControlWindowProbe]::RequestClose($appWindowHandle)) { throw "The WPF window rejected a normal close request." }
     if (-not $process.WaitForExit(15000)) { throw "The WPF process did not exit after its window closed." }
     $exitCode = $process.ExitCode
     if ($exitCode -ne 0) { throw "The WPF process exited with code $exitCode." }
