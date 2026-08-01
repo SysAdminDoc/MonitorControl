@@ -7970,7 +7970,7 @@ function Invoke-DelayedMonitorSettingsRefresh {
             [string]$script:PhysicalMonitors[$targetIndex].IdentityKey -eq $targetIdentity) {
             Load-MonitorSettings
         }
-    })
+    }.GetNewClosure())
     $script:DeferredRefreshTimers += $timer
     $timer.Start()
 }
@@ -10334,7 +10334,7 @@ function Show-IdentifyOverlays {
         $border.Child = $tb; $overlay.Content = $border; $overlay.Show()
         $timer = New-Object System.Windows.Threading.DispatcherTimer; $timer.Interval = [TimeSpan]::FromSeconds(2)
         $currentOverlay = $overlay; $currentTimer = $timer
-        $timer.Add_Tick({ $currentTimer.Stop(); $currentOverlay.Close() }); $timer.Start()
+        $timer.Add_Tick({ $currentTimer.Stop(); $currentOverlay.Close() }.GetNewClosure()); $timer.Start()
     }
 }
 

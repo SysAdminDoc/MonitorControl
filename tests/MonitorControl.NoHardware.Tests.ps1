@@ -935,6 +935,123 @@ Describe "Display recovery generation and identity safety" {
     }
 }
 
+Describe "Deferred callback closure safety" {
+    It "closes over every function-local variable used by a deferred timer handler" {
+        $tokens = $null
+        $parseErrors = $null
+        $appAst = [System.Management.Automation.Language.Parser]::ParseFile(
+            $script:AppPath,
+            [ref]$tokens,
+            [ref]$parseErrors
+        )
+        @($parseErrors).Count | Should -Be 0
+
+        $automaticVariables = @(
+            "_", "args", "ConsoleFileName", "Error", "Event", "EventArgs", "EventSubscriber",
+            "ExecutionContext", "false", "foreach", "HOME", "Host", "input", "IsCoreCLR",
+            "IsLinux", "IsMacOS", "IsWindows", "LASTEXITCODE", "Matches", "MyInvocation",
+            "NestedPromptLevel", "null", "PID", "PROFILE", "PSBoundParameters", "PSCmdlet",
+            "PSCommandPath", "PSCulture", "PSDebugContext", "PSEdition", "PSEmailServer",
+            "PSHOME", "PSScriptRoot", "PSSessionApplicationName", "PSSessionConfigurationName",
+            "PSSessionOption", "PSUICulture", "PSVersionTable", "PWD", "ShellId", "StackTrace",
+            "switch", "this", "true"
+        )
+        $issues = New-Object System.Collections.Generic.List[string]
+        $timerCalls = @($appAst.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+                $node.Member.Value -in @("Add_Tick", "Add_Elapsed")
+        }, $true))
+
+        foreach ($timerCall in $timerCalls) {
+            if ($timerCall.Arguments.Count -eq 0) { continue }
+            $argument = $timerCall.Arguments[0]
+            $isClosed = $argument -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+                $argument.Member.Value -eq "GetNewClosure"
+            if ($isClosed) { continue }
+            if ($argument -isnot [System.Management.Automation.Language.ScriptBlockExpressionAst]) { continue }
+
+            $enclosingFunction = $timerCall.Parent
+            while ($null -ne $enclosingFunction -and
+                $enclosingFunction -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) {
+                $enclosingFunction = $enclosingFunction.Parent
+            }
+            if ($null -eq $enclosingFunction) { continue }
+
+            $handlerBlock = $argument.ScriptBlock
+            $handlerStart = $handlerBlock.Extent.StartOffset
+            $handlerEnd = $handlerBlock.Extent.EndOffset
+            $handlerParameters = @(
+                if ($handlerBlock.ParamBlock) {
+                    $handlerBlock.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath }
+                }
+            )
+            $handlerAssignments = @(
+                $handlerBlock.FindAll({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.AssignmentStatementAst]
+                }, $true) | ForEach-Object {
+                    $_.Left.FindAll({
+                        param($node)
+                        $node -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                            $node.VariablePath.IsUnqualified
+                    }, $true) | ForEach-Object { $_.VariablePath.UserPath }
+                }
+            )
+            $handlerVariables = @(
+                $handlerBlock.FindAll({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                        $node.VariablePath.IsUnqualified
+                }, $true) | ForEach-Object { $_.VariablePath.UserPath } | Sort-Object -Unique
+            )
+
+            $outerLocals = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
+            if ($enclosingFunction.Body.ParamBlock) {
+                foreach ($parameter in $enclosingFunction.Body.ParamBlock.Parameters) {
+                    [void]$outerLocals.Add($parameter.Name.VariablePath.UserPath)
+                }
+            }
+            foreach ($assignment in @($enclosingFunction.Body.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.AssignmentStatementAst]
+            }, $true))) {
+                if ($assignment.Extent.StartOffset -ge $handlerStart -and $assignment.Extent.EndOffset -le $handlerEnd) { continue }
+                foreach ($variable in @($assignment.Left.FindAll({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                        $node.VariablePath.IsUnqualified
+                }, $true))) {
+                    [void]$outerLocals.Add($variable.VariablePath.UserPath)
+                }
+            }
+            foreach ($forEachStatement in @($enclosingFunction.Body.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.ForEachStatementAst]
+            }, $true))) {
+                if ($forEachStatement.Extent.StartOffset -ge $handlerStart -and $forEachStatement.Extent.EndOffset -le $handlerEnd) { continue }
+                if ($forEachStatement.Variable.VariablePath.IsUnqualified) {
+                    [void]$outerLocals.Add($forEachStatement.Variable.VariablePath.UserPath)
+                }
+            }
+
+            $captured = @(
+                $handlerVariables | Where-Object {
+                    $_ -notin $automaticVariables -and
+                        $_ -notin $handlerParameters -and
+                        $_ -notin $handlerAssignments -and
+                        $outerLocals.Contains($_)
+                }
+            )
+            if ($captured.Count -gt 0) {
+                $issues.Add("line $($timerCall.Extent.StartLineNumber): $($captured -join ', ')")
+            }
+        }
+
+        @($issues) | Should -BeNullOrEmpty
+    }
+}
+
 Describe "Physical monitor handle cleanup" {
     BeforeEach {
         $script:DestroyedHandleValues = @()

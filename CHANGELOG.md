@@ -2,6 +2,10 @@
 
 All notable changes to MonitorControl will be documented in this file.
 
+## [Unreleased]
+
+- Fixed: monitor-identification overlays and delayed post-reset refreshes now close over their function-local state before the dispatcher invokes them. Identify overlays stop and close after two seconds, reset refreshes reach the selected monitor, and an AST regression test rejects future deferred timer handlers that capture function locals without `GetNewClosure()`.
+
 ## [v3.37.0] - 2026-07-31
 
 - Added: DDC timing is now learned and stored per stable monitor identity instead of being three global constants. Adaptive mode calibrates a sleep multiplier from the first successful handshake with each monitor and persists it; manual mode uses the default delay verbatim so an operator value is never modified by calibration. The two are mutually exclusive and the card states that returning to adaptive discards the stored calibration. Read, write, and capability retry budgets are set separately per monitor.
