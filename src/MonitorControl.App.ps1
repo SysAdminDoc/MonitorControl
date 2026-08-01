@@ -1084,7 +1084,7 @@ $script:SystemPreferenceChangedHandler = $null
 $script:IsHighContrastTheme = $false
 $script:UiStrings = @{
     "App.Title" = "MonitorControl Pro"
-    "App.Subtitle" = "Version 3.37.0"
+    "App.Subtitle" = "Version $script:AppVersion"
     "Tab.Display" = "Display"
     "Tab.Monitor" = "Monitor"
     "Tab.GPU" = "Hardware"
@@ -1975,7 +1975,7 @@ function Set-TabOrder {
 
 function Initialize-LocalizationAndAccessibility {
     if ($window) {
-        $window.Title = "$(Get-UiString -Key 'App.Title') v3.37.0"
+        $window.Title = "$(Get-UiString -Key 'App.Title') v$script:AppVersion"
         [System.Windows.Automation.AutomationProperties]::SetName($window, "$(Get-UiString -Key 'App.Title') main window")
     }
     Set-LocalizedText -Control $appTitleText -Key "App.Title" -Property "Text"
@@ -3788,7 +3788,7 @@ try {
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.37.0" Width="1320" Height="800" MinWidth="1024" MinHeight="720"
+        Title="MonitorControl Pro" Width="1320" Height="800" MinWidth="1024" MinHeight="720"
         Background="{DynamicResource CanvasBrush}" Foreground="{DynamicResource TextBrush}" FontFamily="Segoe UI"
         TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="ClearType"
         WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
@@ -4135,7 +4135,7 @@ try {
             </Border>
             <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="10,0,0,0">
                 <TextBlock x:Name="AppTitleText" Text="MonitorControl Pro" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource TextBrush}" TextWrapping="Wrap"/>
-                <TextBlock x:Name="AppSubtitleText" Text="Version 3.37.0" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,3,0,0" TextTrimming="CharacterEllipsis"/>
+                <TextBlock x:Name="AppSubtitleText" Text="Version" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,3,0,0" TextTrimming="CharacterEllipsis"/>
             </StackPanel>
         </Grid>
     </Border>
@@ -6439,7 +6439,7 @@ function Export-ProfileBundle {
 
         $manifest = [PSCustomObject]@{
             BundleSchemaVersion = $script:ProfileBundleSchemaVersion
-            AppVersion = "3.37.0"
+            AppVersion = [string]$script:AppVersion
             ProfileSchemaVersion = $script:ProfileSchemaVersion
             ExportedAt = (Get-Date).ToString("o")
             ProfileCount = $exportedProfiles.Count

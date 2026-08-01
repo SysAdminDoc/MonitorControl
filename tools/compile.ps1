@@ -5,6 +5,7 @@ param(
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $launcherPath = Join-Path $repoRoot "MonitorControlPro.ps1"
+$metadataPath = Join-Path $repoRoot "src\MonitorControl.Metadata.psd1"
 $sourceManifestPath = Join-Path $repoRoot "src\MonitorControl.sources"
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
     $OutputPath = Join-Path $repoRoot "build\MonitorControlPro.ps1"
@@ -14,7 +15,7 @@ $outputFullPath = [System.IO.Path]::GetFullPath($OutputPath)
 $sourcePaths = @(Get-Content -LiteralPath $sourceManifestPath |
     Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
     ForEach-Object { Join-Path $repoRoot ([string]$_) })
-foreach ($required in @($launcherPath, $sourceManifestPath) + $sourcePaths) {
+foreach ($required in @($launcherPath, $metadataPath, $sourceManifestPath) + $sourcePaths) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "Missing composition input: $required"
     }
@@ -22,6 +23,15 @@ foreach ($required in @($launcherPath, $sourceManifestPath) + $sourcePaths) {
         throw "The composed output cannot overwrite a source file: $outputFullPath"
     }
 }
+
+$metadata = $null
+Import-LocalizedData -BindingVariable metadata -BaseDirectory (Split-Path $metadataPath) -FileName (Split-Path $metadataPath -Leaf)
+$appName = [string]$metadata.AppName
+$appVersion = [string]$metadata.Version
+if ([string]::IsNullOrWhiteSpace($appName) -or $appVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
+    throw "Invalid application metadata: $metadataPath"
+}
+if ($appName.Contains('"')) { throw "Application name cannot contain a double quote." }
 
 $launcherText = [System.IO.File]::ReadAllText($launcherPath)
 $tokens = $null
@@ -38,6 +48,8 @@ $entryPrefix = $launcherText.Substring(0, $launcherAst.ParamBlock.Extent.EndOffs
 $parts = New-Object System.Collections.Generic.List[string]
 $parts.Add($entryPrefix)
 $parts.Add('$script:MonitorControlRoot = $PSScriptRoot')
+$parts.Add(('$script:AppName = "{0}"' -f $appName))
+$parts.Add(('$script:AppVersion = "{0}"' -f $appVersion))
 foreach ($sourcePath in $sourcePaths) {
     $parts.Add(([System.IO.File]::ReadAllText($sourcePath)).Trim())
 }
@@ -72,6 +84,7 @@ if (-not (Test-Path -LiteralPath $outputDirectory)) {
 
 [PSCustomObject]@{
     OutputPath = $outputFullPath
+    Version = $appVersion
     SourceCount = $sourcePaths.Count
     FunctionCount = $functionNames.Count
 }
