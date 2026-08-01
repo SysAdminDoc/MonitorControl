@@ -380,14 +380,18 @@ function Invoke-DisplayStateRestore {
     $script:DisplayStateRestoreGeneration = $Generation
     $plan = Get-DisplayStateRestorePlan -Monitors @($script:PhysicalMonitors) -Remembered $script:DisplayStateRestoreValues -Enabled $true
     if (@($plan.Operations).Count -eq 0) { return $false }
-    $result = Invoke-VerifiedVcpTransaction -Operations @($plan.Operations) -RollbackOnFailure
     $applied = @($plan.Operations).Count
-    if ([bool]$result.Success) {
-        Update-Status "Restored brightness on $applied display(s) after $Reason"
-    } else {
-        Update-Status "Brightness restore after $Reason ended $($result.Outcome); restore: $($result.Rollback)"
-    }
-    return [bool]$result.Success
+    $completionReason = $Reason
+    $completion = {
+        param($result)
+        if ([bool]$result.Success) {
+            Update-Status "Restored brightness on $applied display(s) after $completionReason"
+        } else {
+            Update-Status "Brightness restore after $completionReason ended $($result.Outcome); restore: $($result.Rollback)"
+        }
+    }.GetNewClosure()
+    $started = Start-VerifiedVcpTransactionWorker -Operations @($plan.Operations) -ActionLabel "Restore brightness after $Reason" -CompletionAction $completion
+    return [bool]$started
 }
 
 function Get-PresentMonCandidatePaths {

@@ -265,6 +265,15 @@ public static class MonitorControlVcpWriteProbe
         "Update-DetachedWindowTheme",
         "Update-DetachedWindowThemes",
         "Invoke-ManualVcpWrite",
+        "Test-VerifiedVcpTransactionWorkerActive",
+        "New-VerifiedVcpWorkerOperation",
+        "Test-VerifiedVcpTransactionTargetsCurrent",
+        "Request-VerifiedVcpTransactionCancel",
+        "Stop-VerifiedVcpTransactionWorker",
+        "Update-VerifiedVcpTransactionWorkerOutput",
+        "Start-VerifiedVcpTransactionWorker",
+        "Complete-ProfileApply",
+        "Apply-ProfileByName",
         "Get-MonitorDisplayLabel",
         "Wait-DdcWriteQueueIdle",
         "Drain-DdcWriteResults",
@@ -1906,6 +1915,81 @@ Describe "Verified risky VCP write safety" {
         $readState.Count | Should -Be 1
     }
 
+    It "cooperatively cancels between operations and rolls back what was already applied" {
+        $monitor = [pscustomobject]@{ Handle = [IntPtr]1; IdentityKey = "edid:cancel"; Name = "Cancel monitor" }
+        $operations = @(
+            Get-VcpWriteOperation -Monitor $monitor -Code 0x10 -Value 70
+            Get-VcpWriteOperation -Monitor $monitor -Code 0x12 -Value 60
+        )
+        $state = @{ 0x10 = [uint32]20; 0x12 = [uint32]30 }
+        $cancelState = @{ Cancel = $false }
+        $writes = New-Object System.Collections.Generic.List[string]
+        $read = { param($operation) [pscustomobject]@{ Success = $true; Current = [uint32]$state[[int]$operation.Code]; Maximum = [uint32]100 } }
+        $write = {
+            param($operation, [uint32]$value)
+            $writes.Add("$([int]$operation.Code):$value")
+            $state[[int]$operation.Code] = $value
+            return $true
+        }
+        $progress = {
+            param([int]$completed, [int]$total, [string]$phase, $record)
+            if ($phase -eq "Apply" -and $completed -eq 1) { $cancelState.Cancel = $true }
+        }
+
+        $result = Invoke-VerifiedVcpTransaction -Operations $operations -ReadValue $read -WriteValue $write -RollbackOnFailure `
+            -DelayAction { param([int]$Milliseconds) $null = $Milliseconds } -ProgressAction $progress -CancellationRequested { return [bool]$cancelState.Cancel }
+
+        $result.Success | Should -BeFalse
+        $result.Outcome | Should -Be "Canceled"
+        $result.Rollback | Should -Be "Restored"
+        @($writes) | Should -Be @("16:70", "16:20")
+        $state[0x10] | Should -Be 20
+        $state[0x12] | Should -Be 30
+    }
+
+    It "keeps verified transactions off the dispatcher and exposes progress and cancel controls" {
+        $source = Get-Content -LiteralPath $script:AppPath -Raw
+        $source | Should -Match 'x:Name="TransactionProgressPanel"'
+        $source | Should -Match 'x:Name="TransactionProgressBar"'
+        $source | Should -Match 'x:Name="TransactionCancelBtn"'
+        (Get-Command Start-VerifiedVcpTransactionWorker).Definition | Should -Match '\[PowerShell\]::Create\(\)'
+        (Get-Command Start-VerifiedVcpTransactionWorker).Definition | Should -Match 'BeginInvoke'
+        (Get-Command Update-VerifiedVcpTransactionWorkerOutput).Definition | Should -Match 'Test-DisplayWorkerResultCurrent'
+        (Get-Command Invoke-VerifiedVcpTransaction).Definition | Should -Not -Match 'Start-Sleep'
+        (Get-Command Apply-ProfileByName).Definition | Should -Not -Match 'Wait-DdcWriteQueueIdle|Invoke-VerifiedVcpTransaction'
+        (Get-Command Invoke-ManualVcpWrite).Definition | Should -Not -Match 'Wait-DdcWriteQueueIdle|Invoke-VerifiedVcpTransaction'
+        (Get-Command Invoke-DisplayStateRestore).Definition | Should -Match 'Start-VerifiedVcpTransactionWorker'
+    }
+
+    It "freezes timing and generation metadata into each worker operation" {
+        $monitor = [pscustomobject]@{
+            Handle = [IntPtr]77
+            IdentityKey = "edid:worker"
+            Name = "Worker monitor"
+            VcpMaximums = @{ 0x10 = 255 }
+        }
+        $script:PhysicalMonitors = @($monitor)
+        $script:DisplayRecoveryGeneration = 12
+        $timing = Get-DdcTimingProfile -IdentityKey $monitor.IdentityKey
+        $timing.SleepMultiplier = 2.0
+        $timing.ReadRetries = 4
+        $timing.WriteRetries = 5
+        Set-DdcVerifyPolicy -IdentityKey $monitor.IdentityKey -Policy "Lenient" | Out-Null
+
+        $prepared = New-VerifiedVcpWorkerOperation -Operation (Get-VcpWriteOperation -Monitor $monitor -Code 0x10 -Value 180) -Generation 12
+
+        $prepared.MonitorIndex | Should -Be 0
+        $prepared.Generation | Should -Be 12
+        $prepared.HandleValue | Should -Be 77
+        $prepared.ReportedMaximum | Should -Be 255
+        $prepared.VerifyPolicy | Should -Be "Lenient"
+        $prepared.ReadRetries | Should -Be 4
+        $prepared.WriteRetries | Should -Be 5
+        $prepared.VerificationDelayMilliseconds | Should -Be ([int][MonitorAPI]::VcpRetryDelayMilliseconds * 2)
+        Test-VerifiedVcpTransactionTargetsCurrent -Targets @($prepared) -Generation 12 | Should -BeTrue
+        Test-VerifiedVcpTransactionTargetsCurrent -Targets @($prepared) -Generation 11 | Should -BeFalse
+    }
+
     It "shows the exact code and value and keeps risky codes out of automatic reports" {
         $monitor = [pscustomobject]@{ Handle = [IntPtr]1; IdentityKey = "edid:test"; Name = "Test monitor" }
         $operation = Get-VcpWriteOperation -Monitor $monitor -Code 0x60 -Value 17
@@ -2752,9 +2836,11 @@ Describe "Manual VCP write recovery" {
         $script:LastStatusMessage | Should -Match "restore: Partial"
     }
 
-    It "defaults to the rollback-enabled transaction" {
+    It "defaults to the rollback-enabled background transaction worker" {
         $definition = (Get-Command Invoke-ManualVcpWrite).Definition
-        $definition | Should -Match ([regex]::Escape('Invoke-VerifiedVcpTransaction -Operations $Operations -RollbackOnFailure'))
+        $definition | Should -Match 'Start-VerifiedVcpTransactionWorker -Operations \$operations'
+        $workerSource = Get-Content -LiteralPath $script:AppPath -Raw
+        $workerSource | Should -Match 'Invoke-VerifiedVcpTransaction -Operations \$Targets.+-RollbackOnFailure'
     }
 
     It "refuses a gated code on a monitor that has not been unlocked" {

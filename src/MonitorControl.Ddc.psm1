@@ -602,7 +602,7 @@ function Wait-DdcWriteQueueIdle {
     while ([DateTime]::UtcNow -lt $deadline) {
         Drain-DdcWriteResults
         if (-not [MonitorAPI]::IsVCPWriteWorkerActive() -and [MonitorAPI]::GetPendingVCPWriteCount() -eq 0) { return $true }
-        Start-Sleep -Milliseconds 50
+        [Threading.Thread]::Sleep(50)
     }
     return $false
 }
@@ -942,6 +942,7 @@ function Get-DdcAvailabilityDiagnosis {
 }
 
 function Get-Monitors {
+    Stop-VerifiedVcpTransactionWorker -Cancel -WaitForCompletion
     Stop-MonitorSettingsWorker -Cancel
     Stop-VcpWorker -Cancel
     Stop-CapabilitiesWorker -Cancel
@@ -1428,6 +1429,16 @@ function Get-VcpWriteOperation {
 
 function Get-DdcTransactionVerificationSettings {
     param($Operation)
+    if ($null -ne $Operation -and
+        $Operation.PSObject.Properties.Name -contains "VerifyPolicy" -and
+        $Operation.PSObject.Properties.Name -contains "VerificationDelayMilliseconds" -and
+        $Operation.PSObject.Properties.Name -contains "LenientVerificationDelayMilliseconds") {
+        return [PSCustomObject]@{
+            Policy = [string]$Operation.VerifyPolicy
+            DelayMilliseconds = [int]$Operation.VerificationDelayMilliseconds
+            LenientDelayMilliseconds = [int]$Operation.LenientVerificationDelayMilliseconds
+        }
+    }
     $identityKey = if ($null -ne $Operation -and $Operation.PSObject.Properties.Name -contains "IdentityKey") { [string]$Operation.IdentityKey } else { "" }
     $timing = Get-DdcEffectiveTiming -TimingProfile (Get-DdcTimingProfile -IdentityKey $identityKey)
     return [PSCustomObject]@{
@@ -1455,7 +1466,9 @@ function Invoke-VerifiedVcpTransaction {
         [scriptblock]$ReadValue,
         [scriptblock]$WriteValue,
         [switch]$RollbackOnFailure,
-        [scriptblock]$DelayAction
+        [scriptblock]$DelayAction,
+        [scriptblock]$ProgressAction,
+        [scriptblock]$CancellationRequested
     )
     $items = @($Operations | Where-Object { $null -ne $_ })
     if ($items.Count -eq 0) {
@@ -1481,13 +1494,18 @@ function Invoke-VerifiedVcpTransaction {
         }
     }
     if ($null -eq $DelayAction) {
-        $DelayAction = { param([int]$Milliseconds) if ($Milliseconds -gt 0) { Start-Sleep -Milliseconds $Milliseconds } }
+        $DelayAction = { param([int]$Milliseconds) if ($Milliseconds -gt 0) { [Threading.Thread]::Sleep($Milliseconds) } }
     }
+    if ($null -eq $ProgressAction) { $ProgressAction = { param($Completed, $Total, $Phase, $Record) } }
+    if ($null -eq $CancellationRequested) { $CancellationRequested = { return $false } }
 
     $results = New-Object System.Collections.Generic.List[object]
     $applied = New-Object System.Collections.Generic.List[object]
     $failureOutcome = ""
     foreach ($operation in $items) {
+        $cancelRequested = $false
+        try { $cancelRequested = [bool](& $CancellationRequested) } catch { $cancelRequested = $false }
+        if ($cancelRequested) { $failureOutcome = "Canceled"; break }
         $verificationSettings = Get-DdcTransactionVerificationSettings -Operation $operation
         $verifyPolicy = [string]$verificationSettings.Policy
         $snapshot = $null
@@ -1501,42 +1519,55 @@ function Invoke-VerifiedVcpTransaction {
         $readbackMaximum = [uint32]0
         $verificationReads = 0
         if ($writeSucceeded) {
-            if ($verifyPolicy -eq "Off") {
+            try { $cancelRequested = [bool](& $CancellationRequested) } catch { $cancelRequested = $false }
+            if ($cancelRequested) {
+                $verification = "Canceled"
+            } elseif ($verifyPolicy -eq "Off") {
                 $verification = "Off"
             } else {
                 $null = & $DelayAction ([int]$verificationSettings.DelayMilliseconds)
-                $readback = $null
-                try { $readback = & $ReadValue $operation } catch { $readback = $null }
-                $verificationReads++
-                if ($null -eq $readback -or -not [bool]$readback.Success) {
-                    $verification = "Unverified"
+                try { $cancelRequested = [bool](& $CancellationRequested) } catch { $cancelRequested = $false }
+                if ($cancelRequested) {
+                    $verification = "Canceled"
                 } else {
-                    $readbackValue = [uint32]$readback.Current
-                    if ($readback.PSObject.Properties.Name -contains "Maximum") { $readbackMaximum = [uint32]$readback.Maximum }
-                    if (Test-VcpReadbackOutOfRange -Readback $readback -Operation $operation) {
-                        $verification = "UnreliableReadback"
-                    } elseif ($readbackValue -eq [uint32]$operation.Value) {
-                        $verification = "Verified"
-                    } elseif ($verifyPolicy -eq "Lenient") {
-                        $null = & $DelayAction ([int]$verificationSettings.LenientDelayMilliseconds)
-                        $secondReadback = $null
-                        try { $secondReadback = & $ReadValue $operation } catch { $secondReadback = $null }
-                        $verificationReads++
-                        if ($null -eq $secondReadback -or -not [bool]$secondReadback.Success) {
-                            $verification = "Unverified"
-                        } else {
-                            $readbackValue = [uint32]$secondReadback.Current
-                            if ($secondReadback.PSObject.Properties.Name -contains "Maximum") { $readbackMaximum = [uint32]$secondReadback.Maximum }
-                            if (Test-VcpReadbackOutOfRange -Readback $secondReadback -Operation $operation) {
-                                $verification = "UnreliableReadback"
-                            } elseif ($readbackValue -eq [uint32]$operation.Value) {
-                                $verification = "VerifiedAfterRetry"
-                            } else {
-                                $verification = "Mismatched"
-                            }
-                        }
+                    $readback = $null
+                    try { $readback = & $ReadValue $operation } catch { $readback = $null }
+                    $verificationReads++
+                    if ($null -eq $readback -or -not [bool]$readback.Success) {
+                        $verification = "Unverified"
                     } else {
-                        $verification = "Mismatched"
+                        $readbackValue = [uint32]$readback.Current
+                        if ($readback.PSObject.Properties.Name -contains "Maximum") { $readbackMaximum = [uint32]$readback.Maximum }
+                        if (Test-VcpReadbackOutOfRange -Readback $readback -Operation $operation) {
+                            $verification = "UnreliableReadback"
+                        } elseif ($readbackValue -eq [uint32]$operation.Value) {
+                            $verification = "Verified"
+                        } elseif ($verifyPolicy -eq "Lenient") {
+                            $null = & $DelayAction ([int]$verificationSettings.LenientDelayMilliseconds)
+                            try { $cancelRequested = [bool](& $CancellationRequested) } catch { $cancelRequested = $false }
+                            if ($cancelRequested) {
+                                $verification = "Canceled"
+                            } else {
+                                $secondReadback = $null
+                                try { $secondReadback = & $ReadValue $operation } catch { $secondReadback = $null }
+                                $verificationReads++
+                                if ($null -eq $secondReadback -or -not [bool]$secondReadback.Success) {
+                                    $verification = "Unverified"
+                                } else {
+                                    $readbackValue = [uint32]$secondReadback.Current
+                                    if ($secondReadback.PSObject.Properties.Name -contains "Maximum") { $readbackMaximum = [uint32]$secondReadback.Maximum }
+                                    if (Test-VcpReadbackOutOfRange -Readback $secondReadback -Operation $operation) {
+                                        $verification = "UnreliableReadback"
+                                    } elseif ($readbackValue -eq [uint32]$operation.Value) {
+                                        $verification = "VerifiedAfterRetry"
+                                    } else {
+                                        $verification = "Mismatched"
+                                    }
+                                }
+                            }
+                        } else {
+                            $verification = "Mismatched"
+                        }
                     }
                 }
             }
@@ -1556,6 +1587,7 @@ function Invoke-VerifiedVcpTransaction {
         }
         $results.Add($record)
         if ($writeSucceeded -or $snapshotReadable) { $applied.Add($record) }
+        & $ProgressAction $results.Count $items.Count "Apply" $record
         if (-not $writeSucceeded) {
             $failureOutcome = "WriteFailed"
             break
@@ -1564,16 +1596,21 @@ function Invoke-VerifiedVcpTransaction {
             $failureOutcome = "Mismatched"
             break
         }
+        if ($verification -eq "Canceled") {
+            $failureOutcome = "Canceled"
+            break
+        }
     }
 
     $rollbackStatus = "NotNeeded"
-    if ($failureOutcome -and $RollbackOnFailure) {
+    if ($failureOutcome -and $RollbackOnFailure -and $applied.Count -gt 0) {
         $rollbackStatus = "Restored"
         for ($index = $applied.Count - 1; $index -ge 0; $index--) {
             $record = $applied[$index]
             if (-not [bool]$record.PreviousReadable) {
                 $record.Rollback = "Unavailable"
                 $rollbackStatus = "Partial"
+                & $ProgressAction ($applied.Count - $index) $applied.Count "Rollback" $record
                 continue
             }
             $restored = $false
@@ -1581,6 +1618,7 @@ function Invoke-VerifiedVcpTransaction {
             if (-not $restored) {
                 $record.Rollback = "WriteFailed"
                 $rollbackStatus = "Partial"
+                & $ProgressAction ($applied.Count - $index) $applied.Count "Rollback" $record
                 continue
             }
             if ([string]$record.VerifyPolicy -eq "Off") {
@@ -1599,6 +1637,7 @@ function Invoke-VerifiedVcpTransaction {
                     $record.Rollback = "Restored"
                 }
             }
+            & $ProgressAction ($applied.Count - $index) $applied.Count "Rollback" $record
         }
     }
 
