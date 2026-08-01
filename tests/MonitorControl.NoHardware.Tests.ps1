@@ -202,6 +202,8 @@ public static class MonitorControlVcpWriteProbe
         "Close-UnregisteredPhysicalMonitorHandle",
         "Test-MonitorSupportsVcp",
         "Test-MonitorSupportsVcpValue",
+        "Get-VcpValueDescription",
+        "Get-VcpValueEditorModel",
         "ConvertTo-VcpCode",
         "ConvertTo-VcpValue",
         "Get-CapabilitiesSafetySettingsObject",
@@ -1209,6 +1211,29 @@ Describe "Monitor capabilities parsing" {
         Test-MonitorSupportsVcp -Monitor $monitor -Code 0xD6 | Should -BeFalse
         Test-MonitorSupportsVcpValue -Monitor $monitor -Code 0x60 -Value 0x11 | Should -BeTrue
         Test-MonitorSupportsVcpValue -Monitor $monitor -Code 0x60 -Value 0x13 | Should -BeFalse
+    }
+
+    It "turns advertised discrete values into labelled picker entries" {
+        $parsed = ConvertFrom-MonitorCapabilities -Capabilities "vcp(60(0F 11 12))"
+        $monitor = [PSCustomObject]@{ CapabilitiesKnown = $true; SupportedVcpCodes = $parsed.Codes; VcpMaximums = @{} }
+
+        $model = Get-VcpValueEditorModel -Monitor $monitor -Code 0x60
+
+        $model.Mode | Should -Be "Picker"
+        @($model.Values.Value) | Should -Be @(0x0F, 0x11, 0x12)
+        @($model.Values.Label) -join "|" | Should -Match "DisplayPort 1|HDMI 1|HDMI 2"
+    }
+
+    It "uses reported ranges for continuous codes and free entry only when capabilities are unknown" {
+        $script:VcpScaledCodes = @(0x10, 0x12, 0x16, 0x18, 0x1A, 0x62, 0x87)
+        $known = [PSCustomObject]@{ CapabilitiesKnown = $true; SupportedVcpCodes = @{ 0x10 = @(); 0xD6 = @() }; VcpMaximums = @{ 0x10 = 255 } }
+        $unknown = [PSCustomObject]@{ CapabilitiesKnown = $false; SupportedVcpCodes = @{}; VcpMaximums = @{} }
+
+        $range = Get-VcpValueEditorModel -Monitor $known -Code 0x10
+        $range.Mode | Should -Be "Range"
+        $range.Maximum | Should -Be 255
+        (Get-VcpValueEditorModel -Monitor $known -Code 0xD6).Mode | Should -Be "Unavailable"
+        (Get-VcpValueEditorModel -Monitor $unknown -Code 0xD6).Mode | Should -Be "FreeEntry"
     }
 }
 
@@ -3514,6 +3539,13 @@ Describe "Modern control-center shell" {
         [int]$window.Width | Should -BeGreaterOrEqual 1000
         [int]$window.MinWidth | Should -BeGreaterOrEqual 900
         $window.GetAttribute("TextOptions.TextRenderingMode") | Should -Be "ClearType"
+    }
+
+    It "provides picker range and free-entry surfaces for VCP values" {
+        foreach ($name in @("VCPSetValueBox", "VCPSetValueCombo", "VCPSetValueRangePanel", "VCPSetValueSlider")) {
+            @($script:MainXaml.SelectNodes("//*[@*[local-name()='Name']='$name']")).Count | Should -Be 1
+        }
+        $script:MainXaml.SelectSingleNode("//*[@*[local-name()='Name']='VCPSetValueCombo']").GetAttribute("AutomationProperties.Name") | Should -Be "Advertised VCP values"
     }
 }
 

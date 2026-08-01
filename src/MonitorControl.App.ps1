@@ -1178,6 +1178,10 @@ $script:UiStrings = @{
     "A11y.ErrorBanner" = "Application alert"
 }
 $script:UpdatingUI = $false
+$script:UpdatingVcpValueEditor = $false
+$script:VcpValueEditorMode = "FreeEntry"
+$script:VcpValueEditorAllowsWrite = $true
+$script:VcpValueEditorMessage = "Capabilities unknown - enter a value"
 $script:ApplyToAll = $false
 $script:AutoModeEnabled = $false
 $script:WmiBrightnessAvailable = $false
@@ -1380,6 +1384,73 @@ function Update-VcpPresetItems {
     }
 }
 
+function Update-VcpValueEditorForCurrentCode {
+    if ($null -eq $vcpSetValueBox -or $script:UpdatingVcpValueEditor) { return }
+    $code = ConvertTo-VcpCode -Text ([string]$vcpCodeBox.Text)
+    $script:UpdatingVcpValueEditor = $true
+    try {
+        $vcpSetValueBox.Visibility = [System.Windows.Visibility]::Collapsed
+        $vcpSetValueCombo.Visibility = [System.Windows.Visibility]::Collapsed
+        $vcpSetValueRangePanel.Visibility = [System.Windows.Visibility]::Collapsed
+        if ($null -eq $code) {
+            $script:VcpValueEditorMode = "Unavailable"
+            $script:VcpValueEditorAllowsWrite = $false
+            $script:VcpValueEditorMessage = "Enter a valid VCP code first"
+            $vcpSetValueLabel.Text = $script:VcpValueEditorMessage
+            return
+        }
+        $monitor = if ($script:CurrentMonitorIndex -ge 0 -and $script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) {
+            $script:PhysicalMonitors[$script:CurrentMonitorIndex]
+        } else {
+            $null
+        }
+        $model = Get-VcpValueEditorModel -Monitor $monitor -Code ([int]$code)
+        $script:VcpValueEditorMode = [string]$model.Mode
+        $script:VcpValueEditorAllowsWrite = [bool]$model.AllowsWrite
+        $script:VcpValueEditorMessage = [string]$model.Message
+        $vcpSetValueLabel.Text = [string]$model.Message
+        switch ([string]$model.Mode) {
+            "Picker" {
+                $previous = ConvertTo-VcpValue -Text ([string]$vcpSetValueBox.Text)
+                $vcpSetValueCombo.Items.Clear()
+                foreach ($valueItem in @($model.Values)) {
+                    $item = New-Object System.Windows.Controls.ComboBoxItem
+                    $item.Content = [string]$valueItem.Label
+                    $item.Tag = [uint32]$valueItem.Value
+                    $vcpSetValueCombo.Items.Add($item) | Out-Null
+                    if ($null -ne $previous -and [uint32]$previous -eq [uint32]$valueItem.Value) { $vcpSetValueCombo.SelectedItem = $item }
+                }
+                if ($null -eq $vcpSetValueCombo.SelectedItem -and $vcpSetValueCombo.Items.Count -gt 0) { $vcpSetValueCombo.SelectedIndex = 0 }
+                $vcpSetValueCombo.Visibility = [System.Windows.Visibility]::Visible
+            }
+            "Range" {
+                $vcpSetValueSlider.Minimum = [double]$model.Minimum
+                $vcpSetValueSlider.Maximum = [double]$model.Maximum
+                $candidate = ConvertTo-VcpValue -Text ([string]$vcpSetValueBox.Text)
+                if ($null -eq $candidate) { $candidate = [uint32]$model.Minimum }
+                $vcpSetValueSlider.Value = [Math]::Max([double]$model.Minimum, [Math]::Min([double]$model.Maximum, [double]$candidate))
+                $vcpSetValueSliderText.Text = ([uint32]$vcpSetValueSlider.Value).ToString()
+                $vcpSetValueRangePanel.Visibility = [System.Windows.Visibility]::Visible
+            }
+            "FreeEntry" { $vcpSetValueBox.Visibility = [System.Windows.Visibility]::Visible }
+        }
+    } finally {
+        $script:UpdatingVcpValueEditor = $false
+    }
+}
+
+function Get-VcpValueEditorValue {
+    switch ($script:VcpValueEditorMode) {
+        "Picker" {
+            if ($null -eq $vcpSetValueCombo.SelectedItem) { return $null }
+            return [uint32]$vcpSetValueCombo.SelectedItem.Tag
+        }
+        "Range" { return [uint32]$vcpSetValueSlider.Value }
+        "FreeEntry" { return ConvertTo-VcpValue -Text ([string]$vcpSetValueBox.Text) }
+        default { return $null }
+    }
+}
+
 function Update-CapabilityControls {
     param($Monitor)
     Set-ControlVcpSupport -Control $brightnessSlider -Monitor $Monitor -Code ([MonitorAPI]::VCP_BRIGHTNESS)
@@ -1427,14 +1498,23 @@ function Update-CapabilityControls {
         }
     }
     Update-VcpPresetItems -Monitor $Monitor
+    Update-VcpValueEditorForCurrentCode
     Update-RiskyVcpControlState -Monitor $Monitor
 }
 
 function Update-RiskyVcpControlState {
     param($Monitor)
     if ($vcpSetBtn) {
-        $vcpSetBtn.IsEnabled = Test-VcpWriteEnabledForMonitor -Monitor $Monitor
-        $vcpSetBtn.ToolTip = if ($vcpSetBtn.IsEnabled) { "Every direct write requires an exact code/value confirmation." } else { "Arbitrary VCP writes require the selected stable monitor identity to be enabled in System." }
+        $identityEnabled = Test-VcpWriteEnabledForMonitor -Monitor $Monitor
+        $editorAllowsWrite = $null -eq $script:VcpValueEditorAllowsWrite -or [bool]$script:VcpValueEditorAllowsWrite
+        $vcpSetBtn.IsEnabled = [bool]($identityEnabled -and $editorAllowsWrite)
+        $vcpSetBtn.ToolTip = if (-not $editorAllowsWrite) {
+            $script:VcpValueEditorMessage
+        } elseif (-not $identityEnabled) {
+            "Arbitrary VCP writes require the selected stable monitor identity to be enabled in System."
+        } else {
+            "Every direct write requires an exact code/value confirmation."
+        }
     }
     if ($allMonitorsStandbyBtn -and $allMonitorsStandbyBtn.IsEnabled) {
         foreach ($candidate in @($script:PhysicalMonitors)) {
@@ -4274,9 +4354,14 @@ try {
                     </Grid></Border>
                     <Border Grid.Column="2" Style="{StaticResource PageCard}"><Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="14"/><RowDefinition Height="Auto"/><RowDefinition Height="10"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                         <TextBlock Text="Write a value" Style="{StaticResource SectionTitle}"/>
-                        <TextBlock Grid.Row="2" Text="Set Value:" FontSize="12" Foreground="{DynamicResource MutedTextBrush}"/>
+                        <TextBlock x:Name="VCPSetValueLabel" Grid.Row="2" Text="Set value" FontSize="12" Foreground="{DynamicResource MutedTextBrush}"/>
                         <Grid Grid.Row="4"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="10"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                             <TextBox x:Name="VCPSetValueBox" Text="50" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="VCPSetValueCombo" Visibility="Collapsed" VerticalAlignment="Center" AutomationProperties.Name="Advertised VCP values"/>
+                            <Grid x:Name="VCPSetValueRangePanel" Visibility="Collapsed"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="10"/><ColumnDefinition Width="54"/></Grid.ColumnDefinitions>
+                                <Slider x:Name="VCPSetValueSlider" Minimum="0" Maximum="100" Value="50" TickFrequency="1" IsSnapToTickEnabled="True" AutomationProperties.Name="VCP value"/>
+                                <TextBlock x:Name="VCPSetValueSliderText" Grid.Column="2" Text="50" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                            </Grid>
                             <Button x:Name="VCPSetBtn" Grid.Column="2" Content="Set" Style="{StaticResource OrangeBtn}" MinWidth="110"/>
                         </Grid>
                     </Grid></Border>
@@ -4668,7 +4753,10 @@ $vibranceSlider = $window.FindName("VibranceSlider"); $vibranceValue = $window.F
 $fpsOverlayStatusText = $window.FindName("FpsOverlayStatusText"); $fpsOverlayStartBtn = $window.FindName("FpsOverlayStartBtn"); $fpsOverlayStopBtn = $window.FindName("FpsOverlayStopBtn")
 $gammaSlider = $window.FindName("GammaSlider"); $gammaValue = $window.FindName("GammaValue")
 $vcpCodeBox = $window.FindName("VCPCodeBox"); $vcpPresetCombo = $window.FindName("VCPPresetCombo"); $vcpQueryBtn = $window.FindName("VCPQueryBtn")
-$vcpResultBox = $window.FindName("VCPResultBox"); $vcpSetValueBox = $window.FindName("VCPSetValueBox"); $vcpSetBtn = $window.FindName("VCPSetBtn"); $vcpScanBtn = $window.FindName("VCPScanBtn")
+$vcpResultBox = $window.FindName("VCPResultBox"); $vcpSetValueLabel = $window.FindName("VCPSetValueLabel"); $vcpSetValueBox = $window.FindName("VCPSetValueBox")
+$vcpSetValueCombo = $window.FindName("VCPSetValueCombo"); $vcpSetValueRangePanel = $window.FindName("VCPSetValueRangePanel")
+$vcpSetValueSlider = $window.FindName("VCPSetValueSlider"); $vcpSetValueSliderText = $window.FindName("VCPSetValueSliderText")
+$vcpSetBtn = $window.FindName("VCPSetBtn"); $vcpScanBtn = $window.FindName("VCPScanBtn")
 $vcpScanCapabilitiesOnlyCheckbox = $window.FindName("VCPScanCapabilitiesOnlyCheckbox")
 $profileNameBox = $window.FindName("ProfileNameBox"); $profilesList = $window.FindName("ProfilesList")
 $saveProfileBtn = $window.FindName("SaveProfileBtn"); $loadProfileBtn = $window.FindName("LoadProfileBtn"); $deleteProfileBtn = $window.FindName("DeleteProfileBtn")
@@ -8098,6 +8186,7 @@ function Hide-FpsOverlay {
 }
 
 Update-VcpPresetItems -Monitor $null
+Update-VcpValueEditorForCurrentCode
 
 # Event handlers
 $applyAllCheckbox.Add_Checked({ Set-ApplyToAllMode -Enabled $true }); $applyAllCheckbox.Add_Unchecked({ Set-ApplyToAllMode -Enabled $false })
@@ -8217,7 +8306,20 @@ $factoryResetBtn.Add_Click({
 })
 $allMonitorsStandbyBtn.Add_Click({ Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_POWER_MODE) -Value ([MonitorAPI]::POWER_STANDBY) -ActionLabel "Put every DDC/CI monitor in standby" -AllMonitors | Out-Null })
 
-$vcpPresetCombo.Add_SelectionChanged({ if ($vcpPresetCombo.SelectedItem -ne $null) { $vcpCodeBox.Text = "0x{0:X2}" -f $vcpPresetCombo.SelectedItem.Tag } })
+$vcpPresetCombo.Add_SelectionChanged({
+    if ($vcpPresetCombo.SelectedItem -ne $null) { $vcpCodeBox.Text = "0x{0:X2}" -f $vcpPresetCombo.SelectedItem.Tag }
+    Update-VcpValueEditorForCurrentCode
+    $monitor = if ($script:CurrentMonitorIndex -ge 0 -and $script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) { $script:PhysicalMonitors[$script:CurrentMonitorIndex] } else { $null }
+    Update-RiskyVcpControlState -Monitor $monitor
+})
+$vcpCodeBox.Add_TextChanged({
+    Update-VcpValueEditorForCurrentCode
+    $monitor = if ($script:CurrentMonitorIndex -ge 0 -and $script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) { $script:PhysicalMonitors[$script:CurrentMonitorIndex] } else { $null }
+    Update-RiskyVcpControlState -Monitor $monitor
+})
+$vcpSetValueSlider.Add_ValueChanged({
+    if (-not $script:UpdatingVcpValueEditor) { $vcpSetValueSliderText.Text = ([uint32]$vcpSetValueSlider.Value).ToString() }
+})
 $vcpQueryBtn.Add_Click({
     try {
         $code = ConvertTo-VcpCode -Text $vcpCodeBox.Text
@@ -8244,10 +8346,11 @@ $vcpQueryBtn.Add_Click({
     }
 })
 $vcpSetBtn.Add_Click({
+    if ($script:CurrentMonitorIndex -lt 0 -or $script:CurrentMonitorIndex -ge $script:PhysicalMonitors.Count) { Update-Status "No monitor selected"; return }
     $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]; if ($mon.Handle -eq [IntPtr]::Zero) { return }
     try {
         $code = ConvertTo-VcpCode -Text $vcpCodeBox.Text
-        $value = ConvertTo-VcpValue -Text $vcpSetValueBox.Text
+        $value = Get-VcpValueEditorValue
         if ($null -eq $code -or $null -eq $value) { Update-Status "VCP code/value invalid"; return }
         Invoke-ManualVcpWrite -Code $code -Value $value -ActionLabel "VCP Explorer direct write" -Arbitrary | Out-Null
     } catch { Update-Status "Error: $_" }

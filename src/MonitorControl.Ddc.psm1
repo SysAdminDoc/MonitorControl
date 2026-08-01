@@ -174,6 +174,47 @@ function Get-EdidTextDescriptor {
     return ""
 }
 
+function Get-VcpValueDescription {
+    param([int]$Code, [int]$Value)
+    $descriptions = switch ($Code) {
+        0x14 { @{ 0x01 = "sRGB"; 0x04 = "5000 K"; 0x05 = "6500 K"; 0x08 = "9300 K" } }
+        0x60 { @{ 0x01 = "VGA"; 0x03 = "DVI"; 0x0F = "DisplayPort 1"; 0x10 = "DisplayPort 2"; 0x11 = "HDMI 1"; 0x12 = "HDMI 2"; 0x13 = "USB-C" } }
+        0x8D { @{ 0x01 = "Mute"; 0x02 = "Unmute" } }
+        0xD6 { @{ 0x01 = "On"; 0x02 = "Standby"; 0x04 = "Off" } }
+        0xDC { @{ 0x00 = "Standard"; 0x01 = "Productivity"; 0x03 = "Movie"; 0x05 = "Game"; 0xF0 = "Dynamic contrast" } }
+        0xE8 { @{ 0x11 = "HDMI 1"; 0x12 = "HDMI 2"; 0x21 = "DisplayPort" } }
+        0xE9 { @{ 0x00 = "Off"; 0x21 = "PiP upper-right"; 0x23 = "PbP split" } }
+        default { @{} }
+    }
+    if ($descriptions.ContainsKey($Value)) { return [string]$descriptions[$Value] }
+    return "Value $Value"
+}
+
+function Get-VcpValueEditorModel {
+    param($Monitor, [int]$Code)
+    if ($null -eq $Monitor -or -not [bool]$Monitor.CapabilitiesKnown) {
+        return [PSCustomObject]@{ Mode = "FreeEntry"; AllowsWrite = $true; Minimum = 0; Maximum = [uint32]::MaxValue; Values = @(); Message = "Capabilities unknown - enter a value" }
+    }
+    if (-not (Test-MonitorSupportsVcp -Monitor $Monitor -Code $Code)) {
+        return [PSCustomObject]@{ Mode = "Unavailable"; AllowsWrite = $false; Minimum = 0; Maximum = 0; Values = @(); Message = "Code is not advertised by this monitor" }
+    }
+    $advertisedValues = @($Monitor.SupportedVcpCodes[$Code] | Sort-Object -Unique)
+    if ($advertisedValues.Count -gt 0) {
+        $items = @(foreach ($value in $advertisedValues) {
+            [PSCustomObject]@{
+                Value = [uint32]$value
+                Label = "0x{0:X2} - {1}" -f [int]$value, (Get-VcpValueDescription -Code $Code -Value ([int]$value))
+            }
+        })
+        return [PSCustomObject]@{ Mode = "Picker"; AllowsWrite = $true; Minimum = 0; Maximum = 0; Values = $items; Message = "Choose an advertised value" }
+    }
+    if (Test-VcpCodeIsScaled -Code $Code) {
+        $maximum = Get-VcpMaximumForMonitor -Monitor $Monitor -Code $Code
+        return [PSCustomObject]@{ Mode = "Range"; AllowsWrite = $true; Minimum = 0; Maximum = [uint32]$maximum; Values = @(); Message = "Range 0-$maximum" }
+    }
+    return [PSCustomObject]@{ Mode = "Unavailable"; AllowsWrite = $false; Minimum = 0; Maximum = 0; Values = @(); Message = "Capabilities do not advertise legal values" }
+}
+
 function ConvertTo-MonitorDeviceToken {
     param([string]$DeviceId)
     if ([string]::IsNullOrWhiteSpace($DeviceId)) { return "" }
@@ -1802,6 +1843,10 @@ function Update-VcpWorkerOutput {
                 $code = [int]$result.Code
                 $desc = Get-VcpDescription -Code $code
                 if ([bool]$result.Success) {
+                    if ($context.MonitorIndex -ge 0 -and $context.MonitorIndex -lt $script:PhysicalMonitors.Count) {
+                        Set-VcpMaximumForMonitor -Monitor $script:PhysicalMonitors[$context.MonitorIndex] -Code $code -Maximum ([int]$result.Maximum)
+                        if (Get-Command Update-VcpValueEditorForCurrentCode -ErrorAction SilentlyContinue) { Update-VcpValueEditorForCurrentCode }
+                    }
                     Set-VcpWorkerResultText -Text "VCP 0x$("{0:X2}" -f $code) ($desc)`nCurrent: $($result.Current)`nMaximum: $($result.Maximum)"
                 } else {
                     Set-VcpWorkerResultText -Text (Format-DdcDiagnostic -Operation "Read" -Monitor ([string]$result.MonitorName) -Code $code -Value $null -LastError ([int]$result.LastError) -Attempts ([int]$result.Attempts) -Message "")
