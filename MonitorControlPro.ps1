@@ -7052,11 +7052,11 @@ function Read-ProfileObject {
     }
     $path = Join-Path $script:ProfilesPath "$safeName.json"
     if (-not (Test-Path -LiteralPath $path)) { return $null }
-    $profile = Read-JsonFileSafely -Path $path -Label "Profile '$safeName'" -ReadOnly:$script:ProfileStorageOffline
-    if ($null -eq $profile) { return $null }
+    $profileObject = Read-JsonFileSafely -Path $path -Label "Profile '$safeName'" -ReadOnly:$script:ProfileStorageOffline
+    if ($null -eq $profileObject) { return $null }
     try {
-        $schema = if ($profile.PSObject.Properties.Name -contains "SchemaVersion") { [int]$profile.SchemaVersion } else { 1 }
-        $converted = ConvertTo-CurrentProfileSchema -Profile $profile -FallbackName $safeName
+        $schema = if ($profileObject.PSObject.Properties.Name -contains "SchemaVersion") { [int]$profileObject.SchemaVersion } else { 1 }
+        $converted = ConvertTo-CurrentProfileSchema -Profile $profileObject -FallbackName $safeName
         if ($schema -lt $script:ProfileSchemaVersion) {
             if ($script:ProfileStorageOffline) {
                 Update-Status "Profile '$safeName' uses schema v$schema; converted in memory while storage is offline"
@@ -7649,10 +7649,10 @@ function Export-ProfileBundle {
         New-Item -ItemType Directory -Path $tempProfiles -Force | Out-Null
         $exportedProfiles = @()
         foreach ($profileFile in $profileFiles) {
-            $profile = Read-ProfileObject -Name $profileFile.BaseName
-            if ($null -eq $profile) { continue }
+            $profileObject = Read-ProfileObject -Name $profileFile.BaseName
+            if ($null -eq $profileObject) { continue }
             $safeName = $profileFile.BaseName
-            $validation = Test-ImportedProfileObject -RawProfile $profile -ExpectedName $safeName
+            $validation = Test-ImportedProfileObject -RawProfile $profileObject -ExpectedName $safeName
             if (-not $validation.Valid) {
                 Update-Status "Profile export stopped because '$safeName' is invalid"
                 return $null
@@ -8368,9 +8368,9 @@ function Load-AppProfileRules {
         $script:AppProfileEnabled = [bool]$data.Enabled
         foreach ($rule in @($data.Rules)) {
             $exe = Normalize-AppExeName -ExeName ([string]$rule.Exe)
-            $profile = ([string]$rule.Profile).Trim()
+            $profileObject = ([string]$rule.Profile).Trim()
             $allowRiskyVcp = $rule.PSObject.Properties.Name -contains "AllowRiskyVcp" -and [bool]$rule.AllowRiskyVcp
-            if ($exe -and $profile) { $script:AppProfileRules += [PSCustomObject]@{ Exe = $exe; Profile = $profile; AllowRiskyVcp = $allowRiskyVcp } }
+            if ($exe -and $profileObject) { $script:AppProfileRules += [PSCustomObject]@{ Exe = $exe; Profile = $profileObject; AllowRiskyVcp = $allowRiskyVcp } }
         }
     } catch {
         Update-Status "App profile rules could not be loaded"
@@ -8391,7 +8391,7 @@ function Update-ProfileCombo {
     if ($null -eq $Combo) { return }
     $selected = if ($Combo.SelectedItem) { [string]$Combo.SelectedItem } else { $null }
     $Combo.Items.Clear()
-    foreach ($profile in @($profilesList.Items)) { $Combo.Items.Add([string]$profile) | Out-Null }
+    foreach ($profileObject in @($profilesList.Items)) { $Combo.Items.Add([string]$profileObject) | Out-Null }
     if ($selected -and $Combo.Items.Contains($selected)) {
         $Combo.SelectedItem = $selected
     } elseif ($Combo.Items.Count -gt 0) {
@@ -8704,9 +8704,9 @@ function Load-ProfileSchedules {
         $script:ProfileScheduleEnabled = [bool]$data.Enabled
         foreach ($rule in @($data.Rules)) {
             $time = Normalize-ScheduleTime -TimeText ([string]$rule.Time)
-            $profile = ([string]$rule.Profile).Trim()
+            $profileObject = ([string]$rule.Profile).Trim()
             $allowRiskyVcp = $rule.PSObject.Properties.Name -contains "AllowRiskyVcp" -and [bool]$rule.AllowRiskyVcp
-            if ($time -and $profile) { $script:ProfileSchedules += [PSCustomObject]@{ Time = $time; Profile = $profile; AllowRiskyVcp = $allowRiskyVcp } }
+            if ($time -and $profileObject) { $script:ProfileSchedules += [PSCustomObject]@{ Time = $time; Profile = $profileObject; AllowRiskyVcp = $allowRiskyVcp } }
         }
     } catch {
         Update-Status "Profile schedule could not be loaded"
@@ -9591,8 +9591,8 @@ $vcpScanBtn.Add_Click({
 
 $saveProfileBtn.Add_Click({
     $name = $profileNameBox.Text.Trim(); if ([string]::IsNullOrEmpty($name)) { return }
-    $profile = New-ProfileObject -Name $name
-    if (Save-ProfileObject -Profile $profile) { Update-ProfilesList; Update-Status "Saved '$name'" }
+    $profileObject = New-ProfileObject -Name $name
+    if (Save-ProfileObject -Profile $profileObject) { Update-ProfilesList; Update-Status "Saved '$name'" }
 })
 $loadProfileBtn.Add_Click({
     if ($profilesList.SelectedItem -eq $null) { return }
@@ -9678,18 +9678,18 @@ $appProfileCaptureBtn.Add_Click({
 })
 $appProfileAddBtn.Add_Click({
     $exe = Normalize-AppExeName -ExeName $appProfileExeBox.Text
-    $profile = if ($appProfileProfileCombo.SelectedItem) { [string]$appProfileProfileCombo.SelectedItem } else { "" }
-    if (-not $exe -or -not $profile) { Update-Status "Choose an app and profile"; return }
+    $profileObject = if ($appProfileProfileCombo.SelectedItem) { [string]$appProfileProfileCombo.SelectedItem } else { "" }
+    if (-not $exe -or -not $profileObject) { Update-Status "Choose an app and profile"; return }
     $allowRiskyVcp = [bool]$appProfileRiskyConsentCheckbox.IsChecked
-    if ($allowRiskyVcp -and -not (Confirm-AutomationRuleRiskyWriteConsent -RuleLabel "$exe -> $profile")) {
+    if ($allowRiskyVcp -and -not (Confirm-AutomationRuleRiskyWriteConsent -RuleLabel "$exe -> $profileObject")) {
         Update-Status "Application rule not added"
         return
     }
     $script:AppProfileRules = @($script:AppProfileRules | Where-Object { $_.Exe -ne $exe })
-    $script:AppProfileRules += [PSCustomObject]@{ Exe = $exe; Profile = $profile; AllowRiskyVcp = $allowRiskyVcp }
+    $script:AppProfileRules += [PSCustomObject]@{ Exe = $exe; Profile = $profileObject; AllowRiskyVcp = $allowRiskyVcp }
     Save-AppProfileRules
     Update-AppProfileControls
-    Update-Status "Mapped $exe to '$profile'$(if ($allowRiskyVcp) { ' with risky-write consent' } else { '' })"
+    Update-Status "Mapped $exe to '$profileObject'$(if ($allowRiskyVcp) { ' with risky-write consent' } else { '' })"
 })
 $appProfileRemoveBtn.Add_Click({
     if ($appProfileRulesList.SelectedItem -eq $null) { return }
@@ -9721,18 +9721,18 @@ $scheduleEnabledCheckbox.Add_Unchecked({
 })
 $scheduleAddBtn.Add_Click({
     $time = Normalize-ScheduleTime -TimeText $scheduleTimeBox.Text
-    $profile = if ($scheduleProfileCombo.SelectedItem) { [string]$scheduleProfileCombo.SelectedItem } else { "" }
-    if (-not $time -or -not $profile) { Update-Status "Use HH:mm and choose a profile"; return }
+    $profileObject = if ($scheduleProfileCombo.SelectedItem) { [string]$scheduleProfileCombo.SelectedItem } else { "" }
+    if (-not $time -or -not $profileObject) { Update-Status "Use HH:mm and choose a profile"; return }
     $allowRiskyVcp = [bool]$scheduleRiskyConsentCheckbox.IsChecked
-    if ($allowRiskyVcp -and -not (Confirm-AutomationRuleRiskyWriteConsent -RuleLabel "$time -> $profile")) {
+    if ($allowRiskyVcp -and -not (Confirm-AutomationRuleRiskyWriteConsent -RuleLabel "$time -> $profileObject")) {
         Update-Status "Schedule rule not added"
         return
     }
     $script:ProfileSchedules = @($script:ProfileSchedules | Where-Object { $_.Time -ne $time })
-    $script:ProfileSchedules += [PSCustomObject]@{ Time = $time; Profile = $profile; AllowRiskyVcp = $allowRiskyVcp }
+    $script:ProfileSchedules += [PSCustomObject]@{ Time = $time; Profile = $profileObject; AllowRiskyVcp = $allowRiskyVcp }
     Save-ProfileSchedules
     Update-ScheduleControls
-    Update-Status "Scheduled $profile at $time$(if ($allowRiskyVcp) { ' with risky-write consent' } else { '' })"
+    Update-Status "Scheduled $profileObject at $time$(if ($allowRiskyVcp) { ' with risky-write consent' } else { '' })"
     Invoke-ScheduleCheck
 })
 $scheduleRemoveBtn.Add_Click({
