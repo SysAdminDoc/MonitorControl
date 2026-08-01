@@ -2027,9 +2027,101 @@ function Format-DdcReportProbeLine {
     return "  - 0x{0:X2} {1}: failed Win32={2} retries={3}" -f $code, $desc, [int]$Result.LastError, [int]$Result.RetryCount
 }
 
+function Get-DdcReportSafeTarget {
+    param(
+        $Target,
+        [int]$Ordinal,
+        [switch]$IncludeRawMonitorIdentifiers,
+        [switch]$IncludeRawNames
+    )
+    return [PSCustomObject]@{
+        Index = [int]$Target.Index
+        Label = if ($IncludeRawNames) { [string]$Target.Label } else { "Display $Ordinal" }
+        Name = if ([string]::IsNullOrWhiteSpace([string]$Target.Name)) { "" } elseif ($IncludeRawNames) { [string]$Target.Name } else { "[monitor-name-$Ordinal]" }
+        DeviceName = if ($IncludeRawMonitorIdentifiers) { [string]$Target.DeviceName } else { "[display-device-$Ordinal]" }
+        DevicePath = if ([string]::IsNullOrWhiteSpace([string]$Target.DevicePath)) { "" } elseif ($IncludeRawMonitorIdentifiers) { [string]$Target.DevicePath } else { "[device-path-$Ordinal]" }
+        HardwareId = if ([string]::IsNullOrWhiteSpace([string]$Target.HardwareId)) { "" } elseif ($IncludeRawMonitorIdentifiers) { [string]$Target.HardwareId } else { "[hardware-id-$Ordinal]" }
+        IdentityKey = if ([string]::IsNullOrWhiteSpace([string]$Target.IdentityKey)) { "" } elseif ($IncludeRawMonitorIdentifiers) { [string]$Target.IdentityKey } else { "[monitor-identity-$Ordinal]" }
+        EdidSerial = if ([string]::IsNullOrWhiteSpace([string]$Target.EdidSerial)) { "" } elseif ($IncludeRawMonitorIdentifiers) { [string]$Target.EdidSerial } else { "[serial-$Ordinal]" }
+        EdidName = if ([string]::IsNullOrWhiteSpace([string]$Target.EdidName)) { "" } elseif ($IncludeRawNames) { [string]$Target.EdidName } else { "[edid-name-$Ordinal]" }
+    }
+}
+
+function Get-DdcSupportSensitiveValues {
+    param(
+        [object[]]$Targets,
+        [object[]]$DisplayPaths,
+        [switch]$IncludeRawMonitorIdentifiers,
+        [switch]$IncludeRawNames
+    )
+    $values = @(
+        [Environment]::UserName,
+        [Environment]::MachineName,
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    )
+    if (Get-Variable -Name DefaultProfilesPath -Scope Script -ErrorAction SilentlyContinue) {
+        $values += [string]$script:DefaultProfilesPath
+    }
+    foreach ($target in @($Targets)) {
+        if (-not $IncludeRawMonitorIdentifiers) {
+            $values += @([string]$target.DeviceName, [string]$target.DevicePath, [string]$target.LegacyDevicePath, [string]$target.HardwareId, [string]$target.IdentityKey, [string]$target.EdidSerial)
+        }
+        if (-not $IncludeRawNames) {
+            $values += @([string]$target.Label, [string]$target.Name, [string]$target.EdidName)
+        }
+    }
+    foreach ($path in @($DisplayPaths)) {
+        if (-not $IncludeRawMonitorIdentifiers) { $values += [string]$path.DeviceName }
+        if (-not $IncludeRawNames) { $values += [string]$path.Name }
+    }
+    return @($values | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) -and ([string]$_).Length -ge 3 } | Sort-Object Length -Descending -Unique)
+}
+
+function Protect-DdcSupportContent {
+    param([string]$Text, [string[]]$SensitiveValues)
+    if ([string]::IsNullOrEmpty($Text)) { return $Text }
+    $protected = $Text
+    foreach ($value in @($SensitiveValues | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object Length -Descending -Unique)) {
+        $protected = [regex]::Replace($protected, [regex]::Escape($value), "[redacted]", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    }
+    $patterns = @(
+        '(?i)\b(?:authorization|api[-_ ]?key|access[-_ ]?token|refresh[-_ ]?token|secret|password)\b\s*[:=]\s*(?:bearer\s+)?["'']?[^\s,"'';]+',
+        '(?i)\bbearer\s+[a-z0-9._~+/=-]+',
+        '(?i)\b[a-z0-9.!#$%&''*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+\b',
+        '(?<![0-9.])(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})(?:\.(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})){3}(?![0-9.])',
+        '(?i)(?<![0-9a-f])(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}(?![0-9a-f])',
+        '(?i)(?<![0-9a-f:])(?:[0-9a-f]{1,4}:){1,7}:[0-9a-f:]{0,4}(?![0-9a-f:])',
+        '(?i)(?<![0-9a-f:])(?=[0-9a-f:]*[a-f])(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{0,4}(?![0-9a-f:])'
+    )
+    foreach ($pattern in $patterns) { $protected = [regex]::Replace($protected, $pattern, "[redacted]") }
+    return $protected
+}
+
+function Get-DdcReportPrivacyDescription {
+    param([switch]$IncludeRawMonitorIdentifiers, [switch]$IncludeRawNames)
+    $included = @()
+    if ($IncludeRawMonitorIdentifiers) { $included += "raw monitor identifiers" }
+    if ($IncludeRawNames) { $included += "raw monitor names" }
+    $prefix = if ($included.Count -gt 0) { "Explicitly included: $($included -join ' and '). " } else { "Raw monitor identifiers and names are pseudonymized. " }
+    return $prefix + "Local filesystem paths, Windows user and machine names, email, IP and MAC addresses, and credential-like tokens are always redacted."
+}
+
 function New-DdcCompatibilityReport {
-    param([object[]]$Targets, [object[]]$ProbeResults, [object[]]$RecentErrors)
-    $system = Get-DdcReportSystemInfo
+    param(
+        [object[]]$Targets,
+        [object[]]$ProbeResults,
+        [object[]]$RecentErrors,
+        [switch]$IncludeRawMonitorIdentifiers,
+        [switch]$IncludeRawNames,
+        $SystemInfo = $null
+    )
+    $system = if ($null -ne $SystemInfo) { $SystemInfo } else { Get-DdcReportSystemInfo }
+    $safeTargets = @{}
+    $ordinal = 0
+    foreach ($target in @($Targets | Sort-Object -Property Index)) {
+        $ordinal++
+        $safeTargets[[int]$target.Index] = Get-DdcReportSafeTarget -Target $target -Ordinal $ordinal -IncludeRawMonitorIdentifiers:$IncludeRawMonitorIdentifiers -IncludeRawNames:$IncludeRawNames
+    }
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.AppendLine("MonitorControl Pro DDC Compatibility Report")
     [void]$sb.AppendLine("Generated: $((Get-Date).ToString("yyyy-MM-dd HH:mm:ss zzz"))")
@@ -2062,9 +2154,13 @@ function New-DdcCompatibilityReport {
     if (@($script:DisplayPathInventory).Count -eq 0) {
         [void]$sb.AppendLine("- none enumerated")
     } else {
+        $pathOrdinal = 0
         foreach ($path in @($script:DisplayPathInventory)) {
+            $pathOrdinal++
             $channelText = if ([bool]$path.HasControlChannel) { "DDC/CI channel" } else { "no DDC/CI channel" }
-            [void]$sb.AppendLine("- $($path.DeviceName) [$($path.Kind)] $channelText | $($path.Name) | adapter $($path.Adapter)")
+            $deviceName = if ($IncludeRawMonitorIdentifiers) { [string]$path.DeviceName } else { "[display-path-$pathOrdinal]" }
+            $pathName = if ($IncludeRawNames) { [string]$path.Name } else { "[display-name-$pathOrdinal]" }
+            [void]$sb.AppendLine("- $deviceName [$($path.Kind)] $channelText | $pathName | adapter $($path.Adapter)")
         }
     }
     [void]$sb.AppendLine("")
@@ -2073,10 +2169,11 @@ function New-DdcCompatibilityReport {
         [void]$sb.AppendLine("- no monitors")
     } else {
         foreach ($target in @($Targets | Sort-Object -Property Index)) {
+            $safeTarget = $safeTargets[[int]$target.Index]
             $timingProfile = Get-DdcTimingProfile -IdentityKey ([string]$target.IdentityKey)
             $timing = Get-DdcEffectiveTiming -TimingProfile $timingProfile
             $calibration = if ([string]::IsNullOrWhiteSpace([string]$timingProfile.CalibratedAt)) { "uncalibrated" } else { "calibrated $($timingProfile.CalibratedAt)" }
-            [void]$sb.AppendLine("- $($target.Label): mode=$($timing.Mode) multiplier=$($timing.SleepMultiplier) delay=$($timing.DelayMilliseconds)ms retries read=$($timing.ReadRetries) write=$($timing.WriteRetries) capability=$($timing.CapabilityRetries) verify=$($timing.VerifyPolicy) after=$($timing.VerificationDelayMilliseconds)ms lenient-reread=$($timing.LenientVerificationDelayMilliseconds)ms ($calibration)")
+            [void]$sb.AppendLine("- $($safeTarget.Label): mode=$($timing.Mode) multiplier=$($timing.SleepMultiplier) delay=$($timing.DelayMilliseconds)ms retries read=$($timing.ReadRetries) write=$($timing.WriteRetries) capability=$($timing.CapabilityRetries) verify=$($timing.VerifyPolicy) after=$($timing.VerificationDelayMilliseconds)ms lenient-reread=$($timing.LenientVerificationDelayMilliseconds)ms ($calibration)")
             $nullSemantics = if ([string]::IsNullOrWhiteSpace([string]$timingProfile.NullSemanticsClassifiedAt)) {
                 "unclassified"
             } elseif ([bool]$timingProfile.NullMeansUnsupported) {
@@ -2095,22 +2192,23 @@ function New-DdcCompatibilityReport {
     [void]$sb.AppendLine("")
     [void]$sb.AppendLine("Monitors:")
     foreach ($target in @($Targets | Sort-Object -Property Index)) {
+        $safeTarget = $safeTargets[[int]$target.Index]
         [void]$sb.AppendLine("")
-        [void]$sb.AppendLine("Monitor $($target.Index): $($target.Label)")
-        [void]$sb.AppendLine("  Friendly name: $($target.Name)")
-        [void]$sb.AppendLine("  Display device: $($target.DeviceName)")
+        [void]$sb.AppendLine("Monitor $($target.Index): $($safeTarget.Label)")
+        [void]$sb.AppendLine("  Friendly name: $($safeTarget.Name)")
+        [void]$sb.AppendLine("  Display device: $($safeTarget.DeviceName)")
         [void]$sb.AppendLine("  Resolution: $($target.Resolution)")
         [void]$sb.AppendLine("  Primary: $($target.Primary)")
-        [void]$sb.AppendLine("  Identity: $($target.IdentityKey) ($($target.IdentitySource))")
+        [void]$sb.AppendLine("  Identity: $($safeTarget.IdentityKey) ($($target.IdentitySource))")
         if (-not [string]::IsNullOrWhiteSpace([string]$target.PhysicalConnector)) { [void]$sb.AppendLine("  Physical connector: $($target.PhysicalConnector)") }
         if ([double]$target.PeakLuminanceNits -gt 0) { [void]$sb.AppendLine("  Peak luminance: $([Math]::Round([double]$target.PeakLuminanceNits, 1)) nits") }
-        if (-not [string]::IsNullOrWhiteSpace([string]$target.HardwareId)) { [void]$sb.AppendLine("  Hardware ID: $($target.HardwareId)") }
-        if (-not [string]::IsNullOrWhiteSpace([string]$target.DevicePath)) { [void]$sb.AppendLine("  Device path: $($target.DevicePath)") }
+        if (-not [string]::IsNullOrWhiteSpace([string]$target.HardwareId)) { [void]$sb.AppendLine("  Hardware ID: $($safeTarget.HardwareId)") }
+        if (-not [string]::IsNullOrWhiteSpace([string]$target.DevicePath)) { [void]$sb.AppendLine("  Device path: $($safeTarget.DevicePath)") }
         $edidParts = @()
         if ($target.Manufacturer) { $edidParts += "manufacturer=$($target.Manufacturer)" }
         if ($target.EdidModel) { $edidParts += "model=$($target.EdidModel)" }
-        if ($target.EdidSerial) { $edidParts += "serial=$($target.EdidSerial)" }
-        if ($target.EdidName) { $edidParts += "name=$($target.EdidName)" }
+        if ($target.EdidSerial) { $edidParts += "serial=$($safeTarget.EdidSerial)" }
+        if ($target.EdidName) { $edidParts += "name=$($safeTarget.EdidName)" }
         if ($edidParts.Count -gt 0) { [void]$sb.AppendLine("  EDID: $($edidParts -join "; ")") }
         [void]$sb.AppendLine("  Capabilities: $($target.CapabilityStatus), length=$($target.CapabilitiesLength), parsed codes=$(@($target.SupportedCodes).Count)")
         [void]$sb.AppendLine("  Parsed VCP list: $(Format-DdcReportCodeList -Codes $target.SupportedCodes)")
@@ -2139,28 +2237,203 @@ function New-DdcCompatibilityReport {
         [void]$sb.AppendLine("- None recorded in this session")
     } else {
         foreach ($entry in @($RecentErrors)) {
-            [void]$sb.AppendLine("- $($entry.Timestamp.ToString("yyyy-MM-dd HH:mm:ss")) | $($entry.Operation) | monitor=$($entry.Monitor) | VCP=0x$("{0:X2}" -f [int]$entry.Code) | Win32=$($entry.LastError) | attempts=$($entry.Attempts)")
+            $errorMonitor = [string]$entry.Monitor
+            if (-not $IncludeRawNames) {
+                $matchingTarget = @($Targets | Where-Object { [string]$_.Label -eq $errorMonitor -or [string]$_.Name -eq $errorMonitor } | Select-Object -First 1)
+                $errorMonitor = if ($matchingTarget.Count -gt 0) { [string]$safeTargets[[int]$matchingTarget[0].Index].Label } else { "[monitor-name-redacted]" }
+            }
+            [void]$sb.AppendLine("- $($entry.Timestamp.ToString("yyyy-MM-dd HH:mm:ss")) | $($entry.Operation) | monitor=$errorMonitor | VCP=0x$("{0:X2}" -f [int]$entry.Code) | Win32=$($entry.LastError) | attempts=$($entry.Attempts)")
         }
     }
     [void]$sb.AppendLine("")
-    [void]$sb.AppendLine("Privacy: local script, profile, and report file paths are omitted.")
-    return $sb.ToString().TrimEnd()
+    [void]$sb.AppendLine("Privacy: $(Get-DdcReportPrivacyDescription -IncludeRawMonitorIdentifiers:$IncludeRawMonitorIdentifiers -IncludeRawNames:$IncludeRawNames)")
+    $sensitiveValues = Get-DdcSupportSensitiveValues -Targets $Targets -DisplayPaths $script:DisplayPathInventory -IncludeRawMonitorIdentifiers:$IncludeRawMonitorIdentifiers -IncludeRawNames:$IncludeRawNames
+    return (Protect-DdcSupportContent -Text $sb.ToString().TrimEnd() -SensitiveValues $sensitiveValues)
 }
 
-function Save-DdcCompatibilityReport {
+function New-DdcCompatibilityReportJson {
+    param(
+        [object[]]$Targets,
+        [object[]]$ProbeResults,
+        [object[]]$RecentErrors,
+        [switch]$IncludeRawMonitorIdentifiers,
+        [switch]$IncludeRawNames,
+        $SystemInfo = $null
+    )
+    $system = if ($null -ne $SystemInfo) { $SystemInfo } else { Get-DdcReportSystemInfo }
+    $safeTargets = @{}
+    $monitorData = @()
+    $ordinal = 0
+    foreach ($target in @($Targets | Sort-Object -Property Index)) {
+        $ordinal++
+        $safe = Get-DdcReportSafeTarget -Target $target -Ordinal $ordinal -IncludeRawMonitorIdentifiers:$IncludeRawMonitorIdentifiers -IncludeRawNames:$IncludeRawNames
+        $safeTargets[[int]$target.Index] = $safe
+        $monitorData += [ordered]@{
+            Index = [int]$target.Index
+            Label = [string]$safe.Label
+            FriendlyName = [string]$safe.Name
+            DisplayDevice = [string]$safe.DeviceName
+            DevicePath = [string]$safe.DevicePath
+            HardwareId = [string]$safe.HardwareId
+            Identity = [string]$safe.IdentityKey
+            IdentitySource = [string]$target.IdentitySource
+            Manufacturer = [string]$target.Manufacturer
+            Model = [string]$target.EdidModel
+            Serial = [string]$safe.EdidSerial
+            EdidName = [string]$safe.EdidName
+            PhysicalConnector = [string]$target.PhysicalConnector
+            Resolution = [string]$target.Resolution
+            Primary = [bool]$target.Primary
+            CapabilityStatus = [string]$target.CapabilityStatus
+            SupportedVcpCodes = @($target.SupportedCodes | ForEach-Object { [int]$_ })
+            RecoveryState = [string]$target.RecoveryState
+            Probes = @($ProbeResults | Where-Object { [int]$_.TargetIndex -eq [int]$target.Index } | Sort-Object ProbeIndex | ForEach-Object {
+                [ordered]@{
+                    Code = [int]$_.Code
+                    Success = [bool]$_.Success
+                    Current = [uint32]$_.Current
+                    Maximum = [uint32]$_.Maximum
+                    Type = [uint32]$_.Type
+                    LastError = [int]$_.LastError
+                    Attempts = [int]$_.Attempts
+                }
+            })
+        }
+    }
+    $errorData = @($RecentErrors | ForEach-Object {
+        $monitor = [string]$_.Monitor
+        if (-not $IncludeRawNames) {
+            $matchingTarget = @($Targets | Where-Object { [string]$_.Label -eq $monitor -or [string]$_.Name -eq $monitor } | Select-Object -First 1)
+            $monitor = if ($matchingTarget.Count -gt 0) { [string]$safeTargets[[int]$matchingTarget[0].Index].Label } else { "[monitor-name-redacted]" }
+        }
+        [ordered]@{
+            Timestamp = ([datetime]$_.Timestamp).ToString("o")
+            Operation = [string]$_.Operation
+            Monitor = $monitor
+            Code = [int]$_.Code
+            LastError = [int]$_.LastError
+            Attempts = [int]$_.Attempts
+        }
+    })
+    $document = [ordered]@{
+        SchemaVersion = 1
+        AppName = $script:AppName
+        AppVersion = $script:AppVersion
+        GeneratedAt = (Get-Date).ToString("o")
+        Privacy = [ordered]@{
+            RawMonitorIdentifiersIncluded = [bool]$IncludeRawMonitorIdentifiers
+            RawNamesIncluded = [bool]$IncludeRawNames
+            Description = Get-DdcReportPrivacyDescription -IncludeRawMonitorIdentifiers:$IncludeRawMonitorIdentifiers -IncludeRawNames:$IncludeRawNames
+        }
+        System = [ordered]@{ OS = [string]$system.OS; PowerShell = [string]$system.PowerShell; GPUs = @($system.GPUs) }
+        Monitors = $monitorData
+        RecentDdcErrors = $errorData
+    }
+    $json = $document | ConvertTo-Json -Depth 10
+    $sensitiveValues = Get-DdcSupportSensitiveValues -Targets $Targets -DisplayPaths $script:DisplayPathInventory -IncludeRawMonitorIdentifiers:$IncludeRawMonitorIdentifiers -IncludeRawNames:$IncludeRawNames
+    return (Protect-DdcSupportContent -Text $json -SensitiveValues $sensitiveValues)
+}
+
+function Get-DdcSupportContentHash {
     param([string]$Text)
-    if ([string]::IsNullOrWhiteSpace($Text)) { return "" }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
+        return (($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString("x2") }) -join "")
+    } finally {
+        $sha.Dispose()
+    }
+}
+
+function Remove-OldDdcSupportBundles {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Prunes only generated support ZIP files in the exact diagnostics directory to enforce documented retention.')]
+    param(
+        [string]$Directory,
+        [ValidateRange(1, 100)][int]$MaxCount = 10,
+        [ValidateRange(1048576, 104857600)][long]$MaxTotalBytes = 20971520
+    )
+    if (-not (Test-Path -LiteralPath $Directory -PathType Container)) { return 0 }
+    $root = [System.IO.Path]::GetFullPath($Directory).TrimEnd([char[]]@('\', '/'))
+    $keptCount = 0
+    [long]$keptBytes = 0
+    $removed = 0
+    foreach ($file in @(Get-ChildItem -LiteralPath $root -File -Filter "monitorcontrol-support-*.zip" | Sort-Object LastWriteTimeUtc, Name -Descending)) {
+        $sameDirectory = [string]::Equals(
+            [System.IO.Path]::GetFullPath($file.DirectoryName).TrimEnd([char[]]@('\', '/')),
+            $root,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
+        if (($file.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or -not $sameDirectory) { continue }
+        $keep = ($keptCount -lt $MaxCount -and ($keptBytes + [long]$file.Length) -le $MaxTotalBytes)
+        if ($keep) {
+            $keptCount++
+            $keptBytes += [long]$file.Length
+        } else {
+            Remove-Item -LiteralPath $file.FullName -Force
+            $removed++
+        }
+    }
+    return $removed
+}
+
+function Save-DdcSupportBundle {
+    param(
+        [string]$Text,
+        [string]$Json,
+        [switch]$IncludeRawMonitorIdentifiers,
+        [switch]$IncludeRawNames
+    )
+    if ([string]::IsNullOrWhiteSpace($Text) -or [string]::IsNullOrWhiteSpace($Json)) { return "" }
     $dir = Join-Path $script:DefaultProfilesPath "diagnostics"
     try {
         if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-        $leaf = "ddc-compatibility-report-$((Get-Date).ToString("yyyyMMdd-HHmmss")).txt"
+        $dir = (Resolve-Path -LiteralPath $dir).Path
+        $leaf = "monitorcontrol-support-$((Get-Date).ToString("yyyyMMdd-HHmmss-fff")).zip"
         $path = Join-Path $dir $leaf
-        $encoding = New-Object System.Text.UTF8Encoding($false)
-        [System.IO.File]::WriteAllText($path, ($Text + [Environment]::NewLine), $encoding)
+        $manifest = [ordered]@{
+            SchemaVersion = 1
+            AppName = $script:AppName
+            AppVersion = $script:AppVersion
+            GeneratedAt = (Get-Date).ToString("o")
+            Privacy = Get-DdcReportPrivacyDescription -IncludeRawMonitorIdentifiers:$IncludeRawMonitorIdentifiers -IncludeRawNames:$IncludeRawNames
+            Files = @(
+                [ordered]@{ Name = "report.txt"; Sha256 = Get-DdcSupportContentHash -Text ($Text + "`r`n") },
+                [ordered]@{ Name = "report.json"; Sha256 = Get-DdcSupportContentHash -Text ($Json + "`r`n") }
+            )
+        }
+        $entries = [ordered]@{
+            "manifest.json" = (($manifest | ConvertTo-Json -Depth 5) + "`r`n")
+            "report.json" = ($Json + "`r`n")
+            "report.txt" = ($Text + "`r`n")
+        }
+        Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+        $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        try {
+            $archive = New-Object System.IO.Compression.ZipArchive($stream, [System.IO.Compression.ZipArchiveMode]::Create, $false)
+            try {
+                foreach ($name in @($entries.Keys | Sort-Object)) {
+                    $entry = $archive.CreateEntry($name, [System.IO.Compression.CompressionLevel]::Optimal)
+                    $writer = New-Object System.IO.StreamWriter($entry.Open(), (New-Object System.Text.UTF8Encoding($false)))
+                    try { $writer.Write([string]$entries[$name]) } finally { $writer.Dispose() }
+                }
+            } finally { $archive.Dispose() }
+        } finally { $stream.Dispose() }
+        Remove-OldDdcSupportBundles -Directory $dir | Out-Null
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return "" }
         return $path
     } catch {
         return ""
     }
+}
+
+function Save-DdcCompatibilityReport {
+    param(
+        [string]$Text,
+        [string]$Json,
+        [switch]$IncludeRawMonitorIdentifiers,
+        [switch]$IncludeRawNames
+    )
+    return (Save-DdcSupportBundle -Text $Text -Json $Json -IncludeRawMonitorIdentifiers:$IncludeRawMonitorIdentifiers -IncludeRawNames:$IncludeRawNames)
 }
 
 function Stop-DdcReportWorker {

@@ -17,6 +17,8 @@ function Set-VcpWorkerResultText {
 function Set-DdcReportWorkerUiIdle {
     if ($ddcReportGenerateBtn) { $ddcReportGenerateBtn.IsEnabled = $true }
     if ($ddcReportCopyBtn) { $ddcReportCopyBtn.IsEnabled = $true }
+    if ($ddcReportIncludeIdentifiersCheckbox) { $ddcReportIncludeIdentifiersCheckbox.IsEnabled = $true }
+    if ($ddcReportIncludeNamesCheckbox) { $ddcReportIncludeNamesCheckbox.IsEnabled = $true }
 }
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, UIAutomationTypes, UIAutomationProvider, System.Windows.Forms, System.Drawing, System.IO.Compression, System.IO.Compression.FileSystem, System.Management
@@ -939,7 +941,10 @@ $script:DdcReportWorkerLastOutputCount = 0
 $script:DdcReportTargets = @()
 $script:DdcReportWorkerGeneration = -1
 $script:DdcReportLastText = ""
+$script:DdcReportLastJson = ""
 $script:DdcReportOutputPath = ""
+$script:DdcReportIncludeRawMonitorIdentifiers = $false
+$script:DdcReportIncludeRawNames = $false
 $script:AutomationBridgeSettingsPath = ""
 $script:AutomationBridgeEntropyPath = ""
 $script:AutomationBridgeWriteLogPath = ""
@@ -3012,11 +3017,14 @@ function Update-DdcReportWorkerOutput {
         }
     }
     if ($timingDirty) { Save-DdcTimingSettings | Out-Null }
-    $report = New-DdcCompatibilityReport -Targets $script:DdcReportTargets -ProbeResults $probeResults -RecentErrors (Get-DdcReportRecentErrors)
+    $recentErrors = Get-DdcReportRecentErrors
+    $report = New-DdcCompatibilityReport -Targets $script:DdcReportTargets -ProbeResults $probeResults -RecentErrors $recentErrors -IncludeRawMonitorIdentifiers:$script:DdcReportIncludeRawMonitorIdentifiers -IncludeRawNames:$script:DdcReportIncludeRawNames
+    $reportJson = New-DdcCompatibilityReportJson -Targets $script:DdcReportTargets -ProbeResults $probeResults -RecentErrors $recentErrors -IncludeRawMonitorIdentifiers:$script:DdcReportIncludeRawMonitorIdentifiers -IncludeRawNames:$script:DdcReportIncludeRawNames
     $script:DdcReportLastText = $report
+    $script:DdcReportLastJson = $reportJson
     $ddcReportBox.Text = $report
     $copied = Copy-DdcCompatibilityReport -Text $report
-    $path = Save-DdcCompatibilityReport -Text $report
+    $path = Save-DdcCompatibilityReport -Text $report -Json $reportJson -IncludeRawMonitorIdentifiers:$script:DdcReportIncludeRawMonitorIdentifiers -IncludeRawNames:$script:DdcReportIncludeRawNames
     $script:DdcReportOutputPath = $path
     $leaf = if ($path) { Split-Path -Path $path -Leaf } else { "" }
     if ($copied -and $leaf) {
@@ -3044,11 +3052,15 @@ function Start-DdcReportWorker {
         return
     }
     $script:DdcReportTargets = $targets
+    $script:DdcReportIncludeRawMonitorIdentifiers = [bool]$ddcReportIncludeIdentifiersCheckbox.IsChecked
+    $script:DdcReportIncludeRawNames = [bool]$ddcReportIncludeNamesCheckbox.IsChecked
     $total = 0
     foreach ($target in @($targets)) { $total += @($target.ProbeCodes).Count }
     $ddcReportBox.Text = "Generating DDC compatibility report... 0/$total probes"
     if ($ddcReportGenerateBtn) { $ddcReportGenerateBtn.IsEnabled = $false }
     if ($ddcReportCopyBtn) { $ddcReportCopyBtn.IsEnabled = $false }
+    if ($ddcReportIncludeIdentifiersCheckbox) { $ddcReportIncludeIdentifiersCheckbox.IsEnabled = $false }
+    if ($ddcReportIncludeNamesCheckbox) { $ddcReportIncludeNamesCheckbox.IsEnabled = $false }
     $workerScript = {
         param([object[]]$Targets, [int]$ReadRetries)
         foreach ($target in $Targets) {
@@ -4646,12 +4658,19 @@ try {
                     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                         <Border Style="{StaticResource PageCard}">
                             <Grid>
-                                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="14"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="10"/><RowDefinition Height="Auto"/><RowDefinition Height="10"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                                 <Grid>
-                                    <StackPanel><TextBlock Text="DDC compatibility report" Style="{StaticResource SectionTitle}"/><TextBlock Text="Build a portable diagnostic snapshot for the selected monitor." Foreground="{DynamicResource MutedTextBrush}" Margin="0,3,0,0"/></StackPanel>
+                                    <StackPanel><TextBlock Text="DDC support bundle" Style="{StaticResource SectionTitle}"/><TextBlock Text="The preview below is the exact human-readable report saved with a structured JSON copy." Foreground="{DynamicResource MutedTextBrush}" Margin="0,3,0,0"/></StackPanel>
                                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center"><Button x:Name="DdcReportGenerateBtn" Content="Build report" Style="{StaticResource GreenBtn}" AutomationProperties.Name="Build DDC compatibility report"/><Button x:Name="DdcReportCopyBtn" Content="Copy report" Style="{StaticResource Btn}" Margin="8,0,0,0"/></StackPanel>
                                 </Grid>
-                                <TextBox x:Name="DdcReportBox" Grid.Row="2" IsReadOnly="True" TextWrapping="Wrap" Height="420" VerticalScrollBarVisibility="Auto" Background="{DynamicResource ControlBrush}" FontFamily="Consolas" FontSize="12" AcceptsReturn="True"/>
+                                <StackPanel Grid.Row="2">
+                                    <TextBlock Text="Identifiers and local names are pseudonymized by default. Addresses and credential-like values are always redacted." Foreground="{DynamicResource MutedTextBrush}" TextWrapping="Wrap"/>
+                                    <WrapPanel Margin="0,7,0,0">
+                                        <CheckBox x:Name="DdcReportIncludeIdentifiersCheckbox" Content="Include raw monitor identifiers" Margin="0,0,18,0" AutomationProperties.HelpText="Includes monitor serials, hardware IDs, stable identities, and device paths in this bundle only."/>
+                                        <CheckBox x:Name="DdcReportIncludeNamesCheckbox" Content="Include raw monitor names" AutomationProperties.HelpText="Includes friendly, custom, and EDID monitor names in this bundle only."/>
+                                    </WrapPanel>
+                                </StackPanel>
+                                <TextBox x:Name="DdcReportBox" Grid.Row="4" IsReadOnly="True" TextWrapping="Wrap" Height="360" VerticalScrollBarVisibility="Auto" Background="{DynamicResource ControlBrush}" FontFamily="Consolas" FontSize="12" AcceptsReturn="True"/>
                             </Grid>
                         </Border>
                     </ScrollViewer>
@@ -4797,6 +4816,7 @@ $automationBridgeBindBox = $window.FindName("AutomationBridgeBindBox"); $automat
 $automationBridgeKeyBox = $window.FindName("AutomationBridgeKeyBox"); $automationBridgeSaveBtn = $window.FindName("AutomationBridgeSaveBtn")
 $runAtLoginEnabledCheckbox = $window.FindName("RunAtLoginEnabledCheckbox"); $runAtLoginStatusText = $window.FindName("RunAtLoginStatusText")
 $ddcReportGenerateBtn = $window.FindName("DdcReportGenerateBtn"); $ddcReportCopyBtn = $window.FindName("DdcReportCopyBtn")
+$ddcReportIncludeIdentifiersCheckbox = $window.FindName("DdcReportIncludeIdentifiersCheckbox"); $ddcReportIncludeNamesCheckbox = $window.FindName("DdcReportIncludeNamesCheckbox")
 $statusText = $window.FindName("StatusText"); $autoModeText = $window.FindName("AutoModeText")
 $transactionProgressPanel = $window.FindName("TransactionProgressPanel"); $transactionProgressText = $window.FindName("TransactionProgressText")
 $transactionProgressBar = $window.FindName("TransactionProgressBar"); $transactionCancelBtn = $window.FindName("TransactionCancelBtn")

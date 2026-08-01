@@ -63,7 +63,7 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 - **Portable Release ZIP** — Local release builds package the script, icon, README, LICENSE, signature status, and SHA256 checksums
 - **Verified Risky Writes** — Power, input, reset, color preset, OSD lock, OSD language, auxiliary power, PiP/PbP, and arbitrary commands require a per-monitor identity unlock plus an exact code/value confirmation. The confirmation names the specific consequence for that code, and readback reports verified, mismatched, or unavailable outcomes
 - **Async Capabilities Reads** — Monitor `vcp(...)` capabilities load from a background worker after enumeration, keeping refresh responsive
-- **DDC Compatibility Report** — Builds a copyable diagnostics report with monitor identities, capability status, common VCP probe results, per-monitor liveness history, OS/GPU driver data, and recent DDC errors
+- **Privacy-Redacted DDC Support Bundle** — Previews the exact human-readable report and saves it with a schema-versioned JSON copy plus manifest. Monitor identifiers and local names are pseudonymized by default; raw monitor identifiers and names require separate per-build selections, while user/machine paths, addresses, and credential-like tokens are always redacted
 - **Panel Metadata** — When Windows DisplayManager is available, the compatibility report includes the physical connector and panel-reported peak luminance alongside registry-free EDID data
 - **No-Hardware Regression Tests** — Pester tests cover schedule rollover, idle tick wraparound, profile transactions, hostile bundles, capability safety, risky-write rollback, bridge framing/auth, and VCP input parsing
 - **Async VCP Reads** — VCP Explorer query and scan operations run in a background worker with live scan progress
@@ -539,6 +539,7 @@ The full breakdown - every display path, its classification, and whether it answ
 - Remembered brightness for restore: `%APPDATA%\MonitorControlPro\display-restore.json` (off by default)
 - Automation bridge settings: `%APPDATA%\MonitorControlPro\automation-bridge.json` (API key protected with current-user DPAPI) and `%APPDATA%\MonitorControlPro\automation-bridge.entropy` (separate per-install entropy)
 - Automation bridge write log: `%APPDATA%\MonitorControlPro\automation-bridge-writes.jsonl` (redacted and size-rotated)
+- DDC support bundles: `%APPDATA%\MonitorControlPro\diagnostics\monitorcontrol-support-*.zip` (newest 10, bounded to 20 MiB total)
 - Risky VCP identity unlocks: `%APPDATA%\MonitorControlPro\vcp-write-safety.json`
 - No registry modifications
 - No admin rights required
