@@ -231,6 +231,7 @@ otherwise load or execute from the folder it was extracted into, so both are **o
 - Color preset is gated because some monitors keep the value after this app closes and need a factory reset to undo it, and OSD/button control is gated because it can disable the monitor's own buttons, which is the only way to recover a display that stops responding to software
 - Every direct command shows the exact VCP code, value, and target before writing. Canceling makes no hardware change
 - The app reads each supported value back and distinguishes **verified**, **mismatched**, and **readback unavailable** outcomes
+- A direct command that fails or reads back mismatched restores the readable prior value, and the status line reports whether that restore was complete or partial
 - Profile loads snapshot every readable prior DDC/WMI value and restore those values in reverse order when a write fails or reads back incorrectly
 - Automatic compatibility reports omit risky VCP codes; VCP Explorer reads remain explicitly user initiated
 

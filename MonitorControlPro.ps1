@@ -3144,8 +3144,30 @@ function Invoke-ManualVcpWrite {
         [uint32]$Value,
         [string]$ActionLabel = "Direct VCP write",
         [switch]$AllMonitors,
-        [switch]$Arbitrary
+        [switch]$Arbitrary,
+        [scriptblock]$ConfirmWrite,
+        [scriptblock]$Transaction
     )
+    if ($null -eq $ConfirmWrite) {
+        $ConfirmWrite = {
+            param([string]$Message)
+            return ([System.Windows.MessageBox]::Show(
+                $Message,
+                "Confirm exact VCP write",
+                [System.Windows.MessageBoxButton]::YesNo,
+                [System.Windows.MessageBoxImage]::Warning
+            ) -eq [System.Windows.MessageBoxResult]::Yes)
+        }
+    }
+    if ($null -eq $Transaction) {
+        $Transaction = {
+            param([object[]]$Operations)
+            # Manual writes get the same recovery guarantee as profile and automation writes:
+            # a failed or mismatched command restores the readable prior value instead of
+            # leaving the monitor in a state the user did not ask for.
+            return (Invoke-VerifiedVcpTransaction -Operations $Operations -RollbackOnFailure)
+        }
+    }
     $monitors = if ($AllMonitors) {
         @($script:PhysicalMonitors | Where-Object { $_.Handle -ne [IntPtr]::Zero })
     } elseif ($script:CurrentMonitorIndex -ge 0 -and $script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) {
@@ -3170,13 +3192,7 @@ function Invoke-ManualVcpWrite {
     }
     $operations = @($monitors | ForEach-Object { Get-VcpWriteOperation -Monitor $_ -Code $Code -Value $Value })
     $confirmation = Format-VcpWriteConfirmation -Operations $operations -ActionLabel $ActionLabel
-    $choice = [System.Windows.MessageBox]::Show(
-        $confirmation,
-        "Confirm exact VCP write",
-        [System.Windows.MessageBoxButton]::YesNo,
-        [System.Windows.MessageBoxImage]::Warning
-    )
-    if ($choice -ne [System.Windows.MessageBoxResult]::Yes) {
+    if (-not (& $ConfirmWrite $confirmation)) {
         Update-Status "VCP write canceled"
         return [PSCustomObject]@{ Success = $false; Outcome = "Canceled"; Results = @() }
     }
@@ -3184,13 +3200,14 @@ function Invoke-ManualVcpWrite {
         Update-Status "VCP write queue is busy; try again"
         return [PSCustomObject]@{ Success = $false; Outcome = "Busy"; Results = @() }
     }
-    $result = Invoke-VerifiedVcpTransaction -Operations $operations
+    $result = & $Transaction $operations
     $codeText = "0x{0:X2} = {1}" -f $Code, $Value
+    $rollback = [string]$result.Rollback
     switch ($result.Outcome) {
         "Verified" { Update-Status "Verified VCP $codeText" }
         "Unverified" { Update-Status "VCP $codeText applied; readback unavailable" }
-        "Mismatched" { Update-Status "VCP $codeText mismatched its readback" }
-        default { Update-Status "VCP $codeText failed" }
+        "Mismatched" { Update-Status "VCP $codeText mismatched its readback; restore: $rollback" }
+        default { Update-Status "VCP $codeText failed; restore: $rollback" }
     }
     return $result
 }
