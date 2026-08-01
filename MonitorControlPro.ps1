@@ -109,6 +109,12 @@ public class MonitorAPI
         public uint Value;
         public string Key;
         public string MonitorName;
+        public bool Force;
+    }
+
+    private class CachedVcpValue {
+        public uint Value;
+        public DateTime ObservedUtc;
     }
 
     public class VcpWriteResult {
@@ -127,7 +133,8 @@ public class MonitorAPI
     // and updated by successful writes. Monitors commonly store these in EEPROM with a limited
     // write endurance, so an unchanged value must not be pushed to the hardware again.
     private static readonly object VcpValueCacheLock = new object();
-    private static readonly Dictionary<string, uint> VcpValueCache = new Dictionary<string, uint>();
+    private static readonly Dictionary<string, CachedVcpValue> VcpValueCache = new Dictionary<string, CachedVcpValue>();
+    public const int VcpValueCacheTtlMilliseconds = 300000;
     private static long SuppressedVcpWrites = 0;
 
     private static string VcpCacheKey(IntPtr hMonitor, byte bVCPCode)
@@ -137,8 +144,19 @@ public class MonitorAPI
 
     public static void RecordVcpValue(IntPtr hMonitor, byte bVCPCode, uint value)
     {
+        RecordVcpValueAt(hMonitor, bVCPCode, value, DateTime.UtcNow);
+    }
+
+    public static void RecordVcpValueAt(IntPtr hMonitor, byte bVCPCode, uint value, DateTime observedUtc)
+    {
         if (hMonitor == IntPtr.Zero) { return; }
-        lock (VcpValueCacheLock) { VcpValueCache[VcpCacheKey(hMonitor, bVCPCode)] = value; }
+        lock (VcpValueCacheLock)
+        {
+            VcpValueCache[VcpCacheKey(hMonitor, bVCPCode)] = new CachedVcpValue {
+                Value = value,
+                ObservedUtc = observedUtc.ToUniversalTime()
+            };
+        }
     }
 
     public static void ForgetVcpValue(IntPtr hMonitor, byte bVCPCode)
@@ -151,7 +169,19 @@ public class MonitorAPI
     {
         value = 0;
         if (hMonitor == IntPtr.Zero) { return false; }
-        lock (VcpValueCacheLock) { return VcpValueCache.TryGetValue(VcpCacheKey(hMonitor, bVCPCode), out value); }
+        lock (VcpValueCacheLock)
+        {
+            string key = VcpCacheKey(hMonitor, bVCPCode);
+            CachedVcpValue cached;
+            if (!VcpValueCache.TryGetValue(key, out cached)) { return false; }
+            if ((DateTime.UtcNow - cached.ObservedUtc).TotalMilliseconds > VcpValueCacheTtlMilliseconds)
+            {
+                VcpValueCache.Remove(key);
+                return false;
+            }
+            value = cached.Value;
+            return true;
+        }
     }
 
     // Handles are destroyed and reissued on every re-enumeration, so a stale entry could be
@@ -159,6 +189,21 @@ public class MonitorAPI
     public static void InvalidateVcpValueCache()
     {
         lock (VcpValueCacheLock) { VcpValueCache.Clear(); }
+    }
+
+    public static void InvalidateVcpValueCacheForHandle(IntPtr hMonitor)
+    {
+        if (hMonitor == IntPtr.Zero) { return; }
+        string prefix = hMonitor.ToInt64().ToString("X") + ":";
+        lock (VcpValueCacheLock)
+        {
+            List<string> matches = new List<string>();
+            foreach (string key in VcpValueCache.Keys)
+            {
+                if (key.StartsWith(prefix, StringComparison.Ordinal)) { matches.Add(key); }
+            }
+            foreach (string key in matches) { VcpValueCache.Remove(key); }
+        }
     }
 
     public static long GetSuppressedVcpWriteCount()
@@ -200,7 +245,7 @@ public class MonitorAPI
         string key = String.IsNullOrEmpty(coalesceKey) ? hMonitor.ToInt64().ToString("X") + ":" + bVCPCode.ToString("X2") : coalesceKey;
         lock (VcpWriteQueueLock)
         {
-            QueuedVcpWrites[key] = new QueuedVcpWrite { Handle = hMonitor, Code = bVCPCode, Value = dwNewValue, Key = key, MonitorName = monitorName };
+            QueuedVcpWrites[key] = new QueuedVcpWrite { Handle = hMonitor, Code = bVCPCode, Value = dwNewValue, Key = key, MonitorName = monitorName, Force = force };
             if (!VcpWriteWorkerActive)
             {
                 VcpWriteWorkerActive = true;
@@ -307,6 +352,26 @@ public class MonitorAPI
             }
             foreach (QueuedVcpWrite write in batch)
             {
+                if (!write.Force)
+                {
+                    uint known;
+                    bool suppress = TryGetVcpValue(write.Handle, write.Code, out known) && known == write.Value;
+                    if (!suppress && !TryGetVcpValue(write.Handle, write.Code, out known))
+                    {
+                        uint valueType = 0;
+                        uint currentValue = 0;
+                        uint maximumValue = 0;
+                        int readError = 0;
+                        int readAttempts = 0;
+                        suppress = ReadVCPWithRetry(write.Handle, write.Code, 0, out valueType, out currentValue, out maximumValue, out readError, out readAttempts) && currentValue == write.Value;
+                    }
+                    if (suppress)
+                    {
+                        Interlocked.Increment(ref SuppressedVcpWrites);
+                        Thread.Sleep(50);
+                        continue;
+                    }
+                }
                 int lastError = 0;
                 int attempts = 0;
                 bool success = false;
@@ -1108,6 +1173,7 @@ $script:UiStrings = @{
     "A11y.DdcTimingAdaptive" = "Adaptive DDC timing"
     "A11y.DdcTimingManual" = "Manual DDC timing"
     "A11y.DdcTimingReset" = "Reset DDC timing calibration for this monitor"
+    "A11y.DdcValuesReread" = "Re-read selected monitor DDC values"
     "A11y.DdcTimingReadRetries" = "DDC read retry budget"
     "A11y.DdcTimingWriteRetries" = "DDC write retry budget"
     "A11y.DdcTimingCapabilityRetries" = "DDC capability retry budget"
@@ -2430,6 +2496,7 @@ function Initialize-LocalizationAndAccessibility {
     Set-AccessibleName -Control $ddcTimingAdaptiveRadio -Key "A11y.DdcTimingAdaptive"
     Set-AccessibleName -Control $ddcTimingManualRadio -Key "A11y.DdcTimingManual"
     Set-AccessibleName -Control $ddcTimingResetBtn -Key "A11y.DdcTimingReset"
+    Set-AccessibleName -Control $ddcValuesRereadBtn -Key "A11y.DdcValuesReread"
     Set-AccessibleName -Control $ddcTimingReadRetriesBox -Key "A11y.DdcTimingReadRetries"
     Set-AccessibleName -Control $ddcTimingWriteRetriesBox -Key "A11y.DdcTimingWriteRetries"
     Set-AccessibleName -Control $ddcTimingCapabilityRetriesBox -Key "A11y.DdcTimingCapabilityRetries"
@@ -2495,7 +2562,7 @@ function Initialize-LocalizationAndAccessibility {
         $idleDimEnabledCheckbox,$idleDimMinutesBox,$idleDimBrightnessBox,$idleDimRestoreCheckbox,$idleDimSaveBtn,
         $batteryProfileEnabledCheckbox,$batteryBrightnessBox,$acBrightnessBox,$batteryProfileSaveBtn,
         $displaySettingsBtn,$colorMgmtBtn,$gpuControlPanelBtn,$gammaRedSlider,$gammaGreenSlider,$gammaBlueSlider,$resetGammaBtn,$capabilitiesBox,
-        $capabilitiesClearCacheBtn,$ddcTimingAdaptiveRadio,$ddcTimingManualRadio,$ddcTimingReadRetriesBox,$ddcTimingWriteRetriesBox,$ddcTimingCapabilityRetriesBox,$ddcTimingResetBtn,$displayRestoreEnabledCheckbox,$cpuMonitorEnabledCheckbox,$presentMonEnabledCheckbox,$optionalHelperStatusBox,$capabilitiesDiscoveryEnabledCheckbox,$capabilitiesMaximumCompatibilityCheckbox,$capabilitiesExcludeCurrentBtn,$capabilitiesClearExclusionsBtn,$riskyVcpEnabledCheckbox,
+        $capabilitiesClearCacheBtn,$ddcTimingAdaptiveRadio,$ddcTimingManualRadio,$ddcTimingReadRetriesBox,$ddcTimingWriteRetriesBox,$ddcTimingCapabilityRetriesBox,$ddcTimingResetBtn,$ddcValuesRereadBtn,$displayRestoreEnabledCheckbox,$cpuMonitorEnabledCheckbox,$presentMonEnabledCheckbox,$optionalHelperStatusBox,$capabilitiesDiscoveryEnabledCheckbox,$capabilitiesMaximumCompatibilityCheckbox,$capabilitiesExcludeCurrentBtn,$capabilitiesClearExclusionsBtn,$riskyVcpEnabledCheckbox,
         $automationBridgeEnabledCheckbox,$automationBridgeBindBox,$automationBridgePortBox,$automationBridgeKeyBox,$automationBridgeSaveBtn,
         $ddcReportGenerateBtn,$ddcReportCopyBtn,$ddcReportBox
     )
@@ -3696,6 +3763,20 @@ function Get-SuppressedDdcWriteCount {
     try { return [int64][MonitorAPI]::GetSuppressedVcpWriteCount() } catch { return [int64]0 }
 }
 
+function Invoke-SelectedMonitorVcpReread {
+    param([scriptblock]$RefreshAction)
+    if ($script:CurrentMonitorIndex -lt 0 -or $script:CurrentMonitorIndex -ge $script:PhysicalMonitors.Count) { return $false }
+    $monitor = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
+    if ($null -eq $monitor -or $monitor.Handle -eq [IntPtr]::Zero) {
+        Update-Status "No DDC/CI values are available to re-read for the selected display"
+        return $false
+    }
+    [MonitorAPI]::InvalidateVcpValueCacheForHandle([IntPtr]$monitor.Handle)
+    Update-Status "Re-reading DDC/CI values from $(Get-MonitorDisplayLabel -Monitor $monitor)..."
+    if ($null -eq $RefreshAction) { Load-MonitorSettings } else { & $RefreshAction }
+    return $true
+}
+
 function Resolve-VcpWriteValueForMonitor {
     param($Monitor, [int]$Code, [uint32]$Value, [switch]$Percent)
     if (-not $Percent -or -not (Test-VcpCodeIsScaled -Code $Code)) { return [uint32]$Value }
@@ -3704,7 +3785,7 @@ function Resolve-VcpWriteValueForMonitor {
 }
 
 function Set-VCPValueWithSync {
-    param([byte]$VCPCode, [uint32]$Value, [switch]$Force, [switch]$Percent)
+    param([byte]$VCPCode, [uint32]$Value, [switch]$Force, [switch]$Percent, [switch]$UserInitiated)
     if (Test-VcpWriteRequiresSafetyConsent -Code ([int]$VCPCode)) {
         if (Get-Command Update-Status -ErrorAction SilentlyContinue) {
             Update-Status "Risky VCP 0x$("{0:X2}" -f $VCPCode) requires the verified manual or consented automation path"
@@ -3724,13 +3805,13 @@ function Set-VCPValueWithSync {
         for ($i = 0; $i -lt $script:PhysicalMonitors.Count; $i++) {
             $mon = $script:PhysicalMonitors[$i]
             $target = Resolve-VcpWriteValueForMonitor -Monitor $mon -Code $code -Value $Value -Percent:$Percent
-            if (Queue-VCPValue -Handle $mon.Handle -VCPCode $VCPCode -Value $target -Key "$i`:0x$("{0:X2}" -f $VCPCode)" -MonitorName $mon.Name) { $queued++ }
+            if (Queue-VCPValue -Handle $mon.Handle -VCPCode $VCPCode -Value $target -Key "$i`:0x$("{0:X2}" -f $VCPCode)" -MonitorName $mon.Name -ForceWrite:$UserInitiated) { $queued++ }
         }
         if ($VCPCode -eq [MonitorAPI]::VCP_BRIGHTNESS -and $script:WmiBrightnessAvailable) { Set-WmiBrightness -Value $wmiPercent | Out-Null }
     } else {
         $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
         $target = Resolve-VcpWriteValueForMonitor -Monitor $mon -Code $code -Value $Value -Percent:$Percent
-        if (Queue-VCPValue -Handle $mon.Handle -VCPCode $VCPCode -Value $target -Key "$script:CurrentMonitorIndex`:0x$("{0:X2}" -f $VCPCode)" -MonitorName $mon.Name) { $queued++ }
+        if (Queue-VCPValue -Handle $mon.Handle -VCPCode $VCPCode -Value $target -Key "$script:CurrentMonitorIndex`:0x$("{0:X2}" -f $VCPCode)" -MonitorName $mon.Name -ForceWrite:$UserInitiated) { $queued++ }
         elseif ($VCPCode -eq [MonitorAPI]::VCP_BRIGHTNESS -and $script:WmiBrightnessAvailable) { Set-WmiBrightness -Value $wmiPercent | Out-Null }
     }
     if ($queued -gt 0) { return $true }
@@ -5788,7 +5869,7 @@ function Set-BrightnessSliderFromPercent {
 function Set-ScaledVcpFromSlider {
     param([byte]$VCPCode, [double]$RawValue)
     $percent = ConvertTo-VcpPercent -RawValue $RawValue -Maximum (Get-SelectedMonitorVcpMaximum -Code ([int]$VCPCode))
-    return Set-VCPValueWithSync -VCPCode $VCPCode -Value ([uint32]$percent) -Percent
+    return Set-VCPValueWithSync -VCPCode $VCPCode -Value ([uint32]$percent) -Percent -UserInitiated
 }
 
 function Apply-MonitorSettingResult {
@@ -7277,6 +7358,7 @@ try {
                         <RadioButton x:Name="DdcTimingAdaptiveRadio" GroupName="DdcTimingMode" Content="Adaptive" IsChecked="True" VerticalAlignment="Center"/>
                         <RadioButton x:Name="DdcTimingManualRadio" GroupName="DdcTimingMode" Content="Manual" Margin="16,0,0,0" VerticalAlignment="Center"/>
                         <Button x:Name="DdcTimingResetBtn" Content="Reset calibration" Style="{StaticResource Btn}" Padding="10,4" FontSize="12" Margin="20,0,0,0"/>
+                        <Button x:Name="DdcValuesRereadBtn" Content="Re-read values" Style="{StaticResource Btn}" Padding="10,4" FontSize="12" Margin="8,0,0,0"/>
                     </StackPanel>
                     <Grid Grid.Row="4">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="8"/><ColumnDefinition Width="60"/><ColumnDefinition Width="16"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="8"/><ColumnDefinition Width="60"/><ColumnDefinition Width="16"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="8"/><ColumnDefinition Width="60"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
@@ -7398,7 +7480,7 @@ $gammaGreenSlider = $window.FindName("GammaGreenSlider"); $gammaGreenValue = $wi
 $gammaBlueSlider = $window.FindName("GammaBlueSlider"); $gammaBlueValue = $window.FindName("GammaBlueValue")
 $capabilitiesBox = $window.FindName("CapabilitiesBox"); $ddcReportBox = $window.FindName("DdcReportBox")
 $ddcTimingAdaptiveRadio = $window.FindName("DdcTimingAdaptiveRadio"); $ddcTimingManualRadio = $window.FindName("DdcTimingManualRadio")
-$ddcTimingResetBtn = $window.FindName("DdcTimingResetBtn"); $ddcTimingEffectiveText = $window.FindName("DdcTimingEffectiveText")
+$ddcTimingResetBtn = $window.FindName("DdcTimingResetBtn"); $ddcValuesRereadBtn = $window.FindName("DdcValuesRereadBtn"); $ddcTimingEffectiveText = $window.FindName("DdcTimingEffectiveText")
 $ddcTimingWarningText = $window.FindName("DdcTimingWarningText")
 $ddcTimingReadRetriesBox = $window.FindName("DdcTimingReadRetriesBox"); $ddcTimingWriteRetriesBox = $window.FindName("DdcTimingWriteRetriesBox")
 $ddcTimingCapabilityRetriesBox = $window.FindName("DdcTimingCapabilityRetriesBox")
@@ -7492,6 +7574,11 @@ function Update-DdcTimingControls {
         $ddcTimingReadRetriesBox.IsEnabled = $true
         $ddcTimingWriteRetriesBox.IsEnabled = $true
         $ddcTimingCapabilityRetriesBox.IsEnabled = $true
+        if ($ddcValuesRereadBtn) {
+            $ddcValuesRereadBtn.IsEnabled = $script:CurrentMonitorIndex -ge 0 -and
+                $script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count -and
+                $script:PhysicalMonitors[$script:CurrentMonitorIndex].Handle -ne [IntPtr]::Zero
+        }
         $calibration = if ([string]::IsNullOrWhiteSpace([string]$timingProfile.CalibratedAt)) { "not calibrated yet" } else { "calibrated $($timingProfile.CalibratedAt)" }
         $skipped = @($timingProfile.UnsupportedCodes)
         $skippedText = if ($skipped.Count -eq 0) { "no codes skipped" } else {
@@ -10572,21 +10659,21 @@ $greenSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$g
 $blueSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$blueSlider.Value; $blueValue.Text = $v; Set-ScaledVcpFromSlider -VCPCode ([MonitorAPI]::VCP_BLUE_GAIN) -RawValue $v | Out-Null })
 $volumeSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$volumeSlider.Value; $volumeValue.Text = $v; Set-ScaledVcpFromSlider -VCPCode ([MonitorAPI]::VCP_VOLUME) -RawValue $v | Out-Null })
 $sharpnessSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$sharpnessSlider.Value; $sharpnessValue.Text = $v; Set-ScaledVcpFromSlider -VCPCode ([MonitorAPI]::VCP_SHARPNESS) -RawValue $v | Out-Null })
-$muteCheckbox.Add_Checked({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_MUTE) -Value 1 }); $muteCheckbox.Add_Unchecked({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_MUTE) -Value 2 })
+$muteCheckbox.Add_Checked({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_MUTE) -Value 1 -UserInitiated }); $muteCheckbox.Add_Unchecked({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_MUTE) -Value 2 -UserInitiated })
 
 $colorTempWarm.Add_Click({ Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_COLOR_PRESET) -Value ([MonitorAPI]::COLOR_PRESET_5000K) -ActionLabel "Set color temperature to 5000K (Warm)" | Out-Null })
 $colorTemp6500.Add_Click({ Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_COLOR_PRESET) -Value ([MonitorAPI]::COLOR_PRESET_6500K) -ActionLabel "Set color temperature to 6500K" | Out-Null })
 $colorTempCool.Add_Click({ Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_COLOR_PRESET) -Value ([MonitorAPI]::COLOR_PRESET_9300K) -ActionLabel "Set color temperature to 9300K (Cool)" | Out-Null })
 $colorTempSRGB.Add_Click({ Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_COLOR_PRESET) -Value ([MonitorAPI]::COLOR_PRESET_SRGB) -ActionLabel "Set color temperature to sRGB" | Out-Null })
 
-$dynamicContrastOff.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_DISPLAY_MODE) -Value ([MonitorAPI]::DISPLAY_MODE_STANDARD); Update-Status "Dynamic contrast off" })
-$dynamicContrastOn.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_DISPLAY_MODE) -Value ([MonitorAPI]::DISPLAY_MODE_DYNAMIC_CONTRAST); Update-Status "Dynamic contrast on" })
-$pictureModeWeb.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_DISPLAY_MODE) -Value ([MonitorAPI]::DISPLAY_MODE_PRODUCTIVITY); Update-Status "Picture mode: Web" })
-$pictureModeCinema.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_DISPLAY_MODE) -Value ([MonitorAPI]::DISPLAY_MODE_MOVIE); Update-Status "Picture mode: Cinema" })
-$pictureModeGame.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_DISPLAY_MODE) -Value ([MonitorAPI]::DISPLAY_MODE_GAMES); Update-Status "Picture mode: Game" })
+$dynamicContrastOff.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_DISPLAY_MODE) -Value ([MonitorAPI]::DISPLAY_MODE_STANDARD) -UserInitiated; Update-Status "Dynamic contrast off" })
+$dynamicContrastOn.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_DISPLAY_MODE) -Value ([MonitorAPI]::DISPLAY_MODE_DYNAMIC_CONTRAST) -UserInitiated; Update-Status "Dynamic contrast on" })
+$pictureModeWeb.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_DISPLAY_MODE) -Value ([MonitorAPI]::DISPLAY_MODE_PRODUCTIVITY) -UserInitiated; Update-Status "Picture mode: Web" })
+$pictureModeCinema.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_DISPLAY_MODE) -Value ([MonitorAPI]::DISPLAY_MODE_MOVIE) -UserInitiated; Update-Status "Picture mode: Cinema" })
+$pictureModeGame.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_DISPLAY_MODE) -Value ([MonitorAPI]::DISPLAY_MODE_GAMES) -UserInitiated; Update-Status "Picture mode: Game" })
 
-$presetDay.Add_Click({ $script:AutoModeEnabled = $false; $script:AmbientLightEnabled = $false; Start-AmbientLightWatcher; $autoModeText.Text = ""; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value 80 -Force -Percent; Set-GammaRamp -Gamma 1.0; Set-BrightnessSliderFromPercent -Percent 80 | Out-Null; Update-Status "Day Mode" })
-$presetNight.Add_Click({ $script:AutoModeEnabled = $false; $script:AmbientLightEnabled = $false; Start-AmbientLightWatcher; $autoModeText.Text = ""; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value 40 -Force -Percent; Set-GammaRamp -Gamma 1.0 -RedMult 1.0 -GreenMult 0.9 -BlueMult 0.75; Set-BrightnessSliderFromPercent -Percent 40 | Out-Null; Update-Status "Night Mode" })
+$presetDay.Add_Click({ $script:AutoModeEnabled = $false; $script:AmbientLightEnabled = $false; Start-AmbientLightWatcher; $autoModeText.Text = ""; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value 80 -Force -Percent -UserInitiated; Set-GammaRamp -Gamma 1.0; Set-BrightnessSliderFromPercent -Percent 80 | Out-Null; Update-Status "Day Mode" })
+$presetNight.Add_Click({ $script:AutoModeEnabled = $false; $script:AmbientLightEnabled = $false; Start-AmbientLightWatcher; $autoModeText.Text = ""; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value 40 -Force -Percent -UserInitiated; Set-GammaRamp -Gamma 1.0 -RedMult 1.0 -GreenMult 0.9 -BlueMult 0.75; Set-BrightnessSliderFromPercent -Percent 40 | Out-Null; Update-Status "Night Mode" })
 $presetAutoMode.Add_Click({
     $script:AmbientLightEnabled = $false; Start-AmbientLightWatcher
     $script:AutoModeEnabled = -not $script:AutoModeEnabled
@@ -10602,7 +10689,7 @@ $presetAmbientMode.Add_Click({
     $script:AmbientLightEnabled = -not $script:AmbientLightEnabled
     if ($script:AmbientLightEnabled) { Start-AmbientLightWatcher } else { Start-AmbientLightWatcher; $autoModeText.Text = ""; Update-Status "Ambient mode off" }
 })
-$presetReset.Add_Click({ $script:AutoModeEnabled = $false; $script:AmbientLightEnabled = $false; Start-AmbientLightWatcher; $autoModeText.Text = ""; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value 50 -Force -Percent; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_CONTRAST) -Value 50 -Force -Percent; Set-GammaRamp -Gamma 1.0; Load-MonitorSettings; Update-Status "Reset" })
+$presetReset.Add_Click({ $script:AutoModeEnabled = $false; $script:AmbientLightEnabled = $false; Start-AmbientLightWatcher; $autoModeText.Text = ""; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value 50 -Force -Percent -UserInitiated; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_CONTRAST) -Value 50 -Force -Percent -UserInitiated; Set-GammaRamp -Gamma 1.0; Load-MonitorSettings; Update-Status "Reset" })
 
 $inputSourceCombo.Add_SelectionChanged({
     if ($script:UpdatingUI -or $inputSourceCombo.SelectedItem -eq $null) { return }
@@ -10914,6 +11001,7 @@ $ddcTimingResetBtn.Add_Click({
     Update-Status "DDC timing calibration and skipped-code list cleared for this monitor"
     Update-DdcTimingControls
 })
+$ddcValuesRereadBtn.Add_Click({ Invoke-SelectedMonitorVcpReread | Out-Null })
 $ddcTimingReadRetriesBox.Add_LostFocus({ if (-not $script:UpdatingDdcTimingUI) { Set-DdcTimingRetryFromUi -Field "Read" -Text $ddcTimingReadRetriesBox.Text } })
 $ddcTimingWriteRetriesBox.Add_LostFocus({ if (-not $script:UpdatingDdcTimingUI) { Set-DdcTimingRetryFromUi -Field "Write" -Text $ddcTimingWriteRetriesBox.Text } })
 $ddcTimingCapabilityRetriesBox.Add_LostFocus({ if (-not $script:UpdatingDdcTimingUI) { Set-DdcTimingRetryFromUi -Field "Capability" -Text $ddcTimingCapabilityRetriesBox.Text } })
