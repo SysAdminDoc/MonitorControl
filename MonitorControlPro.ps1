@@ -1512,19 +1512,11 @@ function Update-CapabilityControls {
         }
     }
     Update-VcpPresetItems -Monitor $Monitor
+    Update-RiskyVcpControlState -Monitor $Monitor
 }
 
-function Get-StableHash {
-    param([string]$Text)
-    if ([string]::IsNullOrWhiteSpace($Text)) { return "" }
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
-        $hash = $sha.ComputeHash($bytes)
-        return (($hash | ForEach-Object { $_.ToString("x2") }) -join "").Substring(0, 16)
-    } finally {
-        $sha.Dispose()
-    }
+function Update-RiskyVcpControlState {
+    param($Monitor)
     if ($vcpSetBtn) {
         $vcpSetBtn.IsEnabled = Test-VcpWriteEnabledForMonitor -Monitor $Monitor
         $vcpSetBtn.ToolTip = if ($vcpSetBtn.IsEnabled) { "Every direct write requires an exact code/value confirmation." } else { "Arbitrary VCP writes require the selected stable monitor identity to be enabled in System." }
@@ -1538,7 +1530,20 @@ function Get-StableHash {
             }
         }
     }
-    if (Get-Command Sync-VcpWriteSafetyUi -ErrorAction SilentlyContinue) { Sync-VcpWriteSafetyUi }
+    Sync-VcpWriteSafetyUi
+}
+
+function Get-StableHash {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return "" }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
+        $hash = $sha.ComputeHash($bytes)
+        return (($hash | ForEach-Object { $_.ToString("x2") }) -join "").Substring(0, 16)
+    } finally {
+        $sha.Dispose()
+    }
 }
 
 function Convert-EdidManufacturerId {
@@ -2678,8 +2683,9 @@ function Get-VcpWriteSafetyStatusText {
     param($Monitor)
     if ($null -eq $Monitor) { return "No display selected" }
     if ([string]::IsNullOrWhiteSpace([string]$Monitor.IdentityKey) -or ([string]$Monitor.IdentityKey).Length -gt 512) { return "Unavailable: stable identity required" }
-    if (Test-VcpWriteEnabledForMonitor -Monitor $Monitor) { return "Enabled for selected identity" }
-    return "Disabled for selected identity"
+    $label = Get-MonitorDisplayLabel -Monitor $Monitor
+    if (Test-VcpWriteEnabledForMonitor -Monitor $Monitor) { return "Enabled for $label" }
+    return "Disabled for $label"
 }
 
 function Confirm-AutomationRuleRiskyWriteConsent {

@@ -4,6 +4,7 @@ All notable changes to MonitorControl will be documented in this file.
 
 ## [Unreleased]
 
+- Fixed: risky-write UI state is now refreshed with the selected monitor. The System checkbox and status name the active display, VCP Explorer's arbitrary Set button is disabled with guidance when that identity is locked, and all-monitor standby remains unavailable until every connected DDC/CI identity is unlocked.
 - Fixed: monitor-identification overlays and delayed post-reset refreshes now close over their function-local state before the dispatcher invokes them. Identify overlays stop and close after two seconds, reset refreshes reach the selected monitor, and an AST regression test rejects future deferred timer handlers that capture function locals without `GetNewClosure()`.
 
 ## [v3.37.0] - 2026-07-31
