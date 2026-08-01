@@ -171,6 +171,41 @@ function Get-EdidTextDescriptor {
     return ""
 }
 
+function ConvertTo-MonitorDeviceToken {
+    param([string]$DeviceId)
+    if ([string]::IsNullOrWhiteSpace($DeviceId)) { return "" }
+    $normalized = $DeviceId.Trim().Replace("#", "\")
+    if ($normalized -match '(?i)(?:DISPLAY|MONITOR)\x5c([^\x5c]+)\x5c([^\x5c]+)') {
+        return ("{0}\{1}" -f $Matches[1], $Matches[2]).ToUpperInvariant()
+    }
+    return ""
+}
+
+function ConvertFrom-MonitorEdid {
+    param([byte[]]$Edid, [string]$DeviceId = "")
+    $result = [ordered]@{
+        DeviceId = $DeviceId
+        HardwareId = ""
+        Manufacturer = ""
+        Model = ""
+        Serial = ""
+        Name = ""
+    }
+    $deviceToken = ConvertTo-MonitorDeviceToken -DeviceId $DeviceId
+    if (-not [string]::IsNullOrWhiteSpace($deviceToken)) {
+        $result.HardwareId = $deviceToken.Split("\")[0]
+    }
+    if ($null -eq $Edid -or $Edid.Length -lt 128) { return [PSCustomObject]$result }
+    $result.Manufacturer = Convert-EdidManufacturerId -Edid $Edid
+    $productCode = (([int]$Edid[11]) -shl 8) -bor [int]$Edid[10]
+    $result.Model = "{0:X4}" -f $productCode
+    $numericSerial = [BitConverter]::ToUInt32($Edid, 12)
+    $serialText = Get-EdidTextDescriptor -Edid $Edid -Tag 0xFF
+    $result.Serial = if (-not [string]::IsNullOrWhiteSpace($serialText)) { $serialText } elseif ($numericSerial -ne 0) { $numericSerial.ToString() } else { "" }
+    $result.Name = Get-EdidTextDescriptor -Edid $Edid -Tag 0xFC
+    return [PSCustomObject]$result
+}
+
 function Read-MonitorEdidFromDeviceId {
     param([string]$MonitorDeviceId)
     $result = [ordered]@{
@@ -212,14 +247,50 @@ function Read-MonitorEdidFromDeviceId {
         } catch {}
     }
     if ($null -eq $edid -or $edid.Length -lt 128) { return [PSCustomObject]$result }
-    $result.Manufacturer = Convert-EdidManufacturerId -Edid $edid
-    $productCode = (([int]$edid[11]) -shl 8) -bor [int]$edid[10]
-    $result.Model = "{0:X4}" -f $productCode
-    $numericSerial = [BitConverter]::ToUInt32($edid, 12)
-    $serialText = Get-EdidTextDescriptor -Edid $edid -Tag 0xFF
-    $result.Serial = if (-not [string]::IsNullOrWhiteSpace($serialText)) { $serialText } elseif ($numericSerial -ne 0) { $numericSerial.ToString() } else { "" }
-    $result.Name = Get-EdidTextDescriptor -Edid $edid -Tag 0xFC
-    return [PSCustomObject]$result
+    return (ConvertFrom-MonitorEdid -Edid $edid -DeviceId $MonitorDeviceId)
+}
+
+function Get-WinRtDisplayMonitorInventory {
+    param([scriptblock]$CreateManager)
+    $inventory = @()
+    $manager = $null
+    try {
+        if ($null -eq $CreateManager) {
+            if ($null -eq $script:WinRtDisplayManagerType) { return @() }
+            $displayManagerType = $script:WinRtDisplayManagerType
+            $CreateManager = { $displayManagerType::Create("None") }.GetNewClosure()
+        }
+        $manager = & $CreateManager
+        if ($null -eq $manager) { return @() }
+        foreach ($target in @($manager.GetCurrentTargets())) {
+            try {
+                if (-not [bool]$target.IsConnected -or [bool]$target.IsStale) { continue }
+                $monitor = $target.TryGetMonitor()
+                if ($null -eq $monitor -or [string]::IsNullOrWhiteSpace([string]$monitor.DeviceId)) { continue }
+                $edidBytes = [byte[]]@()
+                try { $edidBytes = [byte[]]@($monitor.GetDescriptor("Edid")) } catch { $edidBytes = [byte[]]@() }
+                $inventory += [PSCustomObject]@{
+                    DeviceInterfacePath = [string]$monitor.DeviceId
+                    DeviceToken = ConvertTo-MonitorDeviceToken -DeviceId ([string]$monitor.DeviceId)
+                    TargetDeviceInterfacePath = [string]$target.DeviceInterfacePath
+                    StableMonitorId = [string]$target.StableMonitorId
+                    DisplayName = [string]$monitor.DisplayName
+                    Edid = $edidBytes
+                    PeakLuminanceNits = [double]$monitor.MaxLuminanceInNits
+                    PhysicalConnector = [string]$monitor.PhysicalConnector
+                }
+            } catch {
+                continue
+            }
+        }
+    } catch {
+        return @()
+    } finally {
+        if ($null -ne $manager -and $manager.PSObject.Methods.Name -contains "Close") {
+            try { $manager.Close() } catch { $null = $_ }
+        }
+    }
+    return @($inventory)
 }
 
 function Get-MonitorDisplayDevice {
@@ -239,13 +310,36 @@ function Get-MonitorDisplayDevice {
 }
 
 function New-MonitorIdentity {
-    param([string]$DisplayDeviceName, [string]$FriendlyName, [int]$Width, [int]$Height, [int]$MonitorIndex)
-    $displayDevice = Get-MonitorDisplayDevice -DisplayDeviceName $DisplayDeviceName
-    $devicePath = if ($displayDevice) { [string]$displayDevice.DeviceID } else { "" }
+    param(
+        [string]$DisplayDeviceName,
+        [string]$FriendlyName,
+        [int]$Width,
+        [int]$Height,
+        [int]$MonitorIndex,
+        [object[]]$WinRtMonitors = @(),
+        $DisplayDevice = $null
+    )
+    if (-not $PSBoundParameters.ContainsKey("DisplayDevice")) {
+        $DisplayDevice = Get-MonitorDisplayDevice -DisplayDeviceName $DisplayDeviceName
+    }
+    $legacyDevicePath = if ($DisplayDevice) { [string]$DisplayDevice.DeviceID } else { "" }
+    $deviceToken = ConvertTo-MonitorDeviceToken -DeviceId $legacyDevicePath
+    $winRtMonitor = @($WinRtMonitors | Where-Object {
+        -not [string]::IsNullOrWhiteSpace($deviceToken) -and
+        [string]$_.DeviceToken -eq $deviceToken
+    } | Select-Object -First 1)
+    $winRtMonitor = if ($winRtMonitor.Count -gt 0) { $winRtMonitor[0] } else { $null }
+    $devicePath = if ($winRtMonitor) { [string]$winRtMonitor.DeviceInterfacePath } else { $legacyDevicePath }
     $deviceString = if ($displayDevice) { [string]$displayDevice.DeviceString } else { "" }
-    $edid = Read-MonitorEdidFromDeviceId -MonitorDeviceId $devicePath
+    $edid = if ($winRtMonitor -and @($winRtMonitor.Edid).Count -ge 128) {
+        ConvertFrom-MonitorEdid -Edid ([byte[]]@($winRtMonitor.Edid)) -DeviceId $devicePath
+    } else {
+        Read-MonitorEdidFromDeviceId -MonitorDeviceId $legacyDevicePath
+    }
     $defaultLabel = if (-not [string]::IsNullOrWhiteSpace($edid.Name)) {
         [string]$edid.Name
+    } elseif ($winRtMonitor -and -not [string]::IsNullOrWhiteSpace([string]$winRtMonitor.DisplayName)) {
+        [string]$winRtMonitor.DisplayName
     } elseif (-not [string]::IsNullOrWhiteSpace($deviceString)) {
         $deviceString
     } elseif (-not [string]::IsNullOrWhiteSpace($FriendlyName)) {
@@ -253,19 +347,24 @@ function New-MonitorIdentity {
     } else {
         "Monitor $MonitorIndex"
     }
-    $source = "display"
-    $keySeed = @($DisplayDeviceName, $FriendlyName, $Width, $Height, $MonitorIndex) -join "|"
+    $legacySource = "display"
+    $legacyKeySeed = @($DisplayDeviceName, $FriendlyName, $Width, $Height, $MonitorIndex) -join "|"
     if (-not [string]::IsNullOrWhiteSpace($edid.Manufacturer) -and -not [string]::IsNullOrWhiteSpace($edid.Model) -and -not [string]::IsNullOrWhiteSpace($edid.Serial)) {
-        $source = "edid"
-        $keySeed = @($edid.Manufacturer, $edid.Model, $edid.Serial) -join "|"
-    } elseif (-not [string]::IsNullOrWhiteSpace($devicePath)) {
-        $source = if (-not [string]::IsNullOrWhiteSpace($edid.Manufacturer)) { "edid-device" } else { "device" }
-        $keySeed = @($devicePath, $edid.Manufacturer, $edid.Model, $edid.Name) -join "|"
+        $legacySource = "edid"
+        $legacyKeySeed = @($edid.Manufacturer, $edid.Model, $edid.Serial) -join "|"
+    } elseif (-not [string]::IsNullOrWhiteSpace($legacyDevicePath)) {
+        $legacySource = if (-not [string]::IsNullOrWhiteSpace($edid.Manufacturer)) { "edid-device" } else { "device" }
+        $legacyKeySeed = @($legacyDevicePath, $edid.Manufacturer, $edid.Model, $edid.Name) -join "|"
     }
+    $legacyKey = "{0}:{1}" -f $legacySource, (Get-StableHash -Text $legacyKeySeed)
+    $source = if ($winRtMonitor) { "winrt" } else { $legacySource }
+    $key = if ($winRtMonitor) { "winrt:{0}" -f (Get-StableHash -Text $devicePath.ToUpperInvariant()) } else { $legacyKey }
     return [PSCustomObject]@{
-        Key = "{0}:{1}" -f $source, (Get-StableHash -Text $keySeed)
+        Key = $key
+        LegacyKey = $legacyKey
         Source = $source
         DevicePath = $devicePath
+        LegacyDevicePath = $legacyDevicePath
         DeviceString = $deviceString
         HardwareId = [string]$edid.HardwareId
         Manufacturer = [string]$edid.Manufacturer
@@ -273,6 +372,8 @@ function New-MonitorIdentity {
         Serial = [string]$edid.Serial
         EdidName = [string]$edid.Name
         DefaultLabel = $defaultLabel
+        PeakLuminanceNits = if ($winRtMonitor) { [double]$winRtMonitor.PeakLuminanceNits } else { [double]0 }
+        PhysicalConnector = if ($winRtMonitor) { [string]$winRtMonitor.PhysicalConnector } else { "" }
     }
 }
 
@@ -309,9 +410,18 @@ function Find-MonitorIndexByIdentity {
     param([string]$IdentityKey)
     if ([string]::IsNullOrWhiteSpace($IdentityKey)) { return -1 }
     for ($i = 0; $i -lt $script:PhysicalMonitors.Count; $i++) {
-        if ([string]$script:PhysicalMonitors[$i].IdentityKey -eq $IdentityKey) { return $i }
+        $monitor = $script:PhysicalMonitors[$i]
+        if ([string]$monitor.IdentityKey -eq $IdentityKey) { return $i }
+        if ($monitor.PSObject.Properties.Name -contains "IdentityAliases" -and @($monitor.IdentityAliases) -contains $IdentityKey) { return $i }
     }
     return -1
+}
+
+function Resolve-MonitorIdentityKey {
+    param([string]$IdentityKey)
+    $index = Find-MonitorIndexByIdentity -IdentityKey $IdentityKey
+    if ($index -lt 0) { return $IdentityKey }
+    return [string]$script:PhysicalMonitors[$index].IdentityKey
 }
 
 function Get-DisplayRecoveryBackoffDelay {
@@ -840,6 +950,7 @@ function Get-Monitors {
         throw "Monitor refresh aborted because the DDC write worker still owns a physical monitor handle"
     }
     try {
+    $winRtMonitorInventory = @(Get-WinRtDisplayMonitorInventory)
     $monitorHandles = [MonitorAPI]::GetAllMonitorHandles()
     $monitorIndex = 1
     $displayDevices = @{}
@@ -865,7 +976,11 @@ function Get-Monitors {
                         $name = if ($pm.szPhysicalMonitorDescription) { $pm.szPhysicalMonitorDescription } else {
                             if ($displayDevices.ContainsKey($monInfo.DeviceName)) { $displayDevices[$monInfo.DeviceName] } else { "Monitor $monitorIndex" }
                         }
-                        $identity = New-MonitorIdentity -DisplayDeviceName $monInfo.DeviceName -FriendlyName $name -Width $devMode.dmPelsWidth -Height $devMode.dmPelsHeight -MonitorIndex $monitorIndex
+                        $identity = New-MonitorIdentity -DisplayDeviceName $monInfo.DeviceName -FriendlyName $name -Width $devMode.dmPelsWidth -Height $devMode.dmPelsHeight -MonitorIndex $monitorIndex -WinRtMonitors $winRtMonitorInventory
+                        if (-not [string]::IsNullOrWhiteSpace([string]$identity.LegacyKey) -and [string]$identity.LegacyKey -ne [string]$identity.Key) {
+                            $migration = Update-MonitorIdentityKeyedState -OldKey ([string]$identity.LegacyKey) -NewKey ([string]$identity.Key)
+                            if ([bool]$migration.AnyChanged) { Save-MonitorIdentityKeyedStateMigration -Migration $migration | Out-Null }
+                        }
                         $monitorObject = [PSCustomObject]@{
                             Handle = $pm.hPhysicalMonitor; HMonitor = $hMonitor; Name = $name; Index = $monitorIndex
                             DeviceName = $monInfo.DeviceName; Width = $devMode.dmPelsWidth; Height = $devMode.dmPelsHeight
@@ -875,8 +990,10 @@ function Get-Monitors {
                             CapabilitiesKnown = $false; SupportedVcpCodes = @{}; CapabilitiesPending = $false; VcpMaximums = @{}
                             CapabilitiesExcluded = $false; CapabilitiesSafetyError = ""
                             IdentityKey = $identity.Key; IdentitySource = $identity.Source; IdentityDefaultLabel = $identity.DefaultLabel
-                            DevicePath = $identity.DevicePath; MonitorDeviceString = $identity.DeviceString; HardwareId = $identity.HardwareId
+                            IdentityAliases = if ([string]$identity.LegacyKey -ne [string]$identity.Key) { @([string]$identity.LegacyKey) } else { @() }
+                            DevicePath = $identity.DevicePath; LegacyDevicePath = $identity.LegacyDevicePath; MonitorDeviceString = $identity.DeviceString; HardwareId = $identity.HardwareId
                             Manufacturer = $identity.Manufacturer; EdidModel = $identity.Model; EdidSerial = $identity.Serial; EdidName = $identity.EdidName
+                            PeakLuminanceNits = [double]$identity.PeakLuminanceNits; PhysicalConnector = [string]$identity.PhysicalConnector
                             UserLabel = ""; DisplayLabel = $identity.DefaultLabel
                         }
                         Apply-MonitorIdentity -Monitor $monitorObject
@@ -894,7 +1011,7 @@ function Get-Monitors {
     if ($script:PhysicalMonitors.Count -eq 0) {
         $fallbackName = if ($script:WmiBrightnessAvailable) { "Integrated Laptop Display" } else { "No DDC/CI Monitor" }
         $fallbackDevice = if ($script:WmiBrightnessAvailable) { "WMI" } else { "" }
-        $identity = New-MonitorIdentity -DisplayDeviceName $fallbackDevice -FriendlyName $fallbackName -Width 1920 -Height 1080 -MonitorIndex 1
+        $identity = New-MonitorIdentity -DisplayDeviceName $fallbackDevice -FriendlyName $fallbackName -Width 1920 -Height 1080 -MonitorIndex 1 -WinRtMonitors $winRtMonitorInventory
         $fallbackObject = [PSCustomObject]@{
             Handle = [IntPtr]::Zero; HMonitor = [IntPtr]::Zero; Name = $fallbackName; Index = 1
             DeviceName = $fallbackDevice; Width = 1920; Height = 1080; RefreshRate = 60; IsPrimary = $true
@@ -902,8 +1019,9 @@ function Get-Monitors {
             CapabilitiesKnown = $false; SupportedVcpCodes = @{}; CapabilitiesPending = $false; VcpMaximums = @{}
             CapabilitiesExcluded = $false; CapabilitiesSafetyError = ""
             IdentityKey = $identity.Key; IdentitySource = $identity.Source; IdentityDefaultLabel = $identity.DefaultLabel
-            DevicePath = $identity.DevicePath; MonitorDeviceString = $identity.DeviceString; HardwareId = $identity.HardwareId
+            IdentityAliases = @(); DevicePath = $identity.DevicePath; LegacyDevicePath = $identity.LegacyDevicePath; MonitorDeviceString = $identity.DeviceString; HardwareId = $identity.HardwareId
             Manufacturer = $identity.Manufacturer; EdidModel = $identity.Model; EdidSerial = $identity.Serial; EdidName = $identity.EdidName
+            PeakLuminanceNits = [double]$identity.PeakLuminanceNits; PhysicalConnector = [string]$identity.PhysicalConnector
             UserLabel = ""; DisplayLabel = $identity.DefaultLabel
         }
         Apply-MonitorIdentity -Monitor $fallbackObject
@@ -1559,6 +1677,7 @@ function Get-DdcReportTargets {
             Name = [string]$mon.Name
             DeviceName = [string]$mon.DeviceName
             DevicePath = [string]$mon.DevicePath
+            LegacyDevicePath = if ($mon.PSObject.Properties.Name -contains "LegacyDevicePath") { [string]$mon.LegacyDevicePath } else { "" }
             HardwareId = [string]$mon.HardwareId
             IdentityKey = [string]$mon.IdentityKey
             IdentitySource = [string]$mon.IdentitySource
@@ -1566,6 +1685,8 @@ function Get-DdcReportTargets {
             EdidModel = [string]$mon.EdidModel
             EdidSerial = [string]$mon.EdidSerial
             EdidName = [string]$mon.EdidName
+            PhysicalConnector = if ($mon.PSObject.Properties.Name -contains "PhysicalConnector") { [string]$mon.PhysicalConnector } else { "" }
+            PeakLuminanceNits = if ($mon.PSObject.Properties.Name -contains "PeakLuminanceNits") { [double]$mon.PeakLuminanceNits } else { [double]0 }
             Resolution = "{0}x{1}@{2}Hz" -f [int]$mon.Width, [int]$mon.Height, [int]$mon.RefreshRate
             Primary = [bool]$mon.IsPrimary
             CapabilityStatus = $capabilityStatus
@@ -1692,6 +1813,8 @@ function New-DdcCompatibilityReport {
         [void]$sb.AppendLine("  Resolution: $($target.Resolution)")
         [void]$sb.AppendLine("  Primary: $($target.Primary)")
         [void]$sb.AppendLine("  Identity: $($target.IdentityKey) ($($target.IdentitySource))")
+        if (-not [string]::IsNullOrWhiteSpace([string]$target.PhysicalConnector)) { [void]$sb.AppendLine("  Physical connector: $($target.PhysicalConnector)") }
+        if ([double]$target.PeakLuminanceNits -gt 0) { [void]$sb.AppendLine("  Peak luminance: $([Math]::Round([double]$target.PeakLuminanceNits, 1)) nits") }
         if (-not [string]::IsNullOrWhiteSpace([string]$target.HardwareId)) { [void]$sb.AppendLine("  Hardware ID: $($target.HardwareId)") }
         if (-not [string]::IsNullOrWhiteSpace([string]$target.DevicePath)) { [void]$sb.AppendLine("  Device path: $($target.DevicePath)") }
         $edidParts = @()

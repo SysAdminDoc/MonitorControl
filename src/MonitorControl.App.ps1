@@ -21,6 +21,14 @@ function Set-DdcReportWorkerUiIdle {
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, UIAutomationTypes, UIAutomationProvider, System.Windows.Forms, System.Drawing, System.IO.Compression, System.IO.Compression.FileSystem, System.Management
 
+$script:WinRtDisplayManagerType = $null
+try {
+    # Windows PowerShell 5.1 needs the assembly-qualified WinRT type name on first use.
+    $script:WinRtDisplayManagerType = [Windows.Devices.Display.Core.DisplayManager, Windows.Devices.Display.Core, ContentType=WindowsRuntime]
+} catch {
+    $script:WinRtDisplayManagerType = $null
+}
+
 $nativeCode = @"
 using System;
 using System.Runtime.InteropServices;
@@ -5137,17 +5145,50 @@ function New-ProfileObject {
     }
 }
 
+function Resolve-ProfileMonitorReference {
+    param([string]$IdentityKey, [string]$DevicePath = "")
+    $index = Find-MonitorIndexByIdentity -IdentityKey $IdentityKey
+    if ($index -lt 0) {
+        return [PSCustomObject]@{ IdentityKey = $IdentityKey; DevicePath = $DevicePath }
+    }
+    $monitor = $script:PhysicalMonitors[$index]
+    return [PSCustomObject]@{
+        IdentityKey = [string]$monitor.IdentityKey
+        DevicePath = [string]$monitor.DevicePath
+    }
+}
+
+function Test-ProfileIdentityMigrationRequired {
+    param($Profile)
+    if ($null -eq $Profile) { return $false }
+    $topKey = [string](Get-ProfilePropertyValue -Object $Profile -Property "MonitorIdentityKey" -Default "")
+    $topPath = [string](Get-ProfilePropertyValue -Object $Profile -Property "MonitorDevicePath" -Default "")
+    $topCurrent = Resolve-ProfileMonitorReference -IdentityKey $topKey -DevicePath $topPath
+    if ([string]$topCurrent.IdentityKey -ne $topKey -or [string]$topCurrent.DevicePath -ne $topPath) { return $true }
+    foreach ($setting in @((Get-ProfilePropertyValue -Object $Profile -Property "MonitorSettings" -Default @()))) {
+        if ($null -eq $setting) { continue }
+        $key = [string](Get-ProfilePropertyValue -Object $setting -Property "IdentityKey" -Default "")
+        $path = [string](Get-ProfilePropertyValue -Object $setting -Property "DevicePath" -Default "")
+        $current = Resolve-ProfileMonitorReference -IdentityKey $key -DevicePath $path
+        if ([string]$current.IdentityKey -ne $key -or [string]$current.DevicePath -ne $path) { return $true }
+    }
+    return $false
+}
+
 function ConvertTo-CurrentProfileSchema {
     param($Profile, [string]$FallbackName)
     $schema = if ($Profile.PSObject.Properties.Name -contains "SchemaVersion") { [int]$Profile.SchemaVersion } else { 1 }
     if ($schema -lt 1) { throw "Profile schema version must be at least 1" }
     if ($schema -gt $script:ProfileSchemaVersion) { throw "Profile schema v$schema is newer than this app" }
     $name = if (Get-ProfilePropertyValue -Object $Profile -Property "Name" -Default "") { [string]$Profile.Name } else { $FallbackName }
+    $topIdentityKey = [string](Get-ProfilePropertyValue -Object $Profile -Property "MonitorIdentityKey" -Default "")
+    $topDevicePath = [string](Get-ProfilePropertyValue -Object $Profile -Property "MonitorDevicePath" -Default "")
+    $topReference = Resolve-ProfileMonitorReference -IdentityKey $topIdentityKey -DevicePath $topDevicePath
     $topSetting = [PSCustomObject]@{
-        IdentityKey = [string](Get-ProfilePropertyValue -Object $Profile -Property "MonitorIdentityKey" -Default "")
+        IdentityKey = [string]$topReference.IdentityKey
         MonitorLabel = [string](Get-ProfilePropertyValue -Object $Profile -Property "MonitorLabel" -Default "")
         MonitorName = [string](Get-ProfilePropertyValue -Object $Profile -Property "MonitorName" -Default "")
-        DevicePath = [string](Get-ProfilePropertyValue -Object $Profile -Property "MonitorDevicePath" -Default "")
+        DevicePath = [string]$topReference.DevicePath
         Brightness = Get-ProfilePercentValue -Object $Profile -Property "Brightness" -Default 50
         Contrast = Get-ProfilePercentValue -Object $Profile -Property "Contrast" -Default 50
         Red = Get-ProfileIntValue -Object $Profile -Property "Red" -Default 50
@@ -5161,11 +5202,14 @@ function ConvertTo-CurrentProfileSchema {
     $settings = @()
     foreach ($setting in @((Get-ProfilePropertyValue -Object $Profile -Property "MonitorSettings" -Default @()))) {
         if ($null -eq $setting) { continue }
+        $settingIdentityKey = [string](Get-ProfilePropertyValue -Object $setting -Property "IdentityKey" -Default "")
+        $settingDevicePath = [string](Get-ProfilePropertyValue -Object $setting -Property "DevicePath" -Default "")
+        $settingReference = Resolve-ProfileMonitorReference -IdentityKey $settingIdentityKey -DevicePath $settingDevicePath
         $settings += [PSCustomObject]@{
-            IdentityKey = [string](Get-ProfilePropertyValue -Object $setting -Property "IdentityKey" -Default "")
+            IdentityKey = [string]$settingReference.IdentityKey
             MonitorLabel = [string](Get-ProfilePropertyValue -Object $setting -Property "MonitorLabel" -Default "")
             MonitorName = [string](Get-ProfilePropertyValue -Object $setting -Property "MonitorName" -Default "")
-            DevicePath = [string](Get-ProfilePropertyValue -Object $setting -Property "DevicePath" -Default "")
+            DevicePath = [string]$settingReference.DevicePath
             Brightness = Get-ProfilePercentValue -Object $setting -Property "Brightness" -Default $topSetting.Brightness
             Contrast = Get-ProfilePercentValue -Object $setting -Property "Contrast" -Default $topSetting.Contrast
             Red = Get-ProfilePercentValue -Object $setting -Property "Red" -Default $topSetting.Red
@@ -5221,17 +5265,19 @@ function Read-ProfileObject {
     }
     $path = Join-Path $script:ProfilesPath "$safeName.json"
     if (-not (Test-Path -LiteralPath $path)) { return $null }
-    $profileObject = Read-JsonFileSafely -Path $path -Label "Profile '$safeName'" -ReadOnly:$script:ProfileStorageOffline
+        $profileObject = Read-JsonFileSafely -Path $path -Label "Profile '$safeName'" -ReadOnly:$script:ProfileStorageOffline
     if ($null -eq $profileObject) { return $null }
     try {
         $schema = if ($profileObject.PSObject.Properties.Name -contains "SchemaVersion") { [int]$profileObject.SchemaVersion } else { 1 }
+        $identityMigrationRequired = Test-ProfileIdentityMigrationRequired -Profile $profileObject
         $converted = ConvertTo-CurrentProfileSchema -Profile $profileObject -FallbackName $safeName
-        if ($schema -lt $script:ProfileSchemaVersion) {
+        if ($schema -lt $script:ProfileSchemaVersion -or $identityMigrationRequired) {
             if ($script:ProfileStorageOffline) {
-                Update-Status "Profile '$safeName' uses schema v$schema; converted in memory while storage is offline"
+                Update-Status "Profile '$safeName' was converted in memory while storage is offline"
             } else {
                 Save-ProfileObject -Profile $converted | Out-Null
-                Update-Status "Migrated profile '$safeName' to schema v$script:ProfileSchemaVersion"
+                $migrationReason = if ($schema -lt $script:ProfileSchemaVersion) { "schema v$script:ProfileSchemaVersion" } else { "the current monitor identity" }
+                Update-Status "Migrated profile '$safeName' to $migrationReason"
             }
         }
         return $converted
