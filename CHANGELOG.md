@@ -2,7 +2,7 @@
 
 All notable changes to MonitorControl will be documented in this file.
 
-## [Unreleased]
+## [v3.36.0] - 2026-07-31
 
 - Security: monitor capability strings are cached per stable monitor identity and replayed on later launches, so the one native call Microsoft documents as able to fault the Windows kernel now runs once per monitor instead of on every refresh. A shipped list of EDID model ids known to trigger that fault is consulted before any probe, and those monitors are skipped and reported rather than asked. **Clear cache** in System forces a re-read.
 
