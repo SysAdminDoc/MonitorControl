@@ -121,6 +121,8 @@ BeforeAll {
         "Resolve-VcpWriteValueForMonitor",
         "Update-VcpMaximumCache",
         "Get-ProfilePercentValue",
+        "Get-VcpWriteRiskNote",
+        "Set-VCPValueWithSync",
         "ConvertTo-HelperVersion",
         "Get-OptionalHelperSourceCategory",
         "Test-OptionalHelperVersionSupported",
@@ -1490,6 +1492,50 @@ Describe "Monitor reported VCP range normalization" {
             $observed = ConvertTo-VcpPercent -RawValue $written[$index] -Maximum $maximum
             [Math]::Abs($observed - 25) | Should -BeLessOrEqual ([Math]::Ceiling(100.0 / (2 * $maximum)))
         }
+    }
+}
+
+Describe "Risky VCP code coverage" {
+    BeforeEach {
+        $script:RiskyVcpCodes = @(0x04, 0x08, 0x14, 0x60, 0xCA, 0xCC, 0xD6, 0xD7, 0xE8, 0xE9)
+    }
+
+    It "gates every code that can outlive the app or lock the user out" {
+        foreach ($code in @(0x04, 0x08, 0x14, 0x60, 0xCA, 0xCC, 0xD6, 0xD7, 0xE8, 0xE9)) {
+            Test-VcpWriteRequiresSafetyConsent -Code $code | Should -BeTrue
+        }
+    }
+
+    It "leaves routine continuous codes ungated" {
+        foreach ($code in @(0x10, 0x12, 0x16, 0x18, 0x1A, 0x62, 0x87, 0x8D, 0xDC)) {
+            Test-VcpWriteRequiresSafetyConsent -Code $code | Should -BeFalse
+        }
+    }
+
+    It "explains the specific consequence for each gated code" {
+        (Get-VcpWriteRiskNote -Code 0x14) | Should -Match "factory reset"
+        (Get-VcpWriteRiskNote -Code 0xCA) | Should -Match "buttons"
+        (Get-VcpWriteRiskNote -Code 0xD6) | Should -Match "wake"
+        (Get-VcpWriteRiskNote -Code 0xD7) | Should -Match "power"
+        (Get-VcpWriteRiskNote -Code 0x60) | Should -Match "no signal"
+        (Get-VcpWriteRiskNote -Code 0x04) | Should -Match "factory defaults"
+        (Get-VcpWriteRiskNote -Code 0x10) | Should -BeNullOrEmpty
+    }
+
+    It "puts the specific consequence in the confirmation shown before writing" {
+        $operations = @([PSCustomObject]@{ Code = 0x14; Value = [uint32]5; MonitorName = "Desk Left" })
+        $text = Format-VcpWriteConfirmation -Operations $operations -ActionLabel "Set color temperature to sRGB"
+
+        $text | Should -Match "Set color temperature to sRGB"
+        $text | Should -Match "0x14"
+        $text | Should -Match "Desk Left"
+        $text | Should -Match "factory reset"
+    }
+
+    It "still refuses a gated write through the routine sync path" {
+        $script:LastStatusMessage = ""
+        Set-VCPValueWithSync -VCPCode ([byte]0x14) -Value ([uint32]5) | Should -BeFalse
+        $script:LastStatusMessage | Should -Match "0x14"
     }
 }
 

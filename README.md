@@ -60,7 +60,7 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 - **Stable Monitor Identity** — Stores EDID/device-path backed monitor identities, supports custom display labels, and targets saved profiles by identity after reordering
 - **System-Aware Accessibility** — Follows Windows high contrast live, supports 100–200% text scaling with independently scrollable content and navigation, exposes visible keyboard focus and UI Automation names, and raises native live-region events for inline errors
 - **Portable Release ZIP** — Local release builds package the script, icon, README, LICENSE, signature status, and SHA256 checksums
-- **Verified Risky Writes** — Power, input, reset, PiP/PbP, and arbitrary commands require a per-monitor identity unlock plus an exact code/value confirmation; readback reports verified, mismatched, or unavailable outcomes
+- **Verified Risky Writes** — Power, input, reset, color preset, OSD lock, OSD language, auxiliary power, PiP/PbP, and arbitrary commands require a per-monitor identity unlock plus an exact code/value confirmation. The confirmation names the specific consequence for that code, and readback reports verified, mismatched, or unavailable outcomes
 - **Async Capabilities Reads** — Monitor `vcp(...)` capabilities load from a background worker after enumeration, keeping refresh responsive
 - **DDC Compatibility Report** — Builds a copyable diagnostics report with monitor identities, capability status, common VCP probe results, OS/GPU driver data, and recent DDC errors
 - **No-Hardware Regression Tests** — Pester tests cover schedule rollover, idle tick wraparound, profile transactions, hostile bundles, capability safety, risky-write rollback, bridge framing/auth, and VCP input parsing
@@ -227,7 +227,8 @@ otherwise load or execute from the folder it was extracted into, so both are **o
 
 ### Risky VCP Write Safety
 - Risky controls start disabled. Select a display, open **System**, and explicitly enable risky VCP writes for that stable monitor identity
-- The unlock covers power, input, reset, PiP/PbP, and arbitrary VCP writes; identities without a stable key cannot be unlocked
+- The unlock covers power (`0xD6`), input (`0x60`), factory and color reset (`0x04`, `0x08`), color preset (`0x14`), OSD/button control (`0xCA`), OSD language (`0xCC`), auxiliary power (`0xD7`), PiP/PbP (`0xE8`, `0xE9`), and arbitrary VCP writes; identities without a stable key cannot be unlocked
+- Color preset is gated because some monitors keep the value after this app closes and need a factory reset to undo it, and OSD/button control is gated because it can disable the monitor's own buttons, which is the only way to recover a display that stops responding to software
 - Every direct command shows the exact VCP code, value, and target before writing. Canceling makes no hardware change
 - The app reads each supported value back and distinguishes **verified**, **mismatched**, and **readback unavailable** outcomes
 - Profile loads snapshot every readable prior DDC/WMI value and restore those values in reverse order when a write fails or reads back incorrectly
@@ -248,7 +249,7 @@ The VCP Explorer tab allows you to query and set any DDC/CI VCP code. Common cod
 |------|------|-------|-------------|
 | `0x10` | Brightness | 0-100 | Display brightness level |
 | `0x12` | Contrast | 0-100 | Display contrast level |
-| `0x14` | Color Preset | varies | Color temperature preset |
+| `0x14` | Color Preset | varies | Color temperature preset (risky: may persist after exit) |
 | `0x16` | Red Gain | 0-100 | Red channel gain |
 | `0x18` | Green Gain | 0-100 | Green channel gain |
 | `0x1A` | Blue Gain | 0-100 | Blue channel gain |
@@ -259,7 +260,7 @@ The VCP Explorer tab allows you to query and set any DDC/CI VCP code. Common cod
 | `0x8D` | Audio Mute | 1/2 | Mute speakers |
 | `0xC0` | Display Usage Time | read-only | Panel usage counter |
 | `0xC6` | Application Enable Key | varies | Vendor/application enable key |
-| `0xCA` | OSD/Button Control | varies | Monitor OSD and button behavior |
+| `0xCA` | OSD/Button Control | varies | Monitor OSD and button behavior (risky: can lock physical buttons) |
 | `0xCC` | OSD Language | varies | Monitor on-screen display language |
 | `0xCD` | Status Indicators / LED | varies | Status indicator and power LED behavior when supported |
 | `0xD6` | Power Mode | 1-5 | Power state control |
