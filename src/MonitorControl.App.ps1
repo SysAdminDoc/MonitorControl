@@ -912,7 +912,6 @@ $script:CapabilitiesWorkerLastOutputCount = 0
 $script:CapabilitiesWorkerGeneration = -1
 $script:CapabilitiesSafetySettingsPath = ""
 $script:CapabilitiesProbeSentinelPath = ""
-$script:CapabilitiesSafetySchemaVersion = 1
 $script:CapabilitiesConsentRecorded = $false
 $script:CapabilitiesDiscoveryEnabled = $false
 $script:CapabilitiesMaximumCompatibility = $false
@@ -922,7 +921,6 @@ $script:CapabilitiesLastIncidentAt = ""
 $script:UpdatingCapabilitiesSafetyUI = $false
 $script:CapabilitiesConsentPromptHandled = $false
 $script:VcpWriteSafetySettingsPath = ""
-$script:VcpWriteSafetySchemaVersion = 1
 $script:RiskyVcpEnabledIdentityKeys = @{}
 $script:RiskyVcpCodes = @(0x04, 0x08, 0x14, 0x60, 0xCA, 0xCC, 0xD6, 0xD7, 0xE8, 0xE9)
 # Continuous VCP codes whose reported maximum is monitor-defined. Stored profile,
@@ -952,7 +950,6 @@ $script:AutomationBridgeEnabled = $false
 $script:AutomationBridgeBindAddress = "127.0.0.1"
 $script:AutomationBridgePort = 34291
 $script:AutomationBridgeApiKey = ""
-$script:AutomationBridgeSettingsSchemaVersion = 3
 $script:AutomationBridgeNetworkExposureApproved = $false
 $script:AutomationBridgeNetworkExposureApprovedFor = ""
 $script:AutomationBridgeLastError = ""
@@ -979,7 +976,6 @@ $script:AutomationBridgeResponses = [hashtable]::Synchronized(@{})
 $script:AutomationBridgeState = [hashtable]::Synchronized(@{ Stop = $false })
 $script:UpdatingAutomationBridgeUI = $false
 $script:UpdatingRunAtLoginUI = $false
-$script:DdcTimingSchemaVersion = 3
 $script:DdcTimingProfiles = @{}
 $script:DdcRespondedIdentityKeys = @{}
 # ddcutil calls this the sleep multiplier: how much longer than the default a panel
@@ -1000,7 +996,6 @@ $script:AutomationBridgeEntropyPath = Join-Path $script:DefaultProfilesPath "aut
 $script:AutomationBridgeWriteLogPath = Join-Path $script:DefaultProfilesPath "automation-bridge-writes.jsonl"
 $script:CapabilitiesCachePath = Join-Path $script:DefaultProfilesPath "capabilities-cache.json"
 $script:DdcTimingSettingsPath = Join-Path $script:DefaultProfilesPath "ddc-timing.json"
-$script:CapabilitiesCacheSchemaVersion = 1
 $script:CapabilitiesCache = @{}
 # Reading a capability string is the one call Microsoft documents as able to bring down
 # Windows on a monitor with a malformed EDID, so a model known to do that is never asked.
@@ -1010,7 +1005,6 @@ $script:CapabilitiesKnownBadModels = @(
     [PSCustomObject]@{ EdidId = "GSM7714"; Note = "LG UltraWide HDR WFHD; kernel fault in win32kfull (PowerToys 47968)" }
 )
 $script:DisplayStateRestoreSettingsPath = Join-Path $script:DefaultProfilesPath "display-restore.json"
-$script:DisplayStateRestoreSchemaVersion = 1
 # Monitors commonly reset themselves to full brightness after a power cycle or a sleep
 # cycle. Restoring is opt-in because it writes to hardware without the user asking.
 $script:DisplayStateRestoreEnabled = $false
@@ -1019,7 +1013,6 @@ $script:DisplayStateRestoreGeneration = -1
 $script:UpdatingDisplayStateRestoreUI = $false
 $script:UpdatingDdcTimingUI = $false
 $script:OptionalHelperSettingsPath = Join-Path $script:DefaultProfilesPath "optional-helpers.json"
-$script:OptionalHelperSchemaVersion = 1
 # Optional native helpers are discovered next to the script and on PATH, so they stay off
 # until the user enables them. Nothing is loaded or executed before that.
 $script:CpuMonitorEnabled = $false
@@ -1035,15 +1028,36 @@ $script:CapabilitiesProbeSentinelPath = Join-Path $script:DefaultProfilesPath "c
 $script:VcpWriteSafetySettingsPath = Join-Path $script:DefaultProfilesPath "vcp-write-safety.json"
 $script:ProfilesPath = $script:DefaultProfilesPath
 $script:ProfileStorageMode = "Local"
-$script:ProfileStorageSchemaVersion = 2
 $script:ProfileStorageOffline = $false
 $script:ProfileStorageConfiguredPath = $script:DefaultProfilesPath
 $script:ProfileStorageFallbackPath = $script:DefaultProfilesPath
 $script:ProfileStoragePreviousPath = ""
+$script:SettingsDocumentRegistry = Initialize-MonitorControlSettingsDocumentRegistry
+$script:ProfileSchemaVersion = [int]$script:SettingsDocumentRegistry.Profile.CurrentVersion
+$script:ProfileBundleSchemaVersion = [int]$script:SettingsDocumentRegistry.ProfileBundle.CurrentVersion
+$script:ProfileStorageSchemaVersion = [int]$script:SettingsDocumentRegistry.ProfileStorage.CurrentVersion
+$script:MonitorIdentitySchemaVersion = [int]$script:SettingsDocumentRegistry.MonitorIdentity.CurrentVersion
+$script:AppProfileRulesSchemaVersion = [int]$script:SettingsDocumentRegistry.AppProfileRules.CurrentVersion
+$script:ProfileSchedulesSchemaVersion = [int]$script:SettingsDocumentRegistry.ProfileSchedules.CurrentVersion
+$script:IdleDimSchemaVersion = [int]$script:SettingsDocumentRegistry.IdleDim.CurrentVersion
+$script:BatteryProfileSchemaVersion = [int]$script:SettingsDocumentRegistry.BatteryProfile.CurrentVersion
+$script:AutomationBridgeSettingsSchemaVersion = [int]$script:SettingsDocumentRegistry.AutomationBridge.CurrentVersion
+$script:CapabilitiesSafetySchemaVersion = [int]$script:SettingsDocumentRegistry.CapabilitiesSafety.CurrentVersion
+$script:CapabilitiesProbeSentinelSchemaVersion = [int]$script:SettingsDocumentRegistry.CapabilitiesProbeSentinel.CurrentVersion
+$script:VcpWriteSafetySchemaVersion = [int]$script:SettingsDocumentRegistry.VcpWriteSafety.CurrentVersion
+$script:OptionalHelperSchemaVersion = [int]$script:SettingsDocumentRegistry.OptionalHelpers.CurrentVersion
+$script:DisplayStateRestoreSchemaVersion = [int]$script:SettingsDocumentRegistry.DisplayRestore.CurrentVersion
+$script:CapabilitiesCacheSchemaVersion = [int]$script:SettingsDocumentRegistry.CapabilitiesCache.CurrentVersion
+$script:DdcTimingSchemaVersion = [int]$script:SettingsDocumentRegistry.DdcTiming.CurrentVersion
+$script:ProfileTrashSchemaVersion = [int]$script:SettingsDocumentRegistry.ProfileTrash.CurrentVersion
+$script:ProfileTrashPath = Join-Path $script:DefaultProfilesPath "trash"
+$script:ProfileTrashMaxRecords = 20
+$script:ProfileTrashMaxBytes = 10485760
 if (-not (Test-Path -LiteralPath $script:DefaultProfilesPath)) { New-Item -ItemType Directory -Path $script:DefaultProfilesPath -Force | Out-Null }
 if (Test-Path -LiteralPath $script:ProfileStorageSettingsPath) {
     try {
         $profileStorage = Read-JsonFileSafely -Path $script:ProfileStorageSettingsPath -Label "Profile storage"
+        if (-not (Test-SettingsDocumentSupported -Name "ProfileStorage" -Document $profileStorage -Label "Profile storage")) { throw "Unsupported profile storage schema" }
         $storageState = Resolve-ProfileStorageRootState -Settings $profileStorage -DefaultPath $script:DefaultProfilesPath -CurrentSchemaVersion $script:ProfileStorageSchemaVersion
         $script:ProfilesPath = $storageState.ProfilesPath
         $script:ProfileStorageConfiguredPath = $storageState.ConfiguredPath
@@ -1066,8 +1080,6 @@ $script:ProfileScheduleRulesPath = Join-Path $script:ProfilesPath "profile-sched
 $script:IdleDimSettingsPath = Join-Path $script:ProfilesPath "idle-dim.json"
 $script:BatteryProfileSettingsPath = Join-Path $script:ProfilesPath "battery-profile.json"
 $script:MonitorIdentitySettingsPath = Join-Path $script:ProfilesPath "monitor-identities.json"
-$script:ProfileSchemaVersion = 4
-$script:ProfileBundleSchemaVersion = 2
 $script:ProfileBundleMaxProfiles = 100
 $script:ProfileBundleMaxArchiveBytes = 16777216
 $script:ProfileBundleMaxManifestBytes = 65536
@@ -2337,7 +2349,7 @@ function Start-CapabilitiesWorker {
             try {
                 try {
                     $marker = [PSCustomObject]@{
-                        SchemaVersion = 1
+                        SchemaVersion = [int]$script:CapabilitiesProbeSentinelSchemaVersion
                         IdentityKey = [string]$target.IdentityKey
                         MonitorName = [string]$target.Name
                         StartedAtUtc = [DateTime]::UtcNow.ToString("o")
@@ -4394,12 +4406,17 @@ try {
             <Border Background="Transparent" Padding="0"><Grid>
                 <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="5*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="7*"/></Grid.ColumnDefinitions>
-                    <Border Style="{StaticResource PageCard}"><Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="*"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <Border Style="{StaticResource PageCard}"><Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="10"/><RowDefinition Height="*"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                         <TextBlock Text="Saved profiles" Style="{StaticResource SectionTitle}"/>
-                        <ListBox x:Name="ProfilesList" Grid.Row="2" Background="{DynamicResource ControlBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Foreground="{DynamicResource TextBrush}" MinHeight="180"/>
-                        <Grid Grid.Row="4"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="8"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                        <TextBlock x:Name="ProfileTrashStatusText" Grid.Row="2" Text="Trash empty" FontSize="12" Foreground="{DynamicResource MutedTextBrush}"/>
+                        <ListBox x:Name="ProfilesList" Grid.Row="4" Background="{DynamicResource ControlBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Foreground="{DynamicResource TextBrush}" MinHeight="180"/>
+                        <Grid Grid.Row="6"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="8"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                             <Button x:Name="LoadProfileBtn" Content="Load" Style="{StaticResource AccBtn}"/>
                             <Button x:Name="DeleteProfileBtn" Grid.Column="2" Content="Delete" Style="{StaticResource WarnBtn}"/>
+                        </Grid>
+                        <Grid Grid.Row="8"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="8"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Button x:Name="RestoreProfileBtn" Content="Restore Last" Style="{StaticResource Btn}" AutomationProperties.HelpText="Restore the most recently deleted profile and its dependent automation."/>
+                            <Button x:Name="PurgeProfileTrashBtn" Grid.Column="2" Content="Empty Trash" Style="{StaticResource WarnBtn}" AutomationProperties.HelpText="Permanently delete all recoverable profile records after confirmation."/>
                         </Grid>
                     </Grid></Border>
                     <Border Grid.Column="2" Style="{StaticResource PageCard}"><Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="16"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="16"/><RowDefinition Height="*"/><RowDefinition Height="16"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
@@ -4779,6 +4796,7 @@ $vcpSetBtn = $window.FindName("VCPSetBtn"); $vcpScanBtn = $window.FindName("VCPS
 $vcpScanCapabilitiesOnlyCheckbox = $window.FindName("VCPScanCapabilitiesOnlyCheckbox")
 $profileNameBox = $window.FindName("ProfileNameBox"); $profilesList = $window.FindName("ProfilesList")
 $saveProfileBtn = $window.FindName("SaveProfileBtn"); $loadProfileBtn = $window.FindName("LoadProfileBtn"); $deleteProfileBtn = $window.FindName("DeleteProfileBtn")
+$restoreProfileBtn = $window.FindName("RestoreProfileBtn"); $purgeProfileTrashBtn = $window.FindName("PurgeProfileTrashBtn"); $profileTrashStatusText = $window.FindName("ProfileTrashStatusText")
 $exportProfilesBtn = $window.FindName("ExportProfilesBtn"); $importProfilesBtn = $window.FindName("ImportProfilesBtn")
 $profileStorageStatusText = $window.FindName("ProfileStorageStatusText"); $profileSyncFolderBtn = $window.FindName("ProfileSyncFolderBtn"); $profileLocalFolderBtn = $window.FindName("ProfileLocalFolderBtn")
 $appProfileEnabledCheckbox = $window.FindName("AppProfileEnabledCheckbox"); $appProfileStatusText = $window.FindName("AppProfileStatusText")
@@ -5565,6 +5583,189 @@ function Update-ProfilesList {
     $profilesList.Items.Clear()
     Get-UserProfileFiles | ForEach-Object { $profilesList.Items.Add($_.BaseName) | Out-Null }
     Update-AppProfileProfileCombo
+    Update-ProfileTrashControls
+}
+
+function Test-ProfileTrashRecordPath {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace([string]$script:ProfileTrashPath)) { return $false }
+    $root = [System.IO.Path]::GetFullPath($script:ProfileTrashPath).TrimEnd([char[]]@('\', '/'))
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $parent = [System.IO.Path]::GetDirectoryName($fullPath).TrimEnd([char[]]@('\', '/'))
+    return [string]::Equals($root, $parent, [System.StringComparison]::OrdinalIgnoreCase) -and
+        [System.IO.Path]::GetFileName($fullPath) -like "profile-trash-*.json"
+}
+
+function Get-ProfileTrashRecords {
+    if (-not (Test-Path -LiteralPath $script:ProfileTrashPath -PathType Container)) { return @() }
+    $records = @()
+    foreach ($file in @(Get-ChildItem -LiteralPath $script:ProfileTrashPath -File -Filter "profile-trash-*.json" | Sort-Object LastWriteTimeUtc, Name -Descending)) {
+        if (($file.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or -not (Test-ProfileTrashRecordPath -Path $file.FullName)) { continue }
+        try {
+            $record = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
+            if (-not (Test-SettingsDocumentSupported -Name "ProfileTrash" -Document $record -Label "Profile trash")) { continue }
+            $safeName = Get-SafeProfileName -Name ([string]$record.ProfileName)
+            if ([string]::IsNullOrWhiteSpace($safeName) -or [string]::IsNullOrWhiteSpace([string]$record.ProfileContentBase64)) { continue }
+            $records += [PSCustomObject]@{
+                Path = $file.FullName
+                TrashId = [string]$record.TrashId
+                ProfileName = $safeName
+                DeletedAtUtc = [string]$record.DeletedAtUtc
+                Length = [long]$file.Length
+            }
+        } catch { $null = $_ }
+    }
+    return $records
+}
+
+function Remove-OldProfileTrashRecords {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Prunes only validated profile-trash records in the exact local trash directory.')]
+    param()
+    if (-not (Test-Path -LiteralPath $script:ProfileTrashPath -PathType Container)) { return 0 }
+    $keptCount = 0
+    [long]$keptBytes = 0
+    $removed = 0
+    foreach ($file in @(Get-ChildItem -LiteralPath $script:ProfileTrashPath -File -Filter "profile-trash-*.json" | Sort-Object LastWriteTimeUtc, Name -Descending)) {
+        if (($file.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or -not (Test-ProfileTrashRecordPath -Path $file.FullName)) { continue }
+        $keep = $keptCount -lt [int]$script:ProfileTrashMaxRecords -and ($keptBytes + [long]$file.Length) -le [long]$script:ProfileTrashMaxBytes
+        if ($keep) {
+            $keptCount++
+            $keptBytes += [long]$file.Length
+        } else {
+            Remove-Item -LiteralPath $file.FullName -Force
+            $removed++
+        }
+    }
+    return $removed
+}
+
+function Save-ProfileTrashRecord {
+    param([string]$Name, [byte[]]$ProfileBytes, [object[]]$AppRules, [object[]]$Schedules)
+    if ([string]::IsNullOrWhiteSpace($Name) -or $null -eq $ProfileBytes) { return "" }
+    try {
+        if (-not (Test-Path -LiteralPath $script:ProfileTrashPath)) { New-Item -ItemType Directory -Path $script:ProfileTrashPath -Force | Out-Null }
+        $trashId = [guid]::NewGuid().ToString("N")
+        $path = Join-Path $script:ProfileTrashPath "profile-trash-$((Get-Date).ToString('yyyyMMdd-HHmmss-fff'))-$trashId.json"
+        if (-not (Test-ProfileTrashRecordPath -Path $path)) { throw "Profile trash target escaped the local trash directory." }
+        $record = [PSCustomObject]@{
+            SchemaVersion = [int]$script:ProfileTrashSchemaVersion
+            TrashId = $trashId
+            DeletedAtUtc = [datetime]::UtcNow.ToString("o")
+            ProfileName = $Name
+            ProfileSha256 = Get-ByteSha256Hex -Bytes $ProfileBytes
+            ProfileContentBase64 = [Convert]::ToBase64String($ProfileBytes)
+            AppRules = @($AppRules)
+            Schedules = @($Schedules)
+        }
+        if (-not (Write-JsonFileSafely -Path $path -Data $record -Depth 8)) { return "" }
+        Remove-OldProfileTrashRecords | Out-Null
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return "" }
+        return $path
+    } catch {
+        return ""
+    }
+}
+
+function Remove-ProfileTrashRecord {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Removes one exact validated local trash record after rollback or restore.')]
+    param([string]$Path)
+    if (-not (Test-ProfileTrashRecordPath -Path $Path)) { return $false }
+    try {
+        if (Test-Path -LiteralPath $Path -PathType Leaf) { Remove-Item -LiteralPath $Path -Force }
+        return (-not (Test-Path -LiteralPath $Path))
+    } catch {
+        return $false
+    }
+}
+
+function Restore-ProfileFromTrash {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Restores an explicitly selected local trash record through transactional profile and automation persistence.')]
+    param(
+        [string]$RecordPath,
+        [scriptblock]$SaveAppRulesAction,
+        [scriptblock]$SaveSchedulesAction
+    )
+    if (-not (Test-ProfileStorageWriteAllowed -Operation "profile restore")) { return $false }
+    if (-not (Test-ProfileTrashRecordPath -Path $RecordPath) -or -not (Test-Path -LiteralPath $RecordPath -PathType Leaf)) {
+        Update-Status "Deleted profile record is no longer available"
+        return $false
+    }
+    try {
+        $record = Get-Content -LiteralPath $RecordPath -Raw | ConvertFrom-Json
+        if (-not (Test-SettingsDocumentSupported -Name "ProfileTrash" -Document $record -Label "Profile trash")) { return $false }
+        $name = Get-SafeProfileName -Name ([string]$record.ProfileName)
+        if ([string]::IsNullOrWhiteSpace($name)) { throw "invalid profile name" }
+        $profileBytes = [Convert]::FromBase64String([string]$record.ProfileContentBase64)
+        if ((Get-ByteSha256Hex -Bytes $profileBytes) -ne [string]$record.ProfileSha256) { throw "profile checksum mismatch" }
+    } catch {
+        Update-Status "Deleted profile record is invalid: $($_.Exception.Message)"
+        return $false
+    }
+    $profilePath = Join-Path $script:ProfilesPath "$name.json"
+    if (Test-Path -LiteralPath $profilePath) {
+        Update-Status "Cannot restore '$name' because a profile with that name already exists"
+        return $false
+    }
+    $originalAppRules = @($script:AppProfileRules)
+    $originalSchedules = @($script:ProfileSchedules)
+    $restoredAppRules = @($record.AppRules | ForEach-Object { $_ })
+    $restoredSchedules = @($record.Schedules | ForEach-Object { $_ })
+    $script:AppProfileRules = @($originalAppRules)
+    foreach ($rule in $restoredAppRules) {
+        if (@($script:AppProfileRules | Where-Object { [string]$_.Exe -eq [string]$rule.Exe -and [string]$_.Profile -eq [string]$rule.Profile }).Count -eq 0) { $script:AppProfileRules += $rule }
+    }
+    $script:ProfileSchedules = @($originalSchedules)
+    foreach ($rule in $restoredSchedules) {
+        if (@($script:ProfileSchedules | Where-Object { [string]$_.Time -eq [string]$rule.Time -and [string]$_.Profile -eq [string]$rule.Profile }).Count -eq 0) { $script:ProfileSchedules += $rule }
+    }
+    if ($null -eq $SaveAppRulesAction) { $SaveAppRulesAction = { Save-AppProfileRules } }
+    if ($null -eq $SaveSchedulesAction) { $SaveSchedulesAction = { Save-ProfileSchedules } }
+    $appRulesSaved = $false
+    $schedulesSaved = $false
+    try {
+        [System.IO.File]::WriteAllBytes($profilePath, $profileBytes)
+        $appRulesSaved = [bool](& $SaveAppRulesAction)
+        if (-not $appRulesSaved) { throw "application rules could not be saved" }
+        $schedulesSaved = [bool](& $SaveSchedulesAction)
+        if (-not $schedulesSaved) { throw "profile schedules could not be saved" }
+    } catch {
+        $failure = $_.Exception.Message
+        $script:AppProfileRules = $originalAppRules
+        $script:ProfileSchedules = $originalSchedules
+        if (Test-Path -LiteralPath $profilePath) { Remove-Item -LiteralPath $profilePath -Force -ErrorAction SilentlyContinue }
+        if ($appRulesSaved) { try { & $SaveAppRulesAction | Out-Null } catch { $null = $_ } }
+        if ($schedulesSaved) { try { & $SaveSchedulesAction | Out-Null } catch { $null = $_ } }
+        Update-Status "Restore of '$name' failed; no profile or automation change was kept: $failure"
+        return $false
+    }
+    $recordRemoved = Remove-ProfileTrashRecord -Path $RecordPath
+    Update-Status $(if ($recordRemoved) { "Restored '$name' and its dependent automation" } else { "Restored '$name'; its duplicate trash record could not be removed" })
+    return $true
+}
+
+function Restore-LatestProfileFromTrash {
+    $latest = @(Get-ProfileTrashRecords | Select-Object -First 1)
+    if ($latest.Count -eq 0) { Update-Status "No deleted profile is available to restore"; return $false }
+    return (Restore-ProfileFromTrash -RecordPath $latest[0].Path)
+}
+
+function Clear-ProfileTrash {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Called only after a separate explicit permanent-delete confirmation in the UI.')]
+    param()
+    $removed = 0
+    foreach ($record in @(Get-ProfileTrashRecords)) {
+        if (Remove-ProfileTrashRecord -Path $record.Path) { $removed++ }
+    }
+    return $removed
+}
+
+function Update-ProfileTrashControls {
+    $records = @(Get-ProfileTrashRecords)
+    if ($restoreProfileBtn) { $restoreProfileBtn.IsEnabled = $records.Count -gt 0 -and -not $script:ProfileStorageOffline }
+    if ($purgeProfileTrashBtn) { $purgeProfileTrashBtn.IsEnabled = $records.Count -gt 0 }
+    if ($profileTrashStatusText) {
+        $profileTrashStatusText.Text = if ($records.Count -eq 0) { "Trash empty" } elseif ($records.Count -eq 1) { "1 deleted profile available" } else { "$($records.Count) deleted profiles available" }
+    }
 }
 
 function Remove-ProfileAndDependencies {
@@ -5572,7 +5773,9 @@ function Remove-ProfileAndDependencies {
         [string]$Name,
         [scriptblock]$DeleteProfileFile,
         [scriptblock]$SaveAppRulesAction,
-        [scriptblock]$SaveSchedulesAction
+        [scriptblock]$SaveSchedulesAction,
+        [scriptblock]$SaveTrashAction,
+        [scriptblock]$RemoveTrashAction
     )
     if (-not (Test-ProfileStorageWriteAllowed -Operation "profile deletion")) { return $false }
     $safeName = Get-SafeProfileName -Name $Name
@@ -5591,12 +5794,22 @@ function Remove-ProfileAndDependencies {
         Update-Status "Profile '$Name' could not be read before deletion; application rules and schedules were not changed: $($_.Exception.Message)"
         return $false
     }
+    $removedAppRules = @($script:AppProfileRules | Where-Object { $_.Profile -eq $safeName })
+    $removedSchedules = @($script:ProfileSchedules | Where-Object { $_.Profile -eq $safeName })
+    if ($null -eq $SaveTrashAction) { $SaveTrashAction = { param($ProfileName, $Bytes, $AppRules, $Schedules) Save-ProfileTrashRecord -Name $ProfileName -ProfileBytes $Bytes -AppRules $AppRules -Schedules $Schedules } }
+    if ($null -eq $RemoveTrashAction) { $RemoveTrashAction = { param($Path) Remove-ProfileTrashRecord -Path $Path } }
+    $trashPath = [string](& $SaveTrashAction $safeName $profileBytes $removedAppRules $removedSchedules)
+    if ([string]::IsNullOrWhiteSpace($trashPath) -or -not (Test-Path -LiteralPath $trashPath -PathType Leaf)) {
+        Update-Status "Profile '$Name' could not be moved to local Trash; nothing was deleted"
+        return $false
+    }
     if ($null -eq $DeleteProfileFile) {
         $DeleteProfileFile = { param([string]$Path) Remove-Item -LiteralPath $Path -ErrorAction Stop }
     }
     $deleteError = $null
     try { & $DeleteProfileFile $profilePath } catch { $deleteError = $_.Exception }
     if (Test-Path -LiteralPath $profilePath) {
+        & $RemoveTrashAction $trashPath | Out-Null
         $detail = if ($null -ne $deleteError) { $deleteError.Message } else { "the file still exists after the delete operation" }
         Update-Status "Profile '$Name' could not be deleted; application rules and schedules were not changed: $detail"
         return $false
@@ -5631,13 +5844,14 @@ function Remove-ProfileAndDependencies {
             try { if (-not [bool](& $SaveSchedulesAction)) { $rollbackFailures.Add("profile schedules") } } catch { $rollbackFailures.Add("profile schedules: $($_.Exception.Message)") }
         }
         if ($rollbackFailures.Count -eq 0) {
+            & $RemoveTrashAction $trashPath | Out-Null
             Update-Status "Profile deletion failed while saving dependencies ($saveFailure); '$Name' and its automation were restored"
         } else {
             Update-Status "Profile deletion failed and rollback was incomplete ($saveFailure): $($rollbackFailures -join '; ')"
         }
         return $false
     }
-    Update-Status "Deleted '$Name' and removed dependent automation"
+    Update-Status "Moved '$Name' and its dependent automation to Trash"
     return $true
 }
 
@@ -7144,6 +7358,7 @@ function Load-AppProfileRules {
     try {
         $data = Read-JsonFileSafely -Path $script:AppProfileRulesPath -Label "App profile rules" -ReadOnly:$script:ProfileStorageOffline
         if ($null -eq $data) { return }
+        if (-not (Test-SettingsDocumentSupported -Name "AppProfileRules" -Document $data -Label "App profile rules")) { return }
         $script:AppProfileEnabled = [bool]$data.Enabled
         foreach ($rule in @($data.Rules)) {
             $exe = Normalize-AppExeName -ExeName ([string]$rule.Exe)
@@ -7159,6 +7374,7 @@ function Load-AppProfileRules {
 function Save-AppProfileRules {
     if (-not (Test-ProfileStorageWriteAllowed -Operation "application rule changes")) { return $false }
     $payload = [PSCustomObject]@{
+        SchemaVersion = [int]$script:AppProfileRulesSchemaVersion
         Enabled = [bool]$script:AppProfileEnabled
         Rules = @($script:AppProfileRules)
     }
@@ -7495,6 +7711,7 @@ function Load-ProfileSchedules {
     try {
         $data = Read-JsonFileSafely -Path $script:ProfileScheduleRulesPath -Label "Profile schedule" -ReadOnly:$script:ProfileStorageOffline
         if ($null -eq $data) { return }
+        if (-not (Test-SettingsDocumentSupported -Name "ProfileSchedules" -Document $data -Label "Profile schedule")) { return }
         $script:ProfileScheduleEnabled = [bool]$data.Enabled
         foreach ($rule in @($data.Rules)) {
             $time = Normalize-ScheduleTime -TimeText ([string]$rule.Time)
@@ -7510,6 +7727,7 @@ function Load-ProfileSchedules {
 function Save-ProfileSchedules {
     if (-not (Test-ProfileStorageWriteAllowed -Operation "schedule changes")) { return $false }
     $payload = [PSCustomObject]@{
+        SchemaVersion = [int]$script:ProfileSchedulesSchemaVersion
         Enabled = [bool]$script:ProfileScheduleEnabled
         Rules = @($script:ProfileSchedules | Sort-Object -Property Time)
     }
@@ -7588,6 +7806,7 @@ function Load-IdleDimSettings {
     try {
         $data = Read-JsonFileSafely -Path $script:IdleDimSettingsPath -Label "Idle dim settings" -ReadOnly:$script:ProfileStorageOffline
         if ($null -eq $data) { return }
+        if (-not (Test-SettingsDocumentSupported -Name "IdleDim" -Document $data -Label "Idle dim settings")) { return }
         $script:IdleDimEnabled = [bool]$data.Enabled
         $script:IdleDimMinutes = [Math]::Max(1, [Math]::Min(240, [int]$data.Minutes))
         $script:IdleDimBrightness = [Math]::Max(0, [Math]::Min(100, [int]$data.Brightness))
@@ -7600,6 +7819,7 @@ function Load-IdleDimSettings {
 function Save-IdleDimSettings {
     if (-not (Test-ProfileStorageWriteAllowed -Operation "idle dim changes")) { return $false }
     $payload = [PSCustomObject]@{
+        SchemaVersion = [int]$script:IdleDimSchemaVersion
         Enabled = [bool]$script:IdleDimEnabled
         Minutes = [int]$script:IdleDimMinutes
         Brightness = [int]$script:IdleDimBrightness
@@ -7694,6 +7914,7 @@ function Load-BatteryProfileSettings {
     try {
         $data = Read-JsonFileSafely -Path $script:BatteryProfileSettingsPath -Label "Battery profile settings" -ReadOnly:$script:ProfileStorageOffline
         if ($null -eq $data) { return }
+        if (-not (Test-SettingsDocumentSupported -Name "BatteryProfile" -Document $data -Label "Battery profile settings")) { return }
         $script:BatteryProfileEnabled = [bool]$data.Enabled
         $script:BatteryBrightness = [Math]::Max(0, [Math]::Min(100, [int]$data.BatteryBrightness))
         $script:AcBrightness = [Math]::Max(0, [Math]::Min(100, [int]$data.AcBrightness))
@@ -7704,7 +7925,8 @@ function Load-BatteryProfileSettings {
 
 function Save-BatteryProfileSettings {
     if (-not (Test-ProfileStorageWriteAllowed -Operation "battery profile changes")) { return $false }
-    $payload = @{
+    $payload = [PSCustomObject]@{
+        SchemaVersion = [int]$script:BatteryProfileSchemaVersion
         Enabled = [bool]$script:BatteryProfileEnabled
         BatteryBrightness = [int]$script:BatteryBrightness
         AcBrightness = [int]$script:AcBrightness
@@ -8402,13 +8624,30 @@ $loadProfileBtn.Add_Click({
 })
 $deleteProfileBtn.Add_Click({
     if (-not (Test-ProfileStorageWriteAllowed -Operation "profile deletion")) { return }
-    if ($profilesList.SelectedItem -ne $null -and [System.Windows.MessageBox]::Show("Delete '$($profilesList.SelectedItem)'?", "Delete", "YesNo", "Question") -eq "Yes") {
+    if ($profilesList.SelectedItem -ne $null -and [System.Windows.MessageBox]::Show("Move '$($profilesList.SelectedItem)' and its dependent automation to local Trash?", "Move profile to Trash", "YesNo", "Question") -eq "Yes") {
         $deletedProfile = [string]$profilesList.SelectedItem
         if (Remove-ProfileAndDependencies -Name $deletedProfile) {
             Update-ProfilesList
             Update-AppProfileControls
             Update-ScheduleControls
         }
+    }
+})
+$restoreProfileBtn.Add_Click({
+    if (Restore-LatestProfileFromTrash) {
+        Update-ProfilesList
+        Update-AppProfileControls
+        Update-ScheduleControls
+    }
+})
+$purgeProfileTrashBtn.Add_Click({
+    $count = @(Get-ProfileTrashRecords).Count
+    if ($count -le 0) { Update-ProfileTrashControls; return }
+    $message = "Permanently delete all $count recoverable profile record$(if ($count -eq 1) { '' } else { 's' })? This cannot be undone."
+    if ([System.Windows.MessageBox]::Show($message, "Empty Profile Trash", "YesNo", "Warning") -eq "Yes") {
+        $removed = Clear-ProfileTrash
+        Update-ProfileTrashControls
+        Update-Status "Permanently deleted $removed profile trash record$(if ($removed -eq 1) { '' } else { 's' })"
     }
 })
 $exportProfilesBtn.Add_Click({
