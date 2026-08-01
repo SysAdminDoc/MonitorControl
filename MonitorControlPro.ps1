@@ -1111,6 +1111,52 @@ $script:UpdatingUI = $false
 $script:ApplyToAll = $false
 $script:AutoModeEnabled = $false
 $script:WmiBrightnessAvailable = $false
+$script:DisplayPathInventory = @()
+$script:DdcAvailabilityDiagnosis = $null
+$script:GpuDriverAdvisories = @()
+# A display can be active in Windows and still have no DDC/CI channel at all.
+# These paths terminate DDC/CI by design, so they are named rather than reported
+# as a failure to talk to the panel.
+$script:DisplayPathSignatures = @(
+    [PSCustomObject]@{
+        Kind = "DisplayLink"
+        Pattern = 'DisplayLink|USB\\VID_17E9'
+        Reason = "DisplayLink terminates the DDC/CI channel inside its own driver, so no application can reach the panel over this path"
+        Fix = "Connect the monitor to a GPU output to control it, or use the DisplayLink monitor only for output"
+    }
+    [PSCustomObject]@{
+        Kind = "IndirectDisplay"
+        Pattern = 'IddCx|Indirect Display|spacedesk|Virtual Display|Duet Display|Amyuni|ROOT\\DISPLAY'
+        Reason = "An indirect display is synthesized in software and has no physical DDC/CI channel"
+        Fix = "Nothing to fix: there is no panel behind this display to address"
+    }
+    [PSCustomObject]@{
+        Kind = "RemoteSession"
+        Pattern = 'Remote Desktop|Microsoft Remote Display|RDPUDD|RDPIDD'
+        Reason = "A remote-session display has no physical panel to address"
+        Fix = "Run the app on the machine the monitor is attached to"
+    }
+    [PSCustomObject]@{
+        Kind = "BasicDisplayAdapter"
+        Pattern = 'Microsoft Basic Display'
+        Reason = "The Microsoft Basic Display Adapter is in use, so the vendor driver that carries DDC/CI is not installed"
+        Fix = "Install the GPU vendor driver and reboot"
+    }
+)
+# Keyed on the vendor branding version rather than the Win32 driver version,
+# because the upstream reports that identify these regressions cite the branded
+# release. Each entry names what breaks and the release that fixed it.
+$script:KnownBadGpuDrivers = @(
+    [PSCustomObject]@{
+        NamePattern = 'AMD|Radeon'
+        BrandingValueName = "RadeonSoftwareVersion"
+        AffectedFrom = "26.1.1"
+        AffectedThrough = "26.2.0"
+        FixedIn = "26.2.1"
+        Issue = "DDC/CI writes are accepted and then dropped, so every Windows brightness tool stops working at once"
+        Reference = "Twinkle Tray 1187 and 1210, Monitorian 728"
+    }
+)
 $script:AmbientLightEnabled = $false
 $script:AmbientLightSensor = $null
 $script:AmbientLightTimer = $null
@@ -2175,7 +2221,7 @@ function Get-StatusMessageSeverity {
     if ($Message -match '(?i)\b(fail(?:ed|ure)?|error|invalid|denied|blocked|offline|corrupt|mismatch(?:ed)?|newer than|not found|unavailable|could not|no (?:DDC/CI )?(?:write )?target)\b') {
         return "Error"
     }
-    if ($Message -match '(?i)\b(warn(?:ing)?|cancel(?:ed|led)?|busy|waiting|unsupported|stale|retry(?:ing)?|disabled)\b') {
+    if ($Message -match '(?i)\b(warn(?:ing)?|cancel(?:ed|led)?|busy|waiting|unsupported|stale|retry(?:ing)?|disabled|partly|partial(?:ly)?)\b') {
         return "Warning"
     }
     return "Info"
@@ -2982,6 +3028,235 @@ function Start-CapabilitiesWorker {
     $script:CapabilitiesWorkerTimer.Start()
 }
 
+function ConvertTo-DriverVersionParts {
+    param([string]$Version)
+    $parts = @()
+    foreach ($token in @(([string]$Version).Trim().Split(@(".", "-", " "), [StringSplitOptions]::RemoveEmptyEntries))) {
+        $number = 0
+        if ([int]::TryParse($token, [ref]$number)) { $parts += $number } else { $parts += 0 }
+    }
+    return $parts
+}
+
+function Compare-DisplayDriverVersion {
+    param([string]$Left, [string]$Right)
+    $leftParts = @(ConvertTo-DriverVersionParts -Version $Left)
+    $rightParts = @(ConvertTo-DriverVersionParts -Version $Right)
+    $count = [Math]::Max($leftParts.Count, $rightParts.Count)
+    for ($i = 0; $i -lt $count; $i++) {
+        $leftValue = if ($i -lt $leftParts.Count) { [int]$leftParts[$i] } else { 0 }
+        $rightValue = if ($i -lt $rightParts.Count) { [int]$rightParts[$i] } else { 0 }
+        if ($leftValue -lt $rightValue) { return -1 }
+        if ($leftValue -gt $rightValue) { return 1 }
+    }
+    return 0
+}
+
+function Test-DisplayDriverVersionInRange {
+    param([string]$Version, [string]$From, [string]$Through)
+    if ([string]::IsNullOrWhiteSpace($Version)) { return $false }
+    if (-not [string]::IsNullOrWhiteSpace($From) -and (Compare-DisplayDriverVersion -Left $Version -Right $From) -lt 0) { return $false }
+    if (-not [string]::IsNullOrWhiteSpace($Through) -and (Compare-DisplayDriverVersion -Left $Version -Right $Through) -gt 0) { return $false }
+    return $true
+}
+
+function Get-GpuDriverAdvisory {
+    param([object[]]$Gpus, [hashtable]$BrandingVersions, [object[]]$Table)
+    if ($null -eq $Table) { $Table = @($script:KnownBadGpuDrivers) }
+    if ($null -eq $BrandingVersions) { $BrandingVersions = @{} }
+    $advisories = @()
+    foreach ($entry in @($Table)) {
+        foreach ($gpu in @($Gpus)) {
+            if ($null -eq $gpu) { continue }
+            $name = [string]$gpu.Name
+            if ([string]::IsNullOrWhiteSpace($name)) { continue }
+            if ($name -notmatch [string]$entry.NamePattern) { continue }
+            $valueName = [string]$entry.BrandingValueName
+            $observed = ""
+            $source = ""
+            if (-not [string]::IsNullOrWhiteSpace($valueName) -and $BrandingVersions.ContainsKey($valueName)) {
+                $observed = [string]$BrandingVersions[$valueName]
+                $source = $valueName
+            }
+            $matched = $false
+            if (-not [string]::IsNullOrWhiteSpace($observed)) {
+                $matched = Test-DisplayDriverVersionInRange -Version $observed -From ([string]$entry.AffectedFrom) -Through ([string]$entry.AffectedThrough)
+            }
+            if (-not $matched -and -not [string]::IsNullOrWhiteSpace([string]$entry.AffectedDriverFrom)) {
+                $observed = [string]$gpu.DriverVersion
+                $source = "DriverVersion"
+                $matched = Test-DisplayDriverVersionInRange -Version $observed -From ([string]$entry.AffectedDriverFrom) -Through ([string]$entry.AffectedDriverThrough)
+            }
+            if (-not $matched) { continue }
+            $advisories += [PSCustomObject]@{
+                Gpu = $name
+                Observed = $observed
+                ObservedSource = $source
+                FixedIn = [string]$entry.FixedIn
+                Issue = [string]$entry.Issue
+                Reference = [string]$entry.Reference
+            }
+        }
+    }
+    return @($advisories)
+}
+
+function Get-GpuBrandingVersions {
+    param([object[]]$Table)
+    if ($null -eq $Table) { $Table = @($script:KnownBadGpuDrivers) }
+    $versions = @{}
+    $names = @()
+    foreach ($entry in @($Table)) {
+        $valueName = [string]$entry.BrandingValueName
+        if (-not [string]::IsNullOrWhiteSpace($valueName) -and $names -notcontains $valueName) { $names += $valueName }
+    }
+    if ($names.Count -eq 0) { return $versions }
+    # The vendor control panel writes its branded release into the display
+    # adapter class key; Win32_VideoController only carries the file version.
+    $classRoot = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+    try {
+        foreach ($key in @(Get-ChildItem -LiteralPath $classRoot -ErrorAction Stop)) {
+            foreach ($valueName in $names) {
+                if ($versions.ContainsKey($valueName)) { continue }
+                $value = $null
+                try { $value = (Get-ItemProperty -LiteralPath $key.PSPath -Name $valueName -ErrorAction Stop).$valueName } catch {}
+                if (-not [string]::IsNullOrWhiteSpace([string]$value)) { $versions[$valueName] = [string]$value }
+            }
+        }
+    } catch {}
+    return $versions
+}
+
+function Get-KnownBadGpuDriverAdvisory {
+    $gpus = @()
+    try { $gpus = @(Get-CimInstance -ClassName Win32_VideoController -ErrorAction Stop) } catch {}
+    if ($gpus.Count -eq 0) { return @() }
+    return @(Get-GpuDriverAdvisory -Gpus $gpus -BrandingVersions (Get-GpuBrandingVersions) -Table @($script:KnownBadGpuDrivers))
+}
+
+function Get-DisplayPathClassification {
+    param([string]$DeviceString, [string]$HardwareId, [string]$AdapterName, [object[]]$Signatures)
+    if ($null -eq $Signatures) { $Signatures = @($script:DisplayPathSignatures) }
+    $haystack = (@($DeviceString, $HardwareId, $AdapterName) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }) -join " "
+    foreach ($signature in @($Signatures)) {
+        if (-not [string]::IsNullOrWhiteSpace($haystack) -and $haystack -match [string]$signature.Pattern) {
+            return [PSCustomObject]@{
+                Kind = [string]$signature.Kind
+                HasControlChannel = $false
+                Reason = [string]$signature.Reason
+                Fix = [string]$signature.Fix
+            }
+        }
+    }
+    return [PSCustomObject]@{ Kind = "Direct"; HasControlChannel = $true; Reason = ""; Fix = "" }
+}
+
+function Get-DisplayPathInventory {
+    param([string[]]$DdcCapableDeviceNames)
+    $capable = @{}
+    foreach ($deviceName in @($DdcCapableDeviceNames)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$deviceName)) { $capable[[string]$deviceName] = $true }
+    }
+    $inventory = @()
+    $devNum = 0
+    $device = New-Object MonitorAPI+DISPLAY_DEVICE
+    $device.cb = [System.Runtime.InteropServices.Marshal]::SizeOf($device)
+    while ([MonitorAPI]::EnumDisplayDevices([NullString]::Value, $devNum, [ref]$device, 0)) {
+        $devNum++
+        if (($device.StateFlags -band [MonitorAPI]::DISPLAY_DEVICE_ACTIVE) -eq 0) { continue }
+        $deviceName = [string]$device.DeviceName
+        $adapterName = [string]$device.DeviceString
+        $monitorDevice = Get-MonitorDisplayDevice -DisplayDeviceName $deviceName
+        $monitorString = if ($monitorDevice) { [string]$monitorDevice.DeviceString } else { "" }
+        $monitorId = if ($monitorDevice) { [string]$monitorDevice.DeviceID } else { "" }
+        $classification = Get-DisplayPathClassification -DeviceString $monitorString -HardwareId $monitorId -AdapterName $adapterName
+        $hasChannel = $capable.ContainsKey($deviceName)
+        $inventory += [PSCustomObject]@{
+            DeviceName = $deviceName
+            Name = if ([string]::IsNullOrWhiteSpace($monitorString)) { $adapterName } else { $monitorString }
+            Adapter = $adapterName
+            Kind = if ($hasChannel) { "Direct" } else { [string]$classification.Kind }
+            HasControlChannel = $hasChannel
+            Reason = if ($hasChannel) { "" } else { [string]$classification.Reason }
+            Fix = if ($hasChannel) { "" } else { [string]$classification.Fix }
+        }
+    }
+    return @($inventory)
+}
+
+function Get-DdcAvailabilityDiagnosis {
+    param([object[]]$Paths, [object[]]$GpuAdvisories, [bool]$WmiBrightnessAvailable)
+    $displayCount = @($Paths).Count
+    $capableCount = @(@($Paths) | Where-Object { $null -ne $_ -and [bool]$_.HasControlChannel }).Count
+    $causes = @()
+    foreach ($advisory in @($GpuAdvisories)) {
+        if ($null -eq $advisory) { continue }
+        $causes += [PSCustomObject]@{
+            Kind = "GpuDriver"
+            Title = "$($advisory.Gpu) driver $($advisory.Observed) is a release known to break DDC/CI"
+            Detail = "$($advisory.Issue). Reported in $($advisory.Reference)."
+            Fix = "Update the display driver to $($advisory.FixedIn) or newer, or roll back to the release in use before the problem started."
+        }
+    }
+    $named = 0
+    $groups = @{}
+    $order = @()
+    foreach ($path in @($Paths)) {
+        if ($null -eq $path -or [bool]$path.HasControlChannel) { continue }
+        $kind = [string]$path.Kind
+        if ($kind -eq "Direct") { continue }
+        $named++
+        if (-not $groups.ContainsKey($kind)) {
+            $groups[$kind] = [PSCustomObject]@{ Count = 0; Reason = [string]$path.Reason; Fix = [string]$path.Fix; Displays = @() }
+            $order += $kind
+        }
+        $groups[$kind].Count = [int]$groups[$kind].Count + 1
+        $groups[$kind].Displays = @(@($groups[$kind].Displays) + [string]$path.Name)
+    }
+    foreach ($kind in $order) {
+        $group = $groups[$kind]
+        $causes += [PSCustomObject]@{
+            Kind = $kind
+            Title = "$([int]$group.Count) display(s) on a $kind path have no control channel: $(@($group.Displays) -join ', ')"
+            Detail = [string]$group.Reason
+            Fix = [string]$group.Fix
+        }
+    }
+    $unexplained = [Math]::Max(0, $displayCount - $capableCount - $named)
+    if ($unexplained -gt 0) {
+        $causes += [PSCustomObject]@{
+            Kind = "Unclassified"
+            Title = "$unexplained display(s) answer no DDC/CI request on a path this app cannot identify"
+            Detail = "An MST hub, a passive or active adapter, a KVM, or a cable that omits the DDC pins all terminate DDC/CI without reporting an error, and many monitors ship with DDC/CI switched off in the OSD."
+            Fix = "Switch DDC/CI on in the monitor OSD, connect the monitor straight to a GPU output with a certified cable, and retest with no hub, dock, or KVM in the path."
+        }
+    }
+    if ($capableCount -eq 0 -and $WmiBrightnessAvailable) {
+        $causes += [PSCustomObject]@{
+            Kind = "InternalPanel"
+            Title = "The internal laptop panel is controlled through WMI instead"
+            Detail = "Integrated panels are driven by the graphics driver, not by DDC/CI, so brightness works while every other VCP feature does not."
+            Fix = "Use an external monitor for contrast, input switching, and colour controls."
+        }
+    }
+    $severity = if ($displayCount -gt 0 -and $capableCount -eq 0) { "Error" } elseif (@($causes).Count -gt 0) { "Warning" } else { "None" }
+    $summary = "$displayCount display(s) detected, $capableCount with a DDC/CI control channel"
+    $headline = switch ($severity) {
+        "Error" { "DDC/CI control is unavailable: $summary. " + $(if (@($causes).Count -gt 0) { [string]@($causes)[0].Title } else { "No cause identified." }) }
+        "Warning" { "DDC/CI is partly available: $summary. " + [string]@($causes)[0].Title }
+        default { $summary }
+    }
+    if ($severity -ne "None") { $headline = "$headline See System, DDC Compatibility Report." }
+    return [PSCustomObject]@{
+        DisplayCount = [int]$displayCount
+        DdcCapableCount = [int]$capableCount
+        Severity = [string]$severity
+        Summary = [string]$summary
+        Headline = [string]$headline
+        Causes = @($causes)
+    }
+}
+
 function Get-Monitors {
     Stop-MonitorSettingsWorker -Cancel
     Stop-VcpWorker -Cancel
@@ -2995,7 +3270,7 @@ function Get-Monitors {
     $devNum = 0
     $device = New-Object MonitorAPI+DISPLAY_DEVICE
     $device.cb = [System.Runtime.InteropServices.Marshal]::SizeOf($device)
-    while ([MonitorAPI]::EnumDisplayDevices($null, $devNum, [ref]$device, 0)) {
+    while ([MonitorAPI]::EnumDisplayDevices([NullString]::Value, $devNum, [ref]$device, 0)) {
         if ($device.StateFlags -band [MonitorAPI]::DISPLAY_DEVICE_ACTIVE) { $displayDevices[$device.DeviceName] = $device.DeviceString }
         $devNum++
     }
@@ -3036,6 +3311,10 @@ function Get-Monitors {
             }
         }
     }
+    $capableDeviceNames = @(@($script:PhysicalMonitors) | Where-Object { $_.Handle -ne [IntPtr]::Zero } | ForEach-Object { [string]$_.DeviceName })
+    $script:DisplayPathInventory = @(Get-DisplayPathInventory -DdcCapableDeviceNames $capableDeviceNames)
+    $script:GpuDriverAdvisories = @(Get-KnownBadGpuDriverAdvisory)
+    $script:DdcAvailabilityDiagnosis = Get-DdcAvailabilityDiagnosis -Paths $script:DisplayPathInventory -GpuAdvisories $script:GpuDriverAdvisories -WmiBrightnessAvailable $script:WmiBrightnessAvailable
     if ($script:PhysicalMonitors.Count -eq 0) {
         $fallbackName = if ($script:WmiBrightnessAvailable) { "Integrated Laptop Display" } else { "No DDC/CI Monitor" }
         $fallbackDevice = if ($script:WmiBrightnessAvailable) { "WMI" } else { "" }
@@ -3055,6 +3334,9 @@ function Get-Monitors {
         $script:PhysicalMonitors += $fallbackObject
     }
     Sync-DisplayRecoveryInventory
+    if ($script:DdcAvailabilityDiagnosis -and [string]$script:DdcAvailabilityDiagnosis.Severity -ne "None") {
+        Update-Status ([string]$script:DdcAvailabilityDiagnosis.Headline)
+    }
 }
 
 function Format-DdcDiagnostic {
@@ -3761,6 +4043,29 @@ function New-DdcCompatibilityReport {
     [void]$sb.AppendLine("")
     [void]$sb.AppendLine("GPU drivers:")
     foreach ($gpu in @($system.GPUs)) { [void]$sb.AppendLine("- $gpu") }
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("DDC availability:")
+    $diagnosis = $script:DdcAvailabilityDiagnosis
+    if ($null -eq $diagnosis) {
+        [void]$sb.AppendLine("- not evaluated")
+    } else {
+        [void]$sb.AppendLine("- $($diagnosis.Summary) (severity $($diagnosis.Severity))")
+        foreach ($cause in @($diagnosis.Causes)) {
+            [void]$sb.AppendLine("- $($cause.Title)")
+            [void]$sb.AppendLine("    why: $($cause.Detail)")
+            [void]$sb.AppendLine("    try: $($cause.Fix)")
+        }
+    }
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("Display paths:")
+    if (@($script:DisplayPathInventory).Count -eq 0) {
+        [void]$sb.AppendLine("- none enumerated")
+    } else {
+        foreach ($path in @($script:DisplayPathInventory)) {
+            $channelText = if ([bool]$path.HasControlChannel) { "DDC/CI channel" } else { "no DDC/CI channel" }
+            [void]$sb.AppendLine("- $($path.DeviceName) [$($path.Kind)] $channelText | $($path.Name) | adapter $($path.Adapter)")
+        }
+    }
     [void]$sb.AppendLine("")
     [void]$sb.AppendLine("Monitors:")
     foreach ($target in @($Targets | Sort-Object -Property Index)) {

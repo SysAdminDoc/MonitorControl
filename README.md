@@ -431,10 +431,22 @@ Use **Sync Folder** to point profile storage at a OneDrive or Dropbox folder. Th
 Laptop integrated displays typically don't support DDC/CI. Use Windows brightness controls or WMI-based tools instead.
 
 ### "No DDC/CI Monitor" Message
-Your monitor either:
-- Doesn't support DDC/CI
-- Has DDC/CI disabled in OSD
-- Is connected through an incompatible adapter/dock
+
+The app no longer stops at that message. Every enumeration cross-checks how many displays Windows
+reports against how many of them answered a DDC/CI request, and names the difference:
+
+| Reported cause | What it means | What to try |
+| --- | --- | --- |
+| GPU driver known to break DDC/CI | Your installed driver matches a release with a confirmed DDC/CI regression. The banner names the release that fixed it. | Update to the named release or newer, or roll back to the driver you used before |
+| DisplayLink | DisplayLink terminates the DDC/CI channel inside its own driver, so no application can reach the panel | Connect the monitor to a GPU output, or use the DisplayLink monitor for output only |
+| Indirect display | A software-synthesized display (`IddCx`, spacedesk, virtual/duplicate adapters) with no physical panel behind it | Nothing to fix - there is no panel to address |
+| Remote session | The display belongs to an RDP session, not to hardware on this machine | Run the app on the machine the monitor is attached to |
+| Basic display adapter | The Microsoft Basic Display Adapter is active, so the vendor driver that carries DDC/CI is not installed | Install the GPU vendor driver and reboot |
+| Internal panel | The laptop panel answers WMI brightness but no other VCP feature | Use an external monitor for contrast, input switching, and colour |
+| Unidentified path | The display answers nothing and its path is not one of the above - typically an MST hub, an adapter, a KVM, or a cable missing the DDC pins, or DDC/CI switched off in the OSD | Switch DDC/CI on in the OSD, then connect straight to a GPU output with a certified cable and no hub, dock, or KVM |
+
+The full breakdown - every display path, its classification, and whether it answered - is in the
+**DDC Compatibility Report** on the **System** tab.
 
 ## Technical Details
 
