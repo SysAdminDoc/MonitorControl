@@ -871,7 +871,7 @@ $script:CapabilitiesConsentPromptHandled = $false
 $script:VcpWriteSafetySettingsPath = ""
 $script:VcpWriteSafetySchemaVersion = 1
 $script:RiskyVcpEnabledIdentityKeys = @{}
-$script:RiskyVcpCodes = @(0x04, 0x08, 0x60, 0xD6, 0xE8, 0xE9)
+$script:RiskyVcpCodes = @(0x04, 0x08, 0x14, 0x60, 0xCA, 0xCC, 0xD6, 0xD7, 0xE8, 0xE9)
 # Continuous VCP codes whose reported maximum is monitor-defined. Stored profile,
 # automation, tray, and bridge values for these codes are percentages; the raw value
 # is derived per monitor at the write boundary. Discrete codes (color preset, display
@@ -1378,10 +1378,10 @@ function Update-CapabilityControls {
     Set-ControlVcpSupport -Control $resetColorBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_RESTORE_FACTORY_COLOR) -Value 1 -Risky
     Set-ControlVcpSupport -Control $factoryResetBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_RESTORE_FACTORY_DEFAULTS) -Value 1 -Risky
     Set-ControlVcpSupport -Control $allMonitorsStandbyBtn -Monitor $Monitor -Code ([MonitorAPI]::VCP_POWER_MODE) -Value ([MonitorAPI]::POWER_STANDBY) -Risky
-    Set-ControlVcpSupport -Control $colorTempWarm -Monitor $Monitor -Code ([MonitorAPI]::VCP_COLOR_PRESET) -Value ([MonitorAPI]::COLOR_PRESET_5000K)
-    Set-ControlVcpSupport -Control $colorTemp6500 -Monitor $Monitor -Code ([MonitorAPI]::VCP_COLOR_PRESET) -Value ([MonitorAPI]::COLOR_PRESET_6500K)
-    Set-ControlVcpSupport -Control $colorTempCool -Monitor $Monitor -Code ([MonitorAPI]::VCP_COLOR_PRESET) -Value ([MonitorAPI]::COLOR_PRESET_9300K)
-    Set-ControlVcpSupport -Control $colorTempSRGB -Monitor $Monitor -Code ([MonitorAPI]::VCP_COLOR_PRESET) -Value ([MonitorAPI]::COLOR_PRESET_SRGB)
+    Set-ControlVcpSupport -Control $colorTempWarm -Monitor $Monitor -Code ([MonitorAPI]::VCP_COLOR_PRESET) -Value ([MonitorAPI]::COLOR_PRESET_5000K) -Risky
+    Set-ControlVcpSupport -Control $colorTemp6500 -Monitor $Monitor -Code ([MonitorAPI]::VCP_COLOR_PRESET) -Value ([MonitorAPI]::COLOR_PRESET_6500K) -Risky
+    Set-ControlVcpSupport -Control $colorTempCool -Monitor $Monitor -Code ([MonitorAPI]::VCP_COLOR_PRESET) -Value ([MonitorAPI]::COLOR_PRESET_9300K) -Risky
+    Set-ControlVcpSupport -Control $colorTempSRGB -Monitor $Monitor -Code ([MonitorAPI]::VCP_COLOR_PRESET) -Value ([MonitorAPI]::COLOR_PRESET_SRGB) -Risky
     Set-ControlVcpSupport -Control $dynamicContrastOff -Monitor $Monitor -Code ([MonitorAPI]::VCP_DISPLAY_MODE) -Value ([MonitorAPI]::DISPLAY_MODE_STANDARD)
     Set-ControlVcpSupport -Control $dynamicContrastOn -Monitor $Monitor -Code ([MonitorAPI]::VCP_DISPLAY_MODE) -Value ([MonitorAPI]::DISPLAY_MODE_DYNAMIC_CONTRAST)
     Set-ControlVcpSupport -Control $pictureModeWeb -Monitor $Monitor -Code ([MonitorAPI]::VCP_DISPLAY_MODE) -Value ([MonitorAPI]::DISPLAY_MODE_PRODUCTIVITY)
@@ -3102,12 +3102,29 @@ function Invoke-VerifiedVcpTransaction {
     }
 }
 
+function Get-VcpWriteRiskNote {
+    param([int]$Code)
+    switch ($Code) {
+        0x14 { return "Some monitors keep a color preset after this app closes and need a factory reset to undo it." }
+        0xCA { return "This can disable the monitor's own buttons and on-screen menu, which is the only way to recover a display that stops responding to software." }
+        0xCC { return "This changes the language of the monitor's own on-screen menu, which can make its settings hard to read." }
+        0xD6 { return "Some monitors enter standby and will not wake from software; recovery may need the physical power button or a cable reseat." }
+        0xD7 { return "This changes auxiliary power output, which can cut power to devices attached to the monitor." }
+        0x60 { return "If the selected input has no signal the screen goes black, and software control may be unavailable until you switch back with the monitor's buttons." }
+        0x04 { return "This resets every monitor setting to factory defaults and cannot be undone from this app." }
+        0x08 { return "This resets the monitor's color settings to factory defaults." }
+        default { return "" }
+    }
+}
+
 function Format-VcpWriteConfirmation {
     param([object[]]$Operations, [string]$ActionLabel = "Direct VCP write")
     $items = @($Operations)
     $code = if ($items.Count -gt 0) { [int]$items[0].Code } else { 0 }
     $value = if ($items.Count -gt 0) { [uint32]$items[0].Value } else { 0 }
     $targets = @($items | ForEach-Object { [string]$_.MonitorName } | Sort-Object -Unique)
+    $riskNote = Get-VcpWriteRiskNote -Code $code
+    $riskLine = if ([string]::IsNullOrWhiteSpace($riskNote)) { "" } else { "$riskNote`n`n" }
     return @"
 $ActionLabel
 
@@ -3115,7 +3132,7 @@ VCP code: 0x$("{0:X2}" -f $code) ($(Get-VcpDescription -Code $code))
 Value: $value
 Target: $($targets -join ", ")
 
-This write may blank the display, change its input, remove access to the current desktop, or reset monitor settings. MonitorControl Pro will attempt an immediate readback, but some commands cannot be verified after the display changes state.
+$riskLine`This write may blank the display, change its input, remove access to the current desktop, or reset monitor settings. MonitorControl Pro will attempt an immediate readback, but some commands cannot be verified after the display changes state.
 
 Apply this exact code and value?
 "@
@@ -3498,7 +3515,7 @@ function New-DdcCompatibilityReport {
     [void]$sb.AppendLine("App version: 3.34.0")
     [void]$sb.AppendLine("OS: $($system.OS)")
     [void]$sb.AppendLine("PowerShell: $($system.PowerShell)")
-    [void]$sb.AppendLine("Probe safety: power, input, reset, PiP/PbP, and arbitrary VCP codes are not automatically queried")
+    [void]$sb.AppendLine("Probe safety: read-only probes only; risky codes are never written automatically and power, input, reset, PiP/PbP, OSD, and arbitrary codes are not queried")
     [void]$sb.AppendLine("Redundant writes suppressed this session: $(Get-SuppressedDdcWriteCount)")
     [void]$sb.AppendLine("")
     [void]$sb.AppendLine("GPU drivers:")
@@ -9386,10 +9403,10 @@ $volumeSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$
 $sharpnessSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$sharpnessSlider.Value; $sharpnessValue.Text = $v; Set-ScaledVcpFromSlider -VCPCode ([MonitorAPI]::VCP_SHARPNESS) -RawValue $v | Out-Null })
 $muteCheckbox.Add_Checked({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_MUTE) -Value 1 }); $muteCheckbox.Add_Unchecked({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_MUTE) -Value 2 })
 
-$colorTempWarm.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_COLOR_PRESET) -Value ([MonitorAPI]::COLOR_PRESET_5000K); Update-Status "Color: 5000K (Warm)" })
-$colorTemp6500.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_COLOR_PRESET) -Value ([MonitorAPI]::COLOR_PRESET_6500K); Update-Status "Color: 6500K" })
-$colorTempCool.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_COLOR_PRESET) -Value ([MonitorAPI]::COLOR_PRESET_9300K); Update-Status "Color: 9300K (Cool)" })
-$colorTempSRGB.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_COLOR_PRESET) -Value ([MonitorAPI]::COLOR_PRESET_SRGB); Update-Status "Color: sRGB" })
+$colorTempWarm.Add_Click({ Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_COLOR_PRESET) -Value ([MonitorAPI]::COLOR_PRESET_5000K) -ActionLabel "Set color temperature to 5000K (Warm)" | Out-Null })
+$colorTemp6500.Add_Click({ Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_COLOR_PRESET) -Value ([MonitorAPI]::COLOR_PRESET_6500K) -ActionLabel "Set color temperature to 6500K" | Out-Null })
+$colorTempCool.Add_Click({ Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_COLOR_PRESET) -Value ([MonitorAPI]::COLOR_PRESET_9300K) -ActionLabel "Set color temperature to 9300K (Cool)" | Out-Null })
+$colorTempSRGB.Add_Click({ Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_COLOR_PRESET) -Value ([MonitorAPI]::COLOR_PRESET_SRGB) -ActionLabel "Set color temperature to sRGB" | Out-Null })
 
 $dynamicContrastOff.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_DISPLAY_MODE) -Value ([MonitorAPI]::DISPLAY_MODE_STANDARD); Update-Status "Dynamic contrast off" })
 $dynamicContrastOn.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_DISPLAY_MODE) -Value ([MonitorAPI]::DISPLAY_MODE_DYNAMIC_CONTRAST); Update-Status "Dynamic contrast on" })
