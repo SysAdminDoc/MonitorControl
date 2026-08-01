@@ -11,6 +11,39 @@ function New-AutomationBridgeApiKey {
     return (($bytes | ForEach-Object { $_.ToString("x2") }) -join "")
 }
 
+function Get-AutomationBridgeDpapiEntropy {
+    param([switch]$Create)
+    if ([string]::IsNullOrWhiteSpace($script:AutomationBridgeEntropyPath)) {
+        throw "Automation bridge DPAPI entropy path is unavailable"
+    }
+    if (Test-Path -LiteralPath $script:AutomationBridgeEntropyPath -PathType Leaf) {
+        $existing = [System.IO.File]::ReadAllBytes($script:AutomationBridgeEntropyPath)
+        if ($existing.Length -ne 32) { throw "Automation bridge DPAPI entropy file is invalid" }
+        return ,$existing
+    }
+    if (-not $Create) { return $null }
+    $directory = [System.IO.Path]::GetDirectoryName($script:AutomationBridgeEntropyPath)
+    if (-not (Test-Path -LiteralPath $directory)) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
+    $entropy = New-Object byte[] 32
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($entropy) } finally { $rng.Dispose() }
+    try {
+        $stream = [System.IO.File]::Open(
+            $script:AutomationBridgeEntropyPath,
+            [System.IO.FileMode]::CreateNew,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::Read
+        )
+        try { $stream.Write($entropy, 0, $entropy.Length) } finally { $stream.Dispose() }
+        return ,$entropy
+    } catch [System.IO.IOException] {
+        [Array]::Clear($entropy, 0, $entropy.Length)
+        $existing = [System.IO.File]::ReadAllBytes($script:AutomationBridgeEntropyPath)
+        if ($existing.Length -ne 32) { throw "Automation bridge DPAPI entropy file is invalid" }
+        return ,$existing
+    }
+}
+
 function Protect-AutomationBridgeApiKey {
     param([string]$ApiKey)
     if ([string]::IsNullOrWhiteSpace($ApiKey)) { return "" }
@@ -18,14 +51,14 @@ function Protect-AutomationBridgeApiKey {
         Add-Type -AssemblyName System.Security -ErrorAction Stop
     }
     $plainBytes = [System.Text.Encoding]::UTF8.GetBytes($ApiKey)
-    $entropy = [System.Text.Encoding]::UTF8.GetBytes("MonitorControlPro.AutomationBridge.v2")
+    [byte[]]$entropy = Get-AutomationBridgeDpapiEntropy -Create
     try {
         $protectedBytes = [System.Security.Cryptography.ProtectedData]::Protect(
             $plainBytes,
             $entropy,
             [System.Security.Cryptography.DataProtectionScope]::CurrentUser
         )
-        return "dpapi:v1:$([Convert]::ToBase64String($protectedBytes))"
+        return "dpapi:v2:$([Convert]::ToBase64String($protectedBytes))"
     } finally {
         if ($plainBytes.Length -gt 0) { [Array]::Clear($plainBytes, 0, $plainBytes.Length) }
         if ($entropy.Length -gt 0) { [Array]::Clear($entropy, 0, $entropy.Length) }
@@ -34,26 +67,49 @@ function Protect-AutomationBridgeApiKey {
 
 function Unprotect-AutomationBridgeApiKey {
     param([string]$ProtectedApiKey)
-    if ([string]::IsNullOrWhiteSpace($ProtectedApiKey) -or -not $ProtectedApiKey.StartsWith("dpapi:v1:", [StringComparison]::Ordinal)) { return "" }
+    if ([string]::IsNullOrWhiteSpace($ProtectedApiKey) -or $ProtectedApiKey -notmatch '^dpapi:v[12]:') { return "" }
     if ($null -eq ("System.Security.Cryptography.ProtectedData" -as [type])) {
         Add-Type -AssemblyName System.Security -ErrorAction Stop
     }
     $encoded = $ProtectedApiKey.Substring(9)
-    $entropy = [System.Text.Encoding]::UTF8.GetBytes("MonitorControlPro.AutomationBridge.v2")
-    $plainBytes = $null
+    $entropyCandidates = New-Object System.Collections.Generic.List[object]
+    if ($ProtectedApiKey.StartsWith("dpapi:v2:", [StringComparison]::Ordinal)) {
+        try {
+            [byte[]]$installEntropy = Get-AutomationBridgeDpapiEntropy
+            if ($installEntropy.Length -ne 32) { return "" }
+            $entropyCandidates.Add($installEntropy)
+        } catch {
+            return ""
+        }
+    } else {
+        $entropyCandidates.Add([System.Text.Encoding]::UTF8.GetBytes("MonitorControlPro.AutomationBridge.v2"))
+        $entropyCandidates.Add($null)
+    }
+    $protectedBytes = $null
     try {
         $protectedBytes = [Convert]::FromBase64String($encoded)
-        $plainBytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
-            $protectedBytes,
-            $entropy,
-            [System.Security.Cryptography.DataProtectionScope]::CurrentUser
-        )
-        return [System.Text.Encoding]::UTF8.GetString($plainBytes)
+        foreach ($candidate in $entropyCandidates) {
+            [byte[]]$entropy = $candidate
+            $plainBytes = $null
+            try {
+                $plainBytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
+                    $protectedBytes,
+                    $entropy,
+                    [System.Security.Cryptography.DataProtectionScope]::CurrentUser
+                )
+                return [System.Text.Encoding]::UTF8.GetString($plainBytes)
+            } catch {
+                $plainBytes = $null
+            } finally {
+                if ($null -ne $plainBytes -and $plainBytes.Length -gt 0) { [Array]::Clear($plainBytes, 0, $plainBytes.Length) }
+                if ($null -ne $entropy -and $entropy.Length -gt 0) { [Array]::Clear($entropy, 0, $entropy.Length) }
+            }
+        }
+        return ""
     } catch {
         return ""
     } finally {
-        if ($null -ne $plainBytes -and $plainBytes.Length -gt 0) { [Array]::Clear($plainBytes, 0, $plainBytes.Length) }
-        if ($entropy.Length -gt 0) { [Array]::Clear($entropy, 0, $entropy.Length) }
+        if ($null -ne $protectedBytes -and $protectedBytes.Length -gt 0) { [Array]::Clear($protectedBytes, 0, $protectedBytes.Length) }
     }
 }
 
@@ -119,12 +175,14 @@ function Load-AutomationBridgeSettings {
                     }
                     if ($data.Port) { $script:AutomationBridgePort = [Math]::Max(1024, [Math]::Min(65535, [int]$data.Port)) }
                     if ($data.PSObject.Properties.Name -contains "ApiKeyProtected") {
-                        $unprotected = Unprotect-AutomationBridgeApiKey -ProtectedApiKey ([string]$data.ApiKeyProtected)
+                        $protectedApiKey = [string]$data.ApiKeyProtected
+                        $unprotected = Unprotect-AutomationBridgeApiKey -ProtectedApiKey $protectedApiKey
                         if ([string]::IsNullOrWhiteSpace($unprotected)) {
                             $script:AutomationBridgeEnabled = $false
                             $script:AutomationBridgeLastError = "Stored API key could not be unlocked"
                         } else {
                             $script:AutomationBridgeApiKey = $unprotected
+                            if ($protectedApiKey.StartsWith("dpapi:v1:", [StringComparison]::Ordinal)) { $rewriteSettings = $true }
                         }
                     } elseif ($data.PSObject.Properties.Name -contains "ApiKey" -and -not [string]::IsNullOrWhiteSpace([string]$data.ApiKey)) {
                         $script:AutomationBridgeApiKey = [string]$data.ApiKey

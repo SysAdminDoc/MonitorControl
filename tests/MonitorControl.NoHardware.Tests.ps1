@@ -302,6 +302,7 @@ public static class MonitorControlVcpWriteProbe
         "Get-VcpDescription",
         "Format-VcpWriteConfirmation",
         "New-AutomationBridgeApiKey",
+        "Get-AutomationBridgeDpapiEntropy",
         "Protect-AutomationBridgeApiKey",
         "Unprotect-AutomationBridgeApiKey",
         "Get-AutomationBridgeSettingsObject",
@@ -654,6 +655,60 @@ Describe "Native API startup compilation" {
         {
             Import-MonitorControlNativeApi -TypeDefinition "empty" -TypeExists { $false } -CompileType { param([string]$Definition) }
         } | Should -Throw -ExpectedMessage "*expected type MonitorAPI was not created*"
+    }
+}
+
+Describe "Literal-only XAML loading" {
+    It "traces every XamlReader load to a non-interpolated here-string" {
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:AppPath, [ref]$tokens, [ref]$errors)
+        $errors | Should -BeNullOrEmpty
+        $assignments = @($ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true))
+        $loadCalls = @($ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+                $node.Expression.Extent.Text -eq '[System.Windows.Markup.XamlReader]' -and
+                $node.Member.Extent.Text -eq 'Load'
+        }, $true))
+
+        $loadCalls.Count | Should -Be 2
+        foreach ($loadCall in $loadCalls) {
+            $loadCall.Arguments.Count | Should -Be 1
+            $loadCall.Arguments[0] | Should -BeOfType ([System.Management.Automation.Language.VariableExpressionAst])
+            $readerName = $loadCall.Arguments[0].VariablePath.UserPath
+            $readerAssignment = @($assignments | Where-Object {
+                $_.Extent.StartOffset -lt $loadCall.Extent.StartOffset -and
+                $_.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                $_.Left.VariablePath.UserPath -eq $readerName
+            } | Select-Object -Last 1)
+            $readerAssignment.Count | Should -Be 1
+            $readerAssignment[0].Right.Extent.Text | Should -Match 'New-Object\s+System\.Xml\.XmlNodeReader\s+\$[A-Za-z][A-Za-z0-9]*'
+            $xamlVariable = @($readerAssignment[0].Right.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.VariableExpressionAst]
+            }, $true) | Select-Object -Last 1)[0].VariablePath.UserPath
+            $xamlAssignment = @($assignments | Where-Object {
+                $leftVariable = $_.Left.Find({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.VariableExpressionAst]
+                }, $true)
+                $_.Extent.StartOffset -lt $readerAssignment[0].Extent.StartOffset -and
+                $null -ne $leftVariable -and
+                $leftVariable.VariablePath.UserPath -eq $xamlVariable
+            } | Select-Object -Last 1)
+            $xamlAssignment.Count | Should -Be 1
+            $literal = $xamlAssignment[0].Right.Find({
+                param($node)
+                $node -is [System.Management.Automation.Language.StringConstantExpressionAst] -or
+                    $node -is [System.Management.Automation.Language.ExpandableStringExpressionAst]
+            }, $true)
+            $literal | Should -Not -BeNullOrEmpty
+            $literal.Extent.Text | Should -Match '^@"'
+            if ($literal -is [System.Management.Automation.Language.ExpandableStringExpressionAst]) {
+                @($literal.NestedExpressions).Count | Should -Be 0
+            }
+        }
     }
 }
 
@@ -2066,8 +2121,9 @@ Describe "Automation bridge protected settings and routing" {
     BeforeEach {
         Get-ChildItem -LiteralPath $TestDrive -Force | Remove-Item -Recurse -Force
         $script:AutomationBridgeSettingsPath = Join-Path $TestDrive "automation-bridge.json"
+        $script:AutomationBridgeEntropyPath = Join-Path $TestDrive "automation-bridge.entropy"
         $script:AutomationBridgeWriteLogPath = Join-Path $TestDrive "automation-bridge-writes.jsonl"
-        $script:AutomationBridgeSettingsSchemaVersion = 2
+        $script:AutomationBridgeSettingsSchemaVersion = 3
         $script:AutomationBridgeAuditLogMaxBytes = 1024
         $script:AutomationBridgeEnabled = $true
         $script:AutomationBridgeBindAddress = "127.0.0.1"
@@ -2088,8 +2144,45 @@ Describe "Automation bridge protected settings and routing" {
         $saved = $raw | ConvertFrom-Json
         $raw | Should -Not -Match ([regex]::Escape($script:AutomationBridgeApiKey))
         $saved.PSObject.Properties.Name | Should -Not -Contain "ApiKey"
-        $saved.ApiKeyProtected | Should -Match '^dpapi:v1:'
+        $saved.ApiKeyProtected | Should -Match '^dpapi:v2:'
+        (Get-Item -LiteralPath $script:AutomationBridgeEntropyPath).Length | Should -Be 32
+        $entropyBefore = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($script:AutomationBridgeEntropyPath))
+        Save-AutomationBridgeSettings | Should -BeTrue
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($script:AutomationBridgeEntropyPath)) | Should -Be $entropyBefore
         Unprotect-AutomationBridgeApiKey -ProtectedApiKey $saved.ApiKeyProtected | Should -Be $script:AutomationBridgeApiKey
+    }
+
+    It "migrates a legacy DPAPI blob to per-install entropy without changing the key" {
+        $legacyKey = "legacy-dpapi-0123456789abcdef"
+        $plainBytes = [System.Text.Encoding]::UTF8.GetBytes($legacyKey)
+        $legacyEntropy = [System.Text.Encoding]::UTF8.GetBytes("MonitorControlPro.AutomationBridge.v2")
+        try {
+            $protectedBytes = [System.Security.Cryptography.ProtectedData]::Protect(
+                $plainBytes,
+                $legacyEntropy,
+                [System.Security.Cryptography.DataProtectionScope]::CurrentUser
+            )
+            $legacyBlob = "dpapi:v1:$([Convert]::ToBase64String($protectedBytes))"
+        } finally {
+            [Array]::Clear($plainBytes, 0, $plainBytes.Length)
+            [Array]::Clear($legacyEntropy, 0, $legacyEntropy.Length)
+        }
+        Set-Content -LiteralPath $script:AutomationBridgeSettingsPath -Encoding UTF8 -Value (
+            @{
+                SchemaVersion = 2
+                Enabled = $false
+                BindAddress = "127.0.0.1"
+                Port = 34291
+                ApiKeyProtected = $legacyBlob
+            } | ConvertTo-Json
+        )
+
+        Load-AutomationBridgeSettings
+
+        $script:AutomationBridgeApiKey | Should -Be $legacyKey
+        $saved = Get-Content -LiteralPath $script:AutomationBridgeSettingsPath -Raw | ConvertFrom-Json
+        $saved.ApiKeyProtected | Should -Match '^dpapi:v2:'
+        (Get-Item -LiteralPath $script:AutomationBridgeEntropyPath).Length | Should -Be 32
     }
 
     It "drops the legacy MQTT field from a settings document that still carries it" {
@@ -2126,7 +2219,7 @@ Describe "Automation bridge protected settings and routing" {
         $script:AutomationBridgeApiKey | Should -Be $legacyKey
         $raw = Get-Content -LiteralPath $script:AutomationBridgeSettingsPath -Raw
         $raw | Should -Not -Match ([regex]::Escape($legacyKey))
-        ($raw | ConvertFrom-Json).ApiKeyProtected | Should -Match '^dpapi:v1:'
+        ($raw | ConvertFrom-Json).ApiKeyProtected | Should -Match '^dpapi:v2:'
     }
 
     It "fails closed without rewriting a future settings schema" {

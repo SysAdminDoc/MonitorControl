@@ -197,6 +197,7 @@ This is the same pinned lane used by CI. It gates a pure-ASCII check across ever
 - Default bind is `127.0.0.1:34291`; enabling a non-loopback address requires an explicit network-exposure warning because the bridge uses unencrypted HTTP
 - Only an exact, body-free `GET /api/health` is unauthenticated; every other request requires the generated key through `X-MonitorControl-Key` or `Authorization: Bearer <key>`
 - Query-string and JSON-body API keys are rejected, and the saved key is encrypted for the current Windows user with DPAPI
+- A separate per-install random entropy file hardens the saved DPAPI blob against generic credential harvesting. The key remains a local-trust token, not a secret against software already running as your Windows user
 - The listener enforces request-line, header-count, header-size, body-size, response-size, concurrency, and socket-deadline limits; malformed framing receives a deterministic 4xx response
 - Supported endpoints are `GET /api/health`, `GET /api/monitors`, `GET /api/profiles`, `GET /api/brightness`, `POST /api/brightness`, and `POST /api/profile`
 - Brightness is expressed as a percentage in both directions. `GET /api/brightness` also returns the `raw` DDC value and the monitor's reported `maximum`, and `GET /api/monitors` reports `BrightnessMaximum` per display
@@ -524,7 +525,7 @@ The full breakdown - every display path, its classification, and whether it answ
 - Profiles: `%APPDATA%\MonitorControlPro\*.json`
 - Optional helper consent: `%APPDATA%\MonitorControlPro\optional-helpers.json` (both helpers off by default)
 - Remembered brightness for restore: `%APPDATA%\MonitorControlPro\display-restore.json` (off by default)
-- Automation bridge settings: `%APPDATA%\MonitorControlPro\automation-bridge.json` (API key protected with current-user DPAPI)
+- Automation bridge settings: `%APPDATA%\MonitorControlPro\automation-bridge.json` (API key protected with current-user DPAPI) and `%APPDATA%\MonitorControlPro\automation-bridge.entropy` (separate per-install entropy)
 - Automation bridge write log: `%APPDATA%\MonitorControlPro\automation-bridge-writes.jsonl` (redacted and size-rotated)
 - Risky VCP identity unlocks: `%APPDATA%\MonitorControlPro\vcp-write-safety.json`
 - No registry modifications
