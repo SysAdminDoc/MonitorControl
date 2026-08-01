@@ -342,6 +342,46 @@ public sealed class MonitorControlLiveRegionProbe : IDisposable
         $navigated.Add($name)
     }
 
+    # The DDC timing card is the only place adaptive and manual modes can be seen to be
+    # mutually exclusive, so drive it rather than assert against the source text.
+    $systemTab = Get-TabByName -Root $root -Name "System"
+    $systemTabPattern = $null
+    if ($systemTab.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$systemTabPattern)) {
+        ([System.Windows.Automation.SelectionItemPattern]$systemTabPattern).Select()
+        Start-Sleep -Milliseconds 150
+        $adaptiveRadio = Get-ControlByName -Root $root -Name "Adaptive DDC timing" -ControlType ([System.Windows.Automation.ControlType]::RadioButton)
+        $manualRadio = Get-ControlByName -Root $root -Name "Manual DDC timing" -ControlType ([System.Windows.Automation.ControlType]::RadioButton)
+        if ($null -eq $adaptiveRadio -or $null -eq $manualRadio) { throw "The DDC timing mode controls were not exposed through UI Automation." }
+        foreach ($retryName in @("DDC read retry budget", "DDC write retry budget", "DDC capability retry budget")) {
+            $retryBox = Get-ControlByName -Root $root -Name $retryName -ControlType ([System.Windows.Automation.ControlType]::Edit)
+            if ($null -eq $retryBox) { throw "The retry budget control '$retryName' was not exposed through UI Automation." }
+        }
+        if ($null -eq (Get-ControlByName -Root $root -Name "Reset DDC timing calibration for this monitor" -ControlType ([System.Windows.Automation.ControlType]::Button))) {
+            throw "The DDC timing calibration reset control was not exposed through UI Automation."
+        }
+        $adaptivePattern = $null
+        $manualPattern = $null
+        if (-not $adaptiveRadio.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$adaptivePattern)) {
+            throw "Adaptive DDC timing does not expose SelectionItemPattern."
+        }
+        if (-not $manualRadio.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$manualPattern)) {
+            throw "Manual DDC timing does not expose SelectionItemPattern."
+        }
+        if (-not ([System.Windows.Automation.SelectionItemPattern]$adaptivePattern).Current.IsSelected) {
+            throw "DDC timing did not default to adaptive mode."
+        }
+        ([System.Windows.Automation.SelectionItemPattern]$manualPattern).Select()
+        Start-Sleep -Milliseconds 200
+        if (([System.Windows.Automation.SelectionItemPattern]$adaptivePattern).Current.IsSelected) {
+            throw "Adaptive and manual DDC timing are not mutually exclusive."
+        }
+        ([System.Windows.Automation.SelectionItemPattern]$adaptivePattern).Select()
+        Start-Sleep -Milliseconds 200
+        if (([System.Windows.Automation.SelectionItemPattern]$manualPattern).Current.IsSelected) {
+            throw "Manual DDC timing stayed selected after switching back to adaptive."
+        }
+    }
+
     $displayTab = Get-TabByName -Root $root -Name "Display"
     $displayPattern = $null
     if ($displayTab.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$displayPattern)) {

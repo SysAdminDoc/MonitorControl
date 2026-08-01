@@ -2629,3 +2629,135 @@ Describe "Named causes for unavailable DDC control" {
         @($diagnosis.Causes | Where-Object { $_.Kind -eq "InternalPanel" }).Count | Should -Be 1
     }
 }
+
+Describe "Per-monitor DDC timing and null-message semantics" {
+    BeforeAll {
+        Import-MonitorControlFunctions -Name @(
+            "New-DdcTimingProfile", "Get-DdcTimingProfile", "Get-DdcEffectiveTiming",
+            "Get-DdcCalibratedSleepMultiplier", "Test-DdcCodeUnsupported", "Register-DdcCodeOutcome",
+            "Set-DdcTimingMode", "Clear-DdcTimingCalibration", "Update-DdcTimingCalibration"
+        )
+        $script:DdcTimingMinMultiplier = 1.0
+        $script:DdcTimingMaxMultiplier = 4.0
+        $script:DdcTimingMaxRetries = 10
+    }
+
+    BeforeEach {
+        $script:DdcTimingProfiles = @{}
+    }
+
+    It "starts every monitor on adaptive mode with the shipped retry budgets" {
+        $timing = New-DdcTimingProfile -IdentityKey "edid:a"
+        $timing.Mode | Should -Be "Adaptive"
+        $timing.SleepMultiplier | Should -Be 1.0
+        $timing.CalibratedAt | Should -BeNullOrEmpty
+        $timing.ReadRetries | Should -Be ([int][MonitorAPI]::VcpReadRetryCount)
+        $timing.WriteRetries | Should -Be ([int][MonitorAPI]::VcpWriteRetryCount)
+        @($timing.UnsupportedCodes).Count | Should -Be 0
+    }
+
+    It "keeps read, write, and capability budgets independently settable and clamped" {
+        $timing = New-DdcTimingProfile -IdentityKey "edid:a"
+        $timing.ReadRetries = 5
+        $timing.WriteRetries = 0
+        $timing.CapabilityRetries = 99
+        $effective = Get-DdcEffectiveTiming -TimingProfile $timing
+        $effective.ReadRetries | Should -Be 5
+        $effective.WriteRetries | Should -Be 0
+        $effective.CapabilityRetries | Should -Be $script:DdcTimingMaxRetries
+    }
+
+    It "scales the retry delay by the calibrated multiplier and clamps at the native ceiling" {
+        $timing = New-DdcTimingProfile -IdentityKey "edid:a"
+        (Get-DdcEffectiveTiming -TimingProfile $timing).DelayMilliseconds | Should -Be ([int][MonitorAPI]::VcpRetryDelayMilliseconds)
+        $timing.SleepMultiplier = 3.0
+        (Get-DdcEffectiveTiming -TimingProfile $timing).DelayMilliseconds | Should -Be ([int][MonitorAPI]::VcpRetryDelayMilliseconds * 3)
+        $timing.SleepMultiplier = 99.0
+        (Get-DdcEffectiveTiming -TimingProfile $timing).SleepMultiplier | Should -Be $script:DdcTimingMaxMultiplier
+        [MonitorAPI]::ClampRetryDelay(999999) | Should -Be ([int][MonitorAPI]::VcpRetryDelayCeilingMilliseconds)
+        [MonitorAPI]::ClampRetryDelay(-5) | Should -Be 0
+    }
+
+    It "learns the sleep multiplier from the attempts the first handshake needed" -ForEach @(
+        @{ Attempts = 1; Success = $true; Expected = 1.0 }
+        @{ Attempts = 2; Success = $true; Expected = 2.0 }
+        @{ Attempts = 3; Success = $true; Expected = 3.0 }
+        @{ Attempts = 9; Success = $true; Expected = 4.0 }
+        @{ Attempts = 3; Success = $false; Expected = 1.0 }
+    ) {
+        Get-DdcCalibratedSleepMultiplier -Attempts $Attempts -Success $Success -Current 1.0 | Should -Be $Expected
+    }
+
+    It "calibrates once and then leaves the multiplier alone" {
+        Update-DdcTimingCalibration -IdentityKey "edid:a" -Attempts 3 -Success $true | Should -BeTrue
+        $timing = Get-DdcTimingProfile -IdentityKey "edid:a"
+        $timing.SleepMultiplier | Should -Be 3.0
+        $timing.CalibratedAt | Should -Not -BeNullOrEmpty
+        Update-DdcTimingCalibration -IdentityKey "edid:a" -Attempts 1 -Success $true | Should -BeFalse
+        (Get-DdcTimingProfile -IdentityKey "edid:a").SleepMultiplier | Should -Be 3.0
+    }
+
+    It "never calibrates a manual monitor and ignores a failed handshake" {
+        Set-DdcTimingMode -IdentityKey "edid:manual" -Mode "Manual" | Out-Null
+        Update-DdcTimingCalibration -IdentityKey "edid:manual" -Attempts 3 -Success $true | Should -BeFalse
+        Update-DdcTimingCalibration -IdentityKey "edid:b" -Attempts 3 -Success $false | Should -BeFalse
+        (Get-DdcTimingProfile -IdentityKey "edid:b").CalibratedAt | Should -BeNullOrEmpty
+    }
+
+    It "makes manual and adaptive mutually exclusive and discards calibration on the way back" {
+        Update-DdcTimingCalibration -IdentityKey "edid:a" -Attempts 4 -Success $true | Out-Null
+        $manual = Set-DdcTimingMode -IdentityKey "edid:a" -Mode "Manual"
+        $manual.Mode | Should -Be "Manual"
+        # Manual keeps the stored value on disk but must not apply it.
+        $manual.SleepMultiplier | Should -Be 4.0
+        (Get-DdcEffectiveTiming -TimingProfile $manual).SleepMultiplier | Should -Be 1.0
+        (Get-DdcEffectiveTiming -TimingProfile $manual).DelayMilliseconds | Should -Be ([int][MonitorAPI]::VcpRetryDelayMilliseconds)
+        $adaptive = Set-DdcTimingMode -IdentityKey "edid:a" -Mode "Adaptive"
+        $adaptive.SleepMultiplier | Should -Be 1.0
+        $adaptive.CalibratedAt | Should -BeNullOrEmpty
+    }
+
+    It "records a code that fails every retry while the monitor answers others" {
+        $timing = Get-DdcTimingProfile -IdentityKey "edid:a"
+        Register-DdcCodeOutcome -TimingProfile $timing -Code 0xDF -Success $false -LastError 50 -Attempts 3 -OtherCodesResponded $true | Should -BeTrue
+        Test-DdcCodeUnsupported -TimingProfile $timing -Code 0xDF | Should -BeTrue
+        @($timing.UnsupportedCodes)[0].LastError | Should -Be 50
+        # Already recorded, so no second entry.
+        Register-DdcCodeOutcome -TimingProfile $timing -Code 0xDF -Success $false -LastError 50 -Attempts 3 -OtherCodesResponded $true | Should -BeFalse
+        @($timing.UnsupportedCodes).Count | Should -Be 1
+    }
+
+    It "will not blame a code when the monitor itself has answered nothing" {
+        $timing = Get-DdcTimingProfile -IdentityKey "edid:a"
+        Register-DdcCodeOutcome -TimingProfile $timing -Code 0xDF -Success $false -LastError 50 -Attempts 3 -OtherCodesResponded $false | Should -BeFalse
+        Test-DdcCodeUnsupported -TimingProfile $timing -Code 0xDF | Should -BeFalse
+    }
+
+    It "will not blame a code that never exhausted a retry" {
+        $timing = Get-DdcTimingProfile -IdentityKey "edid:a"
+        Register-DdcCodeOutcome -TimingProfile $timing -Code 0xDF -Success $false -LastError 50 -Attempts 1 -OtherCodesResponded $true | Should -BeFalse
+        Test-DdcCodeUnsupported -TimingProfile $timing -Code 0xDF | Should -BeFalse
+    }
+
+    It "forgets a skipped code as soon as it answers again" {
+        $timing = Get-DdcTimingProfile -IdentityKey "edid:a"
+        Register-DdcCodeOutcome -TimingProfile $timing -Code 0xDF -Success $false -LastError 50 -Attempts 3 -OtherCodesResponded $true | Out-Null
+        Register-DdcCodeOutcome -TimingProfile $timing -Code 0xDF -Success $true | Should -BeTrue
+        Test-DdcCodeUnsupported -TimingProfile $timing -Code 0xDF | Should -BeFalse
+    }
+
+    It "clears calibration and the skipped-code list together" {
+        Update-DdcTimingCalibration -IdentityKey "edid:a" -Attempts 4 -Success $true | Out-Null
+        Register-DdcCodeOutcome -TimingProfile (Get-DdcTimingProfile -IdentityKey "edid:a") -Code 0xDF -Success $false -LastError 50 -Attempts 3 -OtherCodesResponded $true | Out-Null
+        $cleared = Clear-DdcTimingCalibration -IdentityKey "edid:a"
+        $cleared.SleepMultiplier | Should -Be 1.0
+        $cleared.CalibratedAt | Should -BeNullOrEmpty
+        @($cleared.UnsupportedCodes).Count | Should -Be 0
+    }
+
+    It "keeps timing state separate per monitor identity" {
+        Update-DdcTimingCalibration -IdentityKey "edid:a" -Attempts 4 -Success $true | Out-Null
+        (Get-DdcTimingProfile -IdentityKey "edid:b").SleepMultiplier | Should -Be 1.0
+        (Get-DdcTimingProfile -IdentityKey "edid:a").SleepMultiplier | Should -Be 4.0
+    }
+}
