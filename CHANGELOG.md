@@ -2,6 +2,11 @@
 
 All notable changes to MonitorControl will be documented in this file.
 
+## [Unreleased]
+
+- Fixed: `EnumDisplayDevices` was called with a bare `$null` device name, which PowerShell marshals into a `[string]` parameter as an empty string rather than as NULL, so the call always failed and the adapter enumeration never ran. Monitor naming now has its display-device fallback back, and display-path classification depends on the same enumeration.
+- Added: when DDC/CI control is missing, the app now names the cause instead of showing a monitor called "No DDC/CI Monitor". Every enumeration cross-checks the display count against the DDC-capable count and reports both. DisplayLink, indirect/virtual displays, remote-session displays, and the Microsoft Basic Display Adapter are identified as paths that terminate DDC/CI by design rather than as failures, each with what to try instead. A table of GPU driver releases with confirmed DDC/CI regressions is checked against the installed vendor branding version and names the release that fixed it. Anything left unexplained is reported as an unidentified path with hub, adapter, KVM, cable, and OSD guidance. The alert banner carries the headline and the DDC Compatibility Report gains an availability breakdown and a per-display path listing.
+
 ## [v3.36.0] - 2026-07-31
 
 - Security: monitor capability strings are cached per stable monitor identity and replayed on later launches, so the one native call Microsoft documents as able to fault the Windows kernel now runs once per monitor instead of on every refresh. A shipped list of EDID model ids known to trigger that fault is consulted before any probe, and those monitors are skipped and reported rather than asked. **Clear cache** in System forces a re-read.

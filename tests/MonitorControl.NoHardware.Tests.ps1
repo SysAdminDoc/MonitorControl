@@ -2465,3 +2465,167 @@ Describe "Unsigned release packaging" {
         $script:BuildReleaseText | Should -Match 'Copy-Item -LiteralPath \$screenshotPath'
     }
 }
+
+Describe "Named causes for unavailable DDC control" {
+    BeforeAll {
+        Import-MonitorControlFunctions -Name @(
+            "ConvertTo-DriverVersionParts", "Compare-DisplayDriverVersion", "Test-DisplayDriverVersionInRange",
+            "Get-GpuDriverAdvisory", "Get-DisplayPathClassification", "Get-DdcAvailabilityDiagnosis",
+            "Get-StatusMessageSeverity"
+        )
+
+        # Mirrors the shipped table so the tests exercise the real signatures rather than fixtures.
+        $appText = [System.IO.File]::ReadAllText($script:AppPath)
+        $start = $appText.IndexOf('$script:DisplayPathSignatures = @(')
+        $end = $appText.IndexOf('$script:KnownBadGpuDrivers = @(')
+        if ($start -lt 0 -or $end -lt $start) { throw "Display path signature table not found" }
+        . ([scriptblock]::Create($appText.Substring($start, $end - $start)))
+        $tableEnd = $appText.IndexOf("`n)", $end)
+        . ([scriptblock]::Create($appText.Substring($end, $tableEnd - $end + 2)))
+        $script:Signatures = @($script:DisplayPathSignatures)
+        $script:DriverTable = @($script:KnownBadGpuDrivers)
+
+        function global:New-PathEntry {
+            param([string]$Name, [string]$Kind = "Direct", [bool]$HasControlChannel = $true, [string]$Reason = "", [string]$Fix = "")
+            return [PSCustomObject]@{
+                DeviceName = "\\.\DISPLAY$Name"
+                Name = $Name
+                Adapter = "Test adapter"
+                Kind = $Kind
+                HasControlChannel = $HasControlChannel
+                Reason = $Reason
+                Fix = $Fix
+            }
+        }
+    }
+
+    It "orders dotted driver versions with unequal segment counts" {
+        Compare-DisplayDriverVersion -Left "26.1.1" -Right "26.2.1" | Should -Be -1
+        Compare-DisplayDriverVersion -Left "26.10.0" -Right "26.9.9" | Should -Be 1
+        Compare-DisplayDriverVersion -Left "26.1" -Right "26.1.0" | Should -Be 0
+        Compare-DisplayDriverVersion -Left "32.0.12019.1028" -Right "32.0.12019.1028" | Should -Be 0
+    }
+
+    It "treats an unreadable version as out of range instead of a match" {
+        Test-DisplayDriverVersionInRange -Version "" -From "26.1.1" -Through "26.2.0" | Should -BeFalse
+        Test-DisplayDriverVersionInRange -Version "26.1.1" -From "26.1.1" -Through "26.2.0" | Should -BeTrue
+        Test-DisplayDriverVersionInRange -Version "26.2.0" -From "26.1.1" -Through "26.2.0" | Should -BeTrue
+        Test-DisplayDriverVersionInRange -Version "26.2.1" -From "26.1.1" -Through "26.2.0" | Should -BeFalse
+    }
+
+    It "names the shipped AMD regression and the release that fixed it" {
+        $gpus = @([PSCustomObject]@{ Name = "AMD Radeon RX 7900 XT"; DriverVersion = "32.0.12019.1028" })
+        $advisories = @(Get-GpuDriverAdvisory -Gpus $gpus -BrandingVersions @{ RadeonSoftwareVersion = "26.1.1" } -Table $script:DriverTable)
+        $advisories.Count | Should -Be 1
+        $advisories[0].FixedIn | Should -Be "26.2.1"
+        $advisories[0].Observed | Should -Be "26.1.1"
+        $advisories[0].ObservedSource | Should -Be "RadeonSoftwareVersion"
+    }
+
+    It "stays silent on a fixed driver, another vendor, and an unknown branding version" {
+        $amd = @([PSCustomObject]@{ Name = "AMD Radeon RX 7900 XT"; DriverVersion = "32.0.0.0" })
+        @(Get-GpuDriverAdvisory -Gpus $amd -BrandingVersions @{ RadeonSoftwareVersion = "26.2.1" } -Table $script:DriverTable).Count | Should -Be 0
+        @(Get-GpuDriverAdvisory -Gpus $amd -BrandingVersions @{} -Table $script:DriverTable).Count | Should -Be 0
+        $nvidia = @([PSCustomObject]@{ Name = "NVIDIA GeForce RTX 4080"; DriverVersion = "32.0.15.7283" })
+        @(Get-GpuDriverAdvisory -Gpus $nvidia -BrandingVersions @{ RadeonSoftwareVersion = "26.1.1" } -Table $script:DriverTable).Count | Should -Be 0
+    }
+
+    It "classifies paths that terminate DDC by design" -ForEach @(
+        @{ DeviceString = "DisplayLink USB Device"; HardwareId = ""; Adapter = "DisplayLink USB Graphics"; Kind = "DisplayLink" }
+        @{ DeviceString = "Generic Monitor"; HardwareId = "USB\VID_17E9&PID_4301"; Adapter = "USB Graphics"; Kind = "DisplayLink" }
+        @{ DeviceString = "spacedesk Display"; HardwareId = ""; Adapter = "spacedesk Graphics Adapter"; Kind = "IndirectDisplay" }
+        @{ DeviceString = "Generic Non-PnP Monitor"; HardwareId = "ROOT\DISPLAY\0000"; Adapter = "IddCx Adapter"; Kind = "IndirectDisplay" }
+        @{ DeviceString = "Remote Desktop Display"; HardwareId = ""; Adapter = "Microsoft Remote Display Adapter"; Kind = "RemoteSession" }
+        @{ DeviceString = "Generic PnP Monitor"; HardwareId = ""; Adapter = "Microsoft Basic Display Adapter"; Kind = "BasicDisplayAdapter" }
+        @{ DeviceString = "DELL U2718Q"; HardwareId = "MONITOR\DEL40D5"; Adapter = "NVIDIA GeForce RTX 4080"; Kind = "Direct" }
+    ) {
+        $classification = Get-DisplayPathClassification -DeviceString $DeviceString -HardwareId $HardwareId -AdapterName $Adapter -Signatures $script:Signatures
+        $classification.Kind | Should -Be $Kind
+        if ($Kind -eq "Direct") {
+            $classification.HasControlChannel | Should -BeTrue
+        } else {
+            $classification.HasControlChannel | Should -BeFalse
+            $classification.Reason | Should -Not -BeNullOrEmpty
+            $classification.Fix | Should -Not -BeNullOrEmpty
+        }
+    }
+
+    It "reports the display count alongside the DDC-capable count" {
+        $paths = @(
+            (New-PathEntry -Name "One")
+            (New-PathEntry -Name "Two" -Kind "DisplayLink" -HasControlChannel $false -Reason "DisplayLink terminates the channel" -Fix "Use a GPU output")
+            (New-PathEntry -Name "Three" -Kind "Direct" -HasControlChannel $false)
+        )
+        $diagnosis = Get-DdcAvailabilityDiagnosis -Paths $paths -GpuAdvisories @() -WmiBrightnessAvailable $false
+        $diagnosis.DisplayCount | Should -Be 3
+        $diagnosis.DdcCapableCount | Should -Be 1
+        $diagnosis.Summary | Should -Be "3 display(s) detected, 1 with a DDC/CI control channel"
+        $diagnosis.Severity | Should -Be "Warning"
+    }
+
+    It "reports a design-terminated path as a named cause rather than a failure" {
+        $paths = @(
+            (New-PathEntry -Name "Panel" -Kind "DisplayLink" -HasControlChannel $false -Reason "DisplayLink terminates the DDC/CI channel inside its own driver" -Fix "Connect the monitor to a GPU output")
+        )
+        $diagnosis = Get-DdcAvailabilityDiagnosis -Paths $paths -GpuAdvisories @() -WmiBrightnessAvailable $false
+        $named = @($diagnosis.Causes | Where-Object { $_.Kind -eq "DisplayLink" })
+        $named.Count | Should -Be 1
+        $named[0].Title | Should -Match "no control channel"
+        $named[0].Detail | Should -Match "DisplayLink"
+        @($diagnosis.Causes | Where-Object { $_.Kind -eq "Unclassified" }).Count | Should -Be 0
+    }
+
+    It "falls back to hub, adapter, cable, and OSD guidance for an unclassified path" {
+        $paths = @((New-PathEntry -Name "Mystery" -Kind "Direct" -HasControlChannel $false))
+        $diagnosis = Get-DdcAvailabilityDiagnosis -Paths $paths -GpuAdvisories @() -WmiBrightnessAvailable $false
+        $unclassified = @($diagnosis.Causes | Where-Object { $_.Kind -eq "Unclassified" })
+        $unclassified.Count | Should -Be 1
+        $unclassified[0].Detail | Should -Match "MST hub"
+        $unclassified[0].Fix | Should -Match "OSD"
+    }
+
+    It "leads with the GPU driver advisory when one applies" {
+        $paths = @((New-PathEntry -Name "Panel" -Kind "Direct" -HasControlChannel $false))
+        $advisories = @([PSCustomObject]@{
+            Gpu = "AMD Radeon RX 7900 XT"; Observed = "26.1.1"; ObservedSource = "RadeonSoftwareVersion"
+            FixedIn = "26.2.1"; Issue = "DDC/CI writes are dropped"; Reference = "Twinkle Tray 1187"
+        })
+        $diagnosis = Get-DdcAvailabilityDiagnosis -Paths $paths -GpuAdvisories $advisories -WmiBrightnessAvailable $false
+        @($diagnosis.Causes)[0].Kind | Should -Be "GpuDriver"
+        @($diagnosis.Causes)[0].Title | Should -Match "known to break DDC/CI"
+        @($diagnosis.Causes)[0].Fix | Should -Match "26\.2\.1"
+    }
+
+    It "stays quiet when every display has a control channel" {
+        $paths = @((New-PathEntry -Name "One"), (New-PathEntry -Name "Two"))
+        $diagnosis = Get-DdcAvailabilityDiagnosis -Paths $paths -GpuAdvisories @() -WmiBrightnessAvailable $false
+        $diagnosis.Severity | Should -Be "None"
+        @($diagnosis.Causes).Count | Should -Be 0
+        $diagnosis.Headline | Should -Be $diagnosis.Summary
+    }
+
+    It "raises the alert banner for both the unavailable and the partial headline" {
+        $none = Get-DdcAvailabilityDiagnosis -Paths @((New-PathEntry -Name "Panel" -Kind "Direct" -HasControlChannel $false)) -GpuAdvisories @() -WmiBrightnessAvailable $false
+        $none.Severity | Should -Be "Error"
+        Get-StatusMessageSeverity -Message $none.Headline | Should -Be "Error"
+        $none.Headline | Should -Match "DDC Compatibility Report"
+
+        $partial = Get-DdcAvailabilityDiagnosis -Paths @((New-PathEntry -Name "One"), (New-PathEntry -Name "Two" -Kind "Direct" -HasControlChannel $false)) -GpuAdvisories @() -WmiBrightnessAvailable $false
+        $partial.Severity | Should -Be "Warning"
+        Get-StatusMessageSeverity -Message $partial.Headline | Should -Be "Warning"
+    }
+
+    It "never hands a bare $null to a string P/Invoke parameter" {
+        # PowerShell marshals $null into a [string] P/Invoke parameter as an empty string, not as
+        # NULL, so EnumDisplayDevices($null, ...) silently returns false and enumerates nothing.
+        # This is a source-level property: there is no runtime signal to assert against.
+        $appText = [System.IO.File]::ReadAllText($script:AppPath)
+        $appText | Should -Not -Match 'EnumDisplayDevices\(\$null'
+        $appText | Should -Match 'EnumDisplayDevices\(\[NullString\]::Value'
+    }
+
+    It "explains a laptop panel that only answers WMI" {
+        $diagnosis = Get-DdcAvailabilityDiagnosis -Paths @((New-PathEntry -Name "Internal" -Kind "Direct" -HasControlChannel $false)) -GpuAdvisories @() -WmiBrightnessAvailable $true
+        @($diagnosis.Causes | Where-Object { $_.Kind -eq "InternalPanel" }).Count | Should -Be 1
+    }
+}
