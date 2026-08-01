@@ -80,8 +80,8 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 - Power draw monitoring
 - Digital vibrance slider using NVAPI DVC where supported
 - AMD Radeon temperature, utilization, engine/memory clocks, and fan percent via ADL where supported by the installed driver
-- CPU package/core temperature via LibreHardwareMonitorLib or OpenHardwareMonitorLib when either library is installed or placed next to the script
-- PresentMon-powered FPS overlay when `PresentMon.exe` or `PresentMon64.exe` is installed or placed next to the script
+- CPU package/core temperature via LibreHardwareMonitorLib or OpenHardwareMonitorLib, after you enable the helper in System
+- PresentMon-powered FPS overlay, after you enable the helper in System
 
 ## Requirements
 
@@ -89,8 +89,8 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 - **PowerShell 5.1+** (included with Windows)
 - **DDC/CI Compatible Monitor** — Most modern monitors support this; ensure it's enabled in your monitor's OSD settings
 - **NVIDIA or AMD GPU** (optional) — For GPU monitoring tab
-- **LibreHardwareMonitorLib.dll or OpenHardwareMonitorLib.dll** (optional) — For CPU temperature on the hardware tab
-- **PresentMon.exe** (optional) — For FPS overlay capture on the hardware tab
+- **LibreHardwareMonitorLib.dll or OpenHardwareMonitorLib.dll** (optional, 0.9.0+) — For CPU temperature on the hardware tab. Disabled until you enable it under **System > Optional hardware helpers**
+- **PresentMon.exe** (optional, 1.6+) — For FPS overlay capture on the hardware tab. Disabled until you enable it under **System > Optional hardware helpers**
 
 ## Installation
 
@@ -198,6 +198,25 @@ This is the same pinned lane used by CI. It gates static-analysis errors, determ
 - Supported endpoints are `GET /api/health`, `GET /api/monitors`, `GET /api/profiles`, `GET /api/brightness`, `POST /api/brightness`, and `POST /api/profile`
 - Brightness is expressed as a percentage in both directions. `GET /api/brightness` also returns the `raw` DDC value and the monitor's reported `maximum`, and `GET /api/monitors` reports `BrightnessMaximum` per display
 - MQTT/Home Assistant integration remains disabled; use the bridge as the local foundation before enabling network integrations
+
+### Optional Hardware Helpers
+
+MonitorControl Pro can read CPU temperature through LibreHardwareMonitorLib/OpenHardwareMonitorLib
+and drive the FPS overlay through PresentMon. Both are third-party binaries that the app would
+otherwise load or execute from the folder it was extracted into, so both are **off by default**.
+
+- Open **System > Optional hardware helpers** and enable only what you installed yourself. Each
+  toggle shows a warning before anything is loaded or run.
+- Nothing is loaded or executed before you enable it, and no settings file is written until you act.
+- Once enabled, the panel reports the resolved absolute path, where it came from (script directory,
+  Program Files, PATH, or elsewhere), the file and product version, and the SHA-256 of the binary.
+- Helpers below the supported minimum, or with no readable version resource, are refused with the
+  reason shown rather than loaded.
+- PresentMon is looked up in the script directory and Program Files **before** PATH, is run with a
+  timeout, and has its output size-capped; a run that overruns is stopped.
+- Turning a helper off closes the integration, stops the overlay, and leaves monitor control
+  untouched. A .NET assembly cannot be unloaded from a running process, so the CPU library stops
+  being used immediately but is fully gone only after a restart.
 
 ### Capability Discovery Safety
 - On first launch, choose whether MonitorControl Pro may request full DDC/CI capability strings from monitor firmware
@@ -416,6 +435,7 @@ Your monitor either:
 
 ### Data Storage
 - Profiles: `%APPDATA%\MonitorControlPro\*.json`
+- Optional helper consent: `%APPDATA%\MonitorControlPro\optional-helpers.json` (both helpers off by default)
 - Automation bridge settings: `%APPDATA%\MonitorControlPro\automation-bridge.json` (API key protected with current-user DPAPI)
 - Automation bridge write log: `%APPDATA%\MonitorControlPro\automation-bridge-writes.jsonl` (redacted and size-rotated)
 - Risky VCP identity unlocks: `%APPDATA%\MonitorControlPro\vcp-write-safety.json`

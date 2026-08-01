@@ -932,6 +932,18 @@ $script:DefaultProfilesPath = "$env:APPDATA\MonitorControlPro"
 $script:ProfileStorageSettingsPath = Join-Path $script:DefaultProfilesPath "profile-storage.json"
 $script:AutomationBridgeSettingsPath = Join-Path $script:DefaultProfilesPath "automation-bridge.json"
 $script:AutomationBridgeWriteLogPath = Join-Path $script:DefaultProfilesPath "automation-bridge-writes.jsonl"
+$script:OptionalHelperSettingsPath = Join-Path $script:DefaultProfilesPath "optional-helpers.json"
+$script:OptionalHelperSchemaVersion = 1
+# Optional native helpers are discovered next to the script and on PATH, so they stay off
+# until the user enables them. Nothing is loaded or executed before that.
+$script:CpuMonitorEnabled = $false
+$script:PresentMonEnabled = $false
+$script:CpuMonitorProvenance = $null
+$script:PresentMonProvenance = $null
+$script:OptionalHelperMinimumVersions = @{ CpuMonitor = [version]"0.9.0"; PresentMon = [version]"1.6.0" }
+$script:PresentMonTimeoutMs = 8000
+$script:PresentMonMaxOutputChars = 262144
+$script:UpdatingOptionalHelperUI = $false
 $script:CapabilitiesSafetySettingsPath = Join-Path $script:DefaultProfilesPath "capabilities-safety.json"
 $script:CapabilitiesProbeSentinelPath = Join-Path $script:DefaultProfilesPath "capabilities-probe-pending.json"
 $script:VcpWriteSafetySettingsPath = Join-Path $script:DefaultProfilesPath "vcp-write-safety.json"
@@ -978,7 +990,7 @@ $script:ProfileBundleMaxTotalBytes = 10485760
 $script:ProfileBundleMaxCompressionRatio = 100
 $script:ProfileBundleMaxMonitorSettings = 32
 $script:ProfileExportsPath = Join-Path $script:ProfilesPath "exports"
-$script:ProfileMetadataFiles = @("app-profile-rules.json", "profile-schedules.json", "idle-dim.json", "battery-profile.json", "profile-storage.json", "monitor-identities.json", "automation-bridge.json", "capabilities-safety.json", "capabilities-probe-pending.json", "vcp-write-safety.json")
+$script:ProfileMetadataFiles = @("app-profile-rules.json", "profile-schedules.json", "idle-dim.json", "battery-profile.json", "profile-storage.json", "monitor-identities.json", "automation-bridge.json", "capabilities-safety.json", "capabilities-probe-pending.json", "vcp-write-safety.json", "optional-helpers.json")
 $script:MonitorIdentityRecords = @{}
 $script:UpdatingMonitorLabelUI = $false
 $script:UiCulture = "en-US"
@@ -1042,6 +1054,9 @@ $script:UiStrings = @{
     "A11y.VcpResults" = "VCP results"
     "A11y.Capabilities" = "Monitor capabilities"
     "A11y.CapabilitiesDiscovery" = "Allow monitor capability discovery"
+    "A11y.CpuMonitorHelper" = "Load CPU temperature library"
+    "A11y.PresentMonHelper" = "Run PresentMon for the FPS overlay"
+    "A11y.OptionalHelperStatus" = "Optional hardware helper provenance"
     "A11y.CapabilitiesCompatibility" = "Maximum compatibility mode"
     "A11y.CapabilitiesExclude" = "Exclude the selected monitor from capability discovery"
     "A11y.CapabilitiesClearExclusions" = "Clear capability discovery exclusions"
@@ -2245,6 +2260,9 @@ function Initialize-LocalizationAndAccessibility {
     Set-AccessibleName -Control $vcpResultBox -Key "A11y.VcpResults"
     Set-AccessibleName -Control $capabilitiesBox -Key "A11y.Capabilities"
     Set-AccessibleName -Control $capabilitiesDiscoveryEnabledCheckbox -Key "A11y.CapabilitiesDiscovery"
+    Set-AccessibleName -Control $cpuMonitorEnabledCheckbox -Key "A11y.CpuMonitorHelper"
+    Set-AccessibleName -Control $presentMonEnabledCheckbox -Key "A11y.PresentMonHelper"
+    Set-AccessibleName -Control $optionalHelperStatusBox -Key "A11y.OptionalHelperStatus"
     Set-AccessibleName -Control $capabilitiesMaximumCompatibilityCheckbox -Key "A11y.CapabilitiesCompatibility"
     Set-AccessibleName -Control $capabilitiesExcludeCurrentBtn -Key "A11y.CapabilitiesExclude"
     Set-AccessibleName -Control $capabilitiesClearExclusionsBtn -Key "A11y.CapabilitiesClearExclusions"
@@ -2303,7 +2321,7 @@ function Initialize-LocalizationAndAccessibility {
         $idleDimEnabledCheckbox,$idleDimMinutesBox,$idleDimBrightnessBox,$idleDimRestoreCheckbox,$idleDimSaveBtn,
         $batteryProfileEnabledCheckbox,$batteryBrightnessBox,$acBrightnessBox,$batteryProfileSaveBtn,
         $displaySettingsBtn,$colorMgmtBtn,$gpuControlPanelBtn,$gammaRedSlider,$gammaGreenSlider,$gammaBlueSlider,$resetGammaBtn,$capabilitiesBox,
-        $capabilitiesDiscoveryEnabledCheckbox,$capabilitiesMaximumCompatibilityCheckbox,$capabilitiesExcludeCurrentBtn,$capabilitiesClearExclusionsBtn,$riskyVcpEnabledCheckbox,
+        $cpuMonitorEnabledCheckbox,$presentMonEnabledCheckbox,$optionalHelperStatusBox,$capabilitiesDiscoveryEnabledCheckbox,$capabilitiesMaximumCompatibilityCheckbox,$capabilitiesExcludeCurrentBtn,$capabilitiesClearExclusionsBtn,$riskyVcpEnabledCheckbox,
         $automationBridgeEnabledCheckbox,$automationBridgeBindBox,$automationBridgePortBox,$automationBridgeKeyBox,$automationBridgeSaveBtn,
         $ddcReportGenerateBtn,$ddcReportCopyBtn,$ddcReportBox
     )
@@ -5272,16 +5290,200 @@ function Get-AmdStats {
     return @{ Name = "AMD Radeon"; Temp = 0; Util = 0; MemUsed = 0; MemTotal = 0; Fan = 0; Power = 0; PowerLimit = 0; Clock = 0; MemoryClock = 0; Message = $message }
 }
 
-function Initialize-CpuMonitor {
-    $candidatePaths = @(
+function ConvertTo-HelperVersion {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    $match = [regex]::Match($Text, '^\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:\.(\d+))?')
+    if (-not $match.Success) { return $null }
+    $parts = @()
+    for ($group = 1; $group -le 4; $group++) {
+        if (-not $match.Groups[$group].Success) { break }
+        $parts += [int]$match.Groups[$group].Value
+    }
+    while ($parts.Count -lt 2) { $parts += 0 }
+    try { return [version]($parts -join ".") } catch { return $null }
+}
+
+function Get-OptionalHelperSourceCategory {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return "Unknown" }
+    $full = try { [System.IO.Path]::GetFullPath($Path) } catch { return "Unknown" }
+    $roots = @(
+        @{ Category = "ScriptDirectory"; Root = $PSScriptRoot },
+        @{ Category = "ProgramFiles"; Root = $env:ProgramFiles },
+        @{ Category = "ProgramFiles"; Root = ${env:ProgramFiles(x86)} }
+    )
+    foreach ($candidate in $roots) {
+        if ([string]::IsNullOrWhiteSpace([string]$candidate.Root)) { continue }
+        $root = try { [System.IO.Path]::GetFullPath([string]$candidate.Root).TrimEnd("\") + "\" } catch { continue }
+        if ($full.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) { return [string]$candidate.Category }
+    }
+    foreach ($entry in @(([string]$env:PATH) -split ";")) {
+        if ([string]::IsNullOrWhiteSpace($entry)) { continue }
+        $root = try { [System.IO.Path]::GetFullPath($entry.Trim()).TrimEnd("\") + "\" } catch { continue }
+        if ($full.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) { return "SystemPath" }
+    }
+    return "Other"
+}
+
+function Test-OptionalHelperVersionSupported {
+    param([string]$Kind, $Version)
+    if (-not $script:OptionalHelperMinimumVersions.ContainsKey($Kind)) { return $false }
+    if ($null -eq $Version) { return $false }
+    return ([version]$Version -ge [version]$script:OptionalHelperMinimumVersions[$Kind])
+}
+
+function Get-OptionalHelperProvenance {
+    param([string]$Path, [string]$Kind)
+    $record = [PSCustomObject]@{
+        Kind = [string]$Kind
+        Path = [string]$Path
+        Exists = $false
+        SourceCategory = "Unknown"
+        ProductVersion = ""
+        FileVersion = ""
+        Version = $null
+        Sha256 = ""
+        Supported = $false
+        Reason = ""
+    }
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        $record.Reason = "No path supplied"
+        return $record
+    }
+    try { $record.Path = [System.IO.Path]::GetFullPath($Path) } catch {
+        $record.Reason = "Path could not be resolved"
+        return $record
+    }
+    if (-not (Test-Path -LiteralPath $record.Path -PathType Leaf)) {
+        $record.Reason = "File not found"
+        return $record
+    }
+    $record.Exists = $true
+    $record.SourceCategory = Get-OptionalHelperSourceCategory -Path $record.Path
+    try {
+        $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($record.Path)
+        $record.ProductVersion = [string]$info.ProductVersion
+        $record.FileVersion = [string]$info.FileVersion
+    } catch {}
+    $record.Version = ConvertTo-HelperVersion -Text $record.FileVersion
+    if ($null -eq $record.Version) { $record.Version = ConvertTo-HelperVersion -Text $record.ProductVersion }
+    try { $record.Sha256 = Get-FileSha256Hex -Path $record.Path } catch { $record.Sha256 = "" }
+    if ($null -eq $record.Version) {
+        $record.Reason = "No readable version resource; refusing to load"
+        return $record
+    }
+    if (-not (Test-OptionalHelperVersionSupported -Kind $Kind -Version $record.Version)) {
+        $record.Reason = "Version $($record.Version) is below the supported minimum $($script:OptionalHelperMinimumVersions[$Kind])"
+        return $record
+    }
+    $record.Supported = $true
+    $record.Reason = "Supported"
+    return $record
+}
+
+function Format-OptionalHelperProvenance {
+    param([string]$Label, $Provenance, [bool]$Enabled)
+    if (-not $Enabled) { return "${Label}: disabled" }
+    if ($null -eq $Provenance) { return "${Label}: enabled, no helper resolved" }
+    if (-not $Provenance.Exists) { return "${Label}: enabled, not found ($($Provenance.Reason))" }
+    $fileVersion = if ($Provenance.FileVersion) { $Provenance.FileVersion } else { "unknown" }
+    $productVersion = if ($Provenance.ProductVersion) { $Provenance.ProductVersion } else { "unknown" }
+    $hash = if ($Provenance.Sha256) { $Provenance.Sha256 } else { "unavailable" }
+    $lines = @(
+        "${Label}: $($Provenance.Reason)",
+        "  Path: $($Provenance.Path)",
+        "  Source: $($Provenance.SourceCategory)",
+        "  Version: $fileVersion (product $productVersion)",
+        "  SHA-256: $hash"
+    )
+    return ($lines -join "`n")
+}
+
+function Get-OptionalHelperStatusText {
+    return (@(
+        (Format-OptionalHelperProvenance -Label "CPU temperature library" -Provenance $script:CpuMonitorProvenance -Enabled $script:CpuMonitorEnabled),
+        (Format-OptionalHelperProvenance -Label "PresentMon" -Provenance $script:PresentMonProvenance -Enabled $script:PresentMonEnabled)
+    ) -join "`n`n")
+}
+
+function Get-OptionalHelperSettingsObject {
+    return [PSCustomObject]@{
+        SchemaVersion = [int]$script:OptionalHelperSchemaVersion
+        CpuMonitorEnabled = [bool]$script:CpuMonitorEnabled
+        PresentMonEnabled = [bool]$script:PresentMonEnabled
+    }
+}
+
+function Save-OptionalHelperSettings {
+    return (Write-JsonFileSafely -Path $script:OptionalHelperSettingsPath -Data (Get-OptionalHelperSettingsObject) -Depth 4)
+}
+
+function Import-OptionalHelperSettings {
+    $script:CpuMonitorEnabled = $false
+    $script:PresentMonEnabled = $false
+    if (-not (Test-Path -LiteralPath $script:OptionalHelperSettingsPath)) { return }
+    $data = Read-JsonFileSafely -Path $script:OptionalHelperSettingsPath -Label "Optional helper settings"
+    if ($null -eq $data) { return }
+    $schema = if ($data.PSObject.Properties.Name -contains "SchemaVersion") { [int]$data.SchemaVersion } else { 1 }
+    if ($schema -gt $script:OptionalHelperSchemaVersion) {
+        Update-Status "Optional helper settings use schema v$schema; helpers stay disabled"
+        return
+    }
+    if ($data.PSObject.Properties.Name -contains "CpuMonitorEnabled") { $script:CpuMonitorEnabled = [bool]$data.CpuMonitorEnabled }
+    if ($data.PSObject.Properties.Name -contains "PresentMonEnabled") { $script:PresentMonEnabled = [bool]$data.PresentMonEnabled }
+}
+
+function Get-CpuMonitorCandidatePaths {
+    return @(
         (Join-Path $PSScriptRoot "LibreHardwareMonitorLib.dll"),
         (Join-Path $PSScriptRoot "OpenHardwareMonitorLib.dll"),
         "${env:ProgramFiles}\LibreHardwareMonitor\LibreHardwareMonitorLib.dll",
         "${env:ProgramFiles}\OpenHardwareMonitor\OpenHardwareMonitorLib.dll",
         "${env:ProgramFiles(x86)}\LibreHardwareMonitor\LibreHardwareMonitorLib.dll",
         "${env:ProgramFiles(x86)}\OpenHardwareMonitor\OpenHardwareMonitorLib.dll"
-    ) | Where-Object { $_ -and (Test-Path $_) }
-    foreach ($path in $candidatePaths) {
+    )
+}
+
+function Get-PresentMonCandidatePaths {
+    # Well-known install locations are probed before PATH: a PATH-resolved executable is the
+    # easiest thing for another process to place ahead of the real one.
+    $paths = @(
+        (Join-Path $PSScriptRoot "PresentMon.exe"),
+        (Join-Path $PSScriptRoot "PresentMon64.exe"),
+        "${env:ProgramFiles}\PresentMon\PresentMon.exe",
+        "${env:ProgramFiles}\Intel\PresentMon\PresentMon.exe",
+        "${env:ProgramFiles(x86)}\PresentMon\PresentMon.exe",
+        "${env:ProgramFiles(x86)}\Intel\PresentMon\PresentMon.exe"
+    )
+    foreach ($command in @(Get-Command PresentMon.exe, PresentMon64.exe -ErrorAction SilentlyContinue)) {
+        if ($command -and $command.Source) { $paths += [string]$command.Source }
+    }
+    return $paths
+}
+
+function Stop-CpuMonitor {
+    if ($script:HardwareMonitorComputer) {
+        try { $script:HardwareMonitorComputer.Close() } catch {}
+    }
+    $script:HardwareMonitorComputer = $null
+    $script:HasCpuTempMonitor = $false
+    $script:HardwareMonitorKind = ""
+    $script:CpuMonitorProvenance = $null
+}
+
+function Initialize-CpuMonitor {
+    if (-not $script:CpuMonitorEnabled) { return }
+    if ($script:HardwareMonitorComputer) { return }
+    $rejected = $null
+    foreach ($candidate in (Get-CpuMonitorCandidatePaths)) {
+        if ([string]::IsNullOrWhiteSpace($candidate) -or -not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
+        $provenance = Get-OptionalHelperProvenance -Path $candidate -Kind "CpuMonitor"
+        if (-not $provenance.Supported) {
+            if ($null -eq $rejected) { $rejected = $provenance }
+            continue
+        }
+        $path = $provenance.Path
         try {
             [System.Reflection.Assembly]::LoadFrom($path) | Out-Null
             $computerType = if ($path -like "*LibreHardwareMonitor*") {
@@ -5296,9 +5498,11 @@ function Initialize-CpuMonitor {
             $script:HardwareMonitorComputer = $computer
             $script:HardwareMonitorKind = if ($path -like "*LibreHardwareMonitor*") { "LibreHardwareMonitor" } else { "OpenHardwareMonitor" }
             $script:HasCpuTempMonitor = $true
+            $script:CpuMonitorProvenance = $provenance
             return
         } catch {}
     }
+    $script:CpuMonitorProvenance = $rejected
 }
 
 function Get-CpuTemperature {
@@ -5942,7 +6146,7 @@ try {
         </TabItem>
         <TabItem x:Name="SystemTab" Header="System" Tag="&#xE713;">
             <Border Background="Transparent" Padding="0"><ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><Grid>
-                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Border Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><StackPanel><TextBlock Text="Quick links" FontSize="12" Foreground="{DynamicResource TextBrush}" FontWeight="SemiBold" Margin="0,0,0,8"/>
                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                         <Button x:Name="DisplaySettingsBtn" Content="Display" Style="{StaticResource Btn}" Padding="5,4" FontSize="12"/>
@@ -6000,6 +6204,16 @@ try {
                         <Button x:Name="DdcReportCopyBtn" Grid.Column="4" Content="Copy" Style="{StaticResource Btn}" Padding="10,4" FontSize="12"/>
                     </Grid>
                     <TextBox x:Name="DdcReportBox" Grid.Row="2" IsReadOnly="True" TextWrapping="Wrap" Height="180" VerticalScrollBarVisibility="Auto" Background="{DynamicResource ControlBrush}" FontFamily="Consolas" FontSize="12" AcceptsReturn="True"/>
+                </Grid></Border>
+                <Border Grid.Row="14" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource WarningBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <TextBlock Text="Optional hardware helpers" FontSize="12" Foreground="{DynamicResource TextBrush}" FontWeight="SemiBold"/>
+                    <CheckBox x:Name="CpuMonitorEnabledCheckbox" Grid.Row="2" Content="Load CPU temperature library (LibreHardwareMonitorLib / OpenHardwareMonitorLib)"/>
+                    <CheckBox x:Name="PresentMonEnabledCheckbox" Grid.Row="4" Content="Run PresentMon for the FPS overlay"/>
+                    <StackPanel Grid.Row="6">
+                        <TextBlock Text="These load a DLL or run an executable found beside this script, in Program Files, or on PATH. They stay off until enabled here, and every resolved binary is reported below with its version and SHA-256." TextWrapping="Wrap" Foreground="{DynamicResource MutedTextBrush}" FontSize="12" Margin="0,0,0,6"/>
+                        <TextBox x:Name="OptionalHelperStatusBox" IsReadOnly="True" TextWrapping="NoWrap" Height="112" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="{DynamicResource ControlBrush}" FontFamily="Consolas" FontSize="12" AcceptsReturn="True"/>
+                    </StackPanel>
                 </Grid></Border>
             </Grid></ScrollViewer></Border>
         </TabItem>
@@ -6092,6 +6306,7 @@ $gammaRedSlider = $window.FindName("GammaRedSlider"); $gammaRedValue = $window.F
 $gammaGreenSlider = $window.FindName("GammaGreenSlider"); $gammaGreenValue = $window.FindName("GammaGreenValue")
 $gammaBlueSlider = $window.FindName("GammaBlueSlider"); $gammaBlueValue = $window.FindName("GammaBlueValue")
 $capabilitiesBox = $window.FindName("CapabilitiesBox"); $ddcReportBox = $window.FindName("DdcReportBox")
+$cpuMonitorEnabledCheckbox = $window.FindName("CpuMonitorEnabledCheckbox"); $presentMonEnabledCheckbox = $window.FindName("PresentMonEnabledCheckbox"); $optionalHelperStatusBox = $window.FindName("OptionalHelperStatusBox")
 $capabilitiesDiscoveryEnabledCheckbox = $window.FindName("CapabilitiesDiscoveryEnabledCheckbox"); $capabilitiesMaximumCompatibilityCheckbox = $window.FindName("CapabilitiesMaximumCompatibilityCheckbox")
 $capabilitiesSafetyStatusText = $window.FindName("CapabilitiesSafetyStatusText"); $capabilitiesExcludeCurrentBtn = $window.FindName("CapabilitiesExcludeCurrentBtn"); $capabilitiesClearExclusionsBtn = $window.FindName("CapabilitiesClearExclusionsBtn")
 $riskyVcpEnabledCheckbox = $window.FindName("RiskyVcpEnabledCheckbox"); $riskyVcpStatusText = $window.FindName("RiskyVcpStatusText")
@@ -6154,6 +6369,74 @@ function Update-SelectedMonitorRecoveryUi {
     if (-not [string]::IsNullOrWhiteSpace($lastError)) { $tooltip += "`n$lastError" }
     $selectedMonitorHealthText.ToolTip = $tooltip
     $selectedMonitorHealthDot.ToolTip = $tooltip
+}
+
+function Update-OptionalHelperControls {
+    $script:UpdatingOptionalHelperUI = $true
+    try {
+        if ($cpuMonitorEnabledCheckbox) { $cpuMonitorEnabledCheckbox.IsChecked = [bool]$script:CpuMonitorEnabled }
+        if ($presentMonEnabledCheckbox) { $presentMonEnabledCheckbox.IsChecked = [bool]$script:PresentMonEnabled }
+        if ($optionalHelperStatusBox) { $optionalHelperStatusBox.Text = Get-OptionalHelperStatusText }
+    } finally {
+        $script:UpdatingOptionalHelperUI = $false
+    }
+}
+
+function Update-HardwareTabVisibility {
+    if (-not $gpuTab) { return }
+    $available = [bool]($script:HasNvidia -or $script:HasAmd -or $script:HasCpuTempMonitor)
+    $gpuTab.Visibility = if ($available) { "Visible" } else { "Collapsed" }
+    if ($available) {
+        if (-not $script:GpuTimer) {
+            $script:GpuTimer = New-Object System.Windows.Threading.DispatcherTimer
+            $script:GpuTimer.Interval = [TimeSpan]::FromSeconds(2)
+            $script:GpuTimer.Add_Tick({ Update-GpuStats })
+        }
+        $script:GpuTimer.Start()
+        Update-GpuStats
+    } elseif ($script:GpuTimer) {
+        $script:GpuTimer.Stop()
+    }
+}
+
+function Set-CpuMonitorEnabled {
+    param([bool]$Enabled)
+    $script:CpuMonitorEnabled = $Enabled
+    if ($Enabled) {
+        Initialize-CpuMonitor
+        if ($script:HasCpuTempMonitor) {
+            Update-Status "CPU temperature library loaded"
+        } else {
+            $reason = if ($script:CpuMonitorProvenance -and $script:CpuMonitorProvenance.Reason) { $script:CpuMonitorProvenance.Reason } else { "no supported library found" }
+            Update-Status "CPU temperature library not loaded: $reason"
+        }
+    } else {
+        Stop-CpuMonitor
+        Update-Status "CPU temperature library disabled"
+    }
+    Save-OptionalHelperSettings | Out-Null
+    Update-OptionalHelperControls
+    Update-HardwareTabVisibility
+}
+
+function Set-PresentMonEnabled {
+    param([bool]$Enabled)
+    $script:PresentMonEnabled = $Enabled
+    if ($Enabled) {
+        if (Initialize-PresentMon) {
+            Update-Status "PresentMon resolved"
+        } else {
+            $reason = if ($script:PresentMonProvenance -and $script:PresentMonProvenance.Reason) { $script:PresentMonProvenance.Reason } else { "no supported PresentMon found" }
+            Update-Status "PresentMon not available: $reason"
+        }
+    } else {
+        Hide-FpsOverlay
+        $script:PresentMonPath = ""
+        $script:PresentMonProvenance = $null
+        Update-Status "PresentMon integration disabled"
+    }
+    Save-OptionalHelperSettings | Out-Null
+    Update-OptionalHelperControls
 }
 
 function Sync-CapabilitySafetyUi {
@@ -8874,28 +9157,86 @@ function Show-IdentifyOverlays {
 }
 
 function Initialize-PresentMon {
-    if ($script:PresentMonPath -and (Test-Path $script:PresentMonPath)) { return $true }
-    $command = Get-Command PresentMon.exe, PresentMon64.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($command) { $script:PresentMonPath = $command.Source; return $true }
-    $candidatePaths = @(
-        (Join-Path $PSScriptRoot "PresentMon.exe"),
-        (Join-Path $PSScriptRoot "PresentMon64.exe"),
-        "${env:ProgramFiles}\PresentMon\PresentMon.exe",
-        "${env:ProgramFiles}\Intel\PresentMon\PresentMon.exe",
-        "${env:ProgramFiles(x86)}\PresentMon\PresentMon.exe",
-        "${env:ProgramFiles(x86)}\Intel\PresentMon\PresentMon.exe"
-    )
-    foreach ($path in $candidatePaths) {
-        if ($path -and (Test-Path $path)) { $script:PresentMonPath = $path; return $true }
+    if (-not $script:PresentMonEnabled) {
+        $script:PresentMonPath = ""
+        return $false
     }
+    if ($script:PresentMonPath -and (Test-Path -LiteralPath $script:PresentMonPath -PathType Leaf)) { return $true }
+    $script:PresentMonPath = ""
+    $rejected = $null
+    foreach ($candidate in (Get-PresentMonCandidatePaths)) {
+        if ([string]::IsNullOrWhiteSpace($candidate) -or -not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
+        $provenance = Get-OptionalHelperProvenance -Path $candidate -Kind "PresentMon"
+        if (-not $provenance.Supported) {
+            if ($null -eq $rejected) { $rejected = $provenance }
+            continue
+        }
+        $script:PresentMonPath = $provenance.Path
+        $script:PresentMonProvenance = $provenance
+        return $true
+    }
+    $script:PresentMonProvenance = $rejected
     return $false
 }
 
-function Get-PresentMonFpsSnapshot {
-    if (-not (Initialize-PresentMon)) { return @{ Success = $false; Text = "FPS --"; Status = "PresentMon.exe not found" } }
+function Invoke-BoundedPresentMon {
+    param([string]$Path, [string[]]$Arguments, [int]$TimeoutMs, [int]$MaxChars)
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $Path
+    $psi.Arguments = ($Arguments -join " ")
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+    $psi.WorkingDirectory = [System.IO.Path]::GetDirectoryName($Path)
+    $process = $null
     try {
-        $output = & $script:PresentMonPath --output_stdout --no_console_stats --timed 1 --terminate_after_timed --stop_existing_session 2>$null
-        $csvLines = @($output) | Where-Object { $_ -and $_.Contains(",") }
+        $process = [System.Diagnostics.Process]::Start($psi)
+        if ($null -eq $process) { return @{ TimedOut = $false; Truncated = $false; Output = @() } }
+        $reader = $process.StandardOutput
+        $builder = New-Object System.Text.StringBuilder
+        $truncated = $false
+        $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+        $buffer = New-Object char[] 4096
+        while (-not $process.HasExited -or -not $reader.EndOfStream) {
+            if ([DateTime]::UtcNow -gt $deadline) { break }
+            if ($reader.EndOfStream) { Start-Sleep -Milliseconds 25; continue }
+            $read = $reader.Read($buffer, 0, $buffer.Length)
+            if ($read -le 0) { continue }
+            if ($builder.Length + $read -gt $MaxChars) {
+                [void]$builder.Append($buffer, 0, [Math]::Max(0, $MaxChars - $builder.Length))
+                $truncated = $true
+                break
+            }
+            [void]$builder.Append($buffer, 0, $read)
+        }
+        $timedOut = -not $process.HasExited
+        if ($timedOut -or $truncated) {
+            try { $process.Kill() } catch {}
+        }
+        try { $process.WaitForExit(2000) | Out-Null } catch {}
+        return @{
+            TimedOut = $timedOut
+            Truncated = $truncated
+            Output = @($builder.ToString() -split "`r?`n")
+        }
+    } finally {
+        if ($process) { try { $process.Dispose() } catch {} }
+    }
+}
+
+function Get-PresentMonFpsSnapshot {
+    if (-not $script:PresentMonEnabled) { return @{ Success = $false; Text = "FPS --"; Status = "PresentMon integration is disabled" } }
+    if (-not (Initialize-PresentMon)) {
+        $reason = if ($script:PresentMonProvenance -and $script:PresentMonProvenance.Reason) { $script:PresentMonProvenance.Reason } else { "PresentMon.exe not found" }
+        return @{ Success = $false; Text = "FPS --"; Status = $reason }
+    }
+    try {
+        $run = Invoke-BoundedPresentMon -Path $script:PresentMonPath -Arguments @(
+            "--output_stdout", "--no_console_stats", "--timed", "1", "--terminate_after_timed", "--stop_existing_session"
+        ) -TimeoutMs $script:PresentMonTimeoutMs -MaxChars $script:PresentMonMaxOutputChars
+        if ($run.TimedOut) { return @{ Success = $false; Text = "FPS --"; Status = "PresentMon timed out and was stopped" } }
+        $csvLines = @($run.Output) | Where-Object { $_ -and $_.Contains(",") }
         if ($csvLines.Count -lt 2) { return @{ Success = $false; Text = "FPS --"; Status = "No PresentMon samples" } }
         $rows = $csvLines | ConvertFrom-Csv
         if (-not $rows -or $rows.Count -eq 0) { return @{ Success = $false; Text = "FPS --"; Status = "PresentMon CSV parse failed" } }
@@ -8933,9 +9274,15 @@ function Update-FpsOverlay {
 }
 
 function Show-FpsOverlay {
+    if (-not $script:PresentMonEnabled) {
+        $fpsOverlayStatusText.Text = "Enable PresentMon in System"
+        Update-Status "PresentMon integration is disabled; enable it in System"
+        return
+    }
     if (-not (Initialize-PresentMon)) {
-        $fpsOverlayStatusText.Text = "PresentMon.exe not found"
-        Update-Status "PresentMon.exe not found"
+        $reason = if ($script:PresentMonProvenance -and $script:PresentMonProvenance.Reason) { $script:PresentMonProvenance.Reason } else { "PresentMon.exe not found" }
+        $fpsOverlayStatusText.Text = $reason
+        Update-Status $reason
         return
     }
     if (-not $script:FpsOverlayWindow) {
@@ -9352,6 +9699,46 @@ $batteryProfileSaveBtn.Add_Click({
 
 $displaySettingsBtn.Add_Click({ Start-Process "ms-settings:display" }); $colorMgmtBtn.Add_Click({ Start-Process "colorcpl.exe" })
 $gpuControlPanelBtn.Add_Click({ if ($script:HasNvidia) { Start-Process "nvidia-settings" -ErrorAction SilentlyContinue } else { Start-Process "ms-settings:display" } })
+$cpuMonitorEnabledCheckbox.Add_Checked({
+    if ($script:UpdatingOptionalHelperUI) { return }
+    $answer = [System.Windows.MessageBox]::Show(
+        "MonitorControl Pro will load a CPU temperature library from disk into this process." + [Environment]::NewLine + [Environment]::NewLine +
+        "It looks beside this script, in Program Files, and reports the resolved path, version, and SHA-256 in System. Only enable this if you placed that DLL there yourself." + [Environment]::NewLine + [Environment]::NewLine +
+        "Load the CPU temperature library?",
+        "Optional hardware helper",
+        [System.Windows.MessageBoxButton]::YesNo,
+        [System.Windows.MessageBoxImage]::Warning)
+    if ($answer -ne [System.Windows.MessageBoxResult]::Yes) {
+        Update-OptionalHelperControls
+        Update-Status "CPU temperature library stays disabled"
+        return
+    }
+    Set-CpuMonitorEnabled -Enabled $true
+})
+$cpuMonitorEnabledCheckbox.Add_Unchecked({
+    if ($script:UpdatingOptionalHelperUI) { return }
+    Set-CpuMonitorEnabled -Enabled $false
+})
+$presentMonEnabledCheckbox.Add_Checked({
+    if ($script:UpdatingOptionalHelperUI) { return }
+    $answer = [System.Windows.MessageBox]::Show(
+        "MonitorControl Pro will run PresentMon.exe as a child process to sample frame times." + [Environment]::NewLine + [Environment]::NewLine +
+        "It prefers a copy beside this script or in Program Files over one found on PATH, and reports the resolved path, version, and SHA-256 in System. Only enable this if you installed PresentMon yourself." + [Environment]::NewLine + [Environment]::NewLine +
+        "Allow PresentMon to run?",
+        "Optional hardware helper",
+        [System.Windows.MessageBoxButton]::YesNo,
+        [System.Windows.MessageBoxImage]::Warning)
+    if ($answer -ne [System.Windows.MessageBoxResult]::Yes) {
+        Update-OptionalHelperControls
+        Update-Status "PresentMon stays disabled"
+        return
+    }
+    Set-PresentMonEnabled -Enabled $true
+})
+$presentMonEnabledCheckbox.Add_Unchecked({
+    if ($script:UpdatingOptionalHelperUI) { return }
+    Set-PresentMonEnabled -Enabled $false
+})
 $capabilitiesDiscoveryEnabledCheckbox.Add_Checked({
     if ($script:UpdatingCapabilitiesSafetyUI) { return }
     if (-not (Request-CapabilitiesDiscoveryConsent)) {
@@ -9526,7 +9913,7 @@ function Update-GpuStats {
 }
 
 # Initialize
-Initialize-WmiBrightness; Load-MonitorIdentitySettings; Import-CapabilitySafetyState; Import-VcpWriteSafetyState; Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList
+Initialize-WmiBrightness; Load-MonitorIdentitySettings; Import-CapabilitySafetyState; Import-VcpWriteSafetyState; Import-OptionalHelperSettings; Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList
 Load-AppProfileRules; Update-AppProfileControls; Start-AppProfileWatcher
 Load-ProfileSchedules; Update-ScheduleControls; Start-ProfileScheduleWatcher
 Load-IdleDimSettings; Update-IdleDimControls; Start-IdleDimWatcher
@@ -9535,10 +9922,8 @@ Load-AutomationBridgeSettings; Update-AutomationBridgeControls; Start-Automation
 Update-ProfileStorageControls
 Sync-CapabilitySafetyUi
 Sync-VcpWriteSafetyUi
-if (-not ($script:HasNvidia -or $script:HasAmd -or $script:HasCpuTempMonitor)) { $gpuTab.Visibility = "Collapsed" } else {
-    $script:GpuTimer = New-Object System.Windows.Threading.DispatcherTimer; $script:GpuTimer.Interval = [TimeSpan]::FromSeconds(2)
-    $script:GpuTimer.Add_Tick({ Update-GpuStats }); $script:GpuTimer.Start(); Update-GpuStats
-}
+Update-OptionalHelperControls
+Update-HardwareTabVisibility
 
 Initialize-TrayIcon
 

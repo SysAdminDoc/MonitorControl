@@ -121,6 +121,16 @@ BeforeAll {
         "Resolve-VcpWriteValueForMonitor",
         "Update-VcpMaximumCache",
         "Get-ProfilePercentValue",
+        "ConvertTo-HelperVersion",
+        "Get-OptionalHelperSourceCategory",
+        "Test-OptionalHelperVersionSupported",
+        "Get-OptionalHelperProvenance",
+        "Format-OptionalHelperProvenance",
+        "Get-OptionalHelperSettingsObject",
+        "Save-OptionalHelperSettings",
+        "Import-OptionalHelperSettings",
+        "Initialize-CpuMonitor",
+        "Initialize-PresentMon",
         "Invoke-VerifiedVcpTransaction",
         "Get-VcpDescription",
         "Format-VcpWriteConfirmation",
@@ -1480,6 +1490,142 @@ Describe "Monitor reported VCP range normalization" {
             $observed = ConvertTo-VcpPercent -RawValue $written[$index] -Maximum $maximum
             [Math]::Abs($observed - 25) | Should -BeLessOrEqual ([Math]::Ceiling(100.0 / (2 * $maximum)))
         }
+    }
+}
+
+Describe "Optional helper gating and provenance" {
+    BeforeEach {
+        Get-ChildItem -LiteralPath $TestDrive -Force | Remove-Item -Recurse -Force
+        $script:OptionalHelperSettingsPath = Join-Path $TestDrive "optional-helpers.json"
+        $script:OptionalHelperSchemaVersion = 1
+        $script:OptionalHelperMinimumVersions = @{ CpuMonitor = [version]"0.9.0"; PresentMon = [version]"1.6.0" }
+        $script:CpuMonitorEnabled = $false
+        $script:PresentMonEnabled = $false
+        $script:CpuMonitorProvenance = $null
+        $script:PresentMonProvenance = $null
+        $script:HardwareMonitorComputer = $null
+        $script:HasCpuTempMonitor = $false
+        $script:PresentMonPath = ""
+        $script:LastStatusMessage = ""
+    }
+
+    It "parses the version forms a file version resource actually carries" {
+        (ConvertTo-HelperVersion -Text "0.9.6.0").ToString() | Should -Be "0.9.6.0"
+        (ConvertTo-HelperVersion -Text "2.5.1").ToString() | Should -Be "2.5.1"
+        (ConvertTo-HelperVersion -Text "1.6").ToString() | Should -Be "1.6"
+        (ConvertTo-HelperVersion -Text "2").ToString() | Should -Be "2.0"
+        (ConvertTo-HelperVersion -Text " 2.5.1-beta").ToString() | Should -Be "2.5.1"
+        ConvertTo-HelperVersion -Text "" | Should -BeNullOrEmpty
+        ConvertTo-HelperVersion -Text "not-a-version" | Should -BeNullOrEmpty
+    }
+
+    It "accepts a supported version and refuses one below the minimum" {
+        Test-OptionalHelperVersionSupported -Kind "CpuMonitor" -Version ([version]"0.9.6") | Should -BeTrue
+        Test-OptionalHelperVersionSupported -Kind "CpuMonitor" -Version ([version]"0.9.0") | Should -BeTrue
+        Test-OptionalHelperVersionSupported -Kind "CpuMonitor" -Version ([version]"0.8.9") | Should -BeFalse
+        Test-OptionalHelperVersionSupported -Kind "PresentMon" -Version ([version]"2.5.1") | Should -BeTrue
+        Test-OptionalHelperVersionSupported -Kind "PresentMon" -Version ([version]"1.5.0") | Should -BeFalse
+    }
+
+    It "fails closed for an unknown helper kind or a missing version" {
+        Test-OptionalHelperVersionSupported -Kind "Unknown" -Version ([version]"9.9.9") | Should -BeFalse
+        Test-OptionalHelperVersionSupported -Kind "PresentMon" -Version $null | Should -BeFalse
+    }
+
+    It "reports a missing helper without claiming support" {
+        $record = Get-OptionalHelperProvenance -Path (Join-Path $TestDrive "absent.dll") -Kind "CpuMonitor"
+        $record.Exists | Should -BeFalse
+        $record.Supported | Should -BeFalse
+        $record.Reason | Should -Be "File not found"
+    }
+
+    It "refuses a file with no readable version resource and still records its hash" {
+        $planted = Join-Path $TestDrive "planted.dll"
+        [System.IO.File]::WriteAllBytes($planted, [byte[]](1, 2, 3, 4))
+        $record = Get-OptionalHelperProvenance -Path $planted -Kind "CpuMonitor"
+
+        $record.Exists | Should -BeTrue
+        $record.Supported | Should -BeFalse
+        $record.Reason | Should -Match "version resource"
+        $record.Sha256 | Should -Match "^[0-9a-f]{64}$"
+        $record.Path | Should -Be ([System.IO.Path]::GetFullPath($planted))
+    }
+
+    It "classifies a helper outside the known roots as Other" {
+        $planted = Join-Path $TestDrive "planted.exe"
+        [System.IO.File]::WriteAllBytes($planted, [byte[]](1, 2, 3, 4))
+        Get-OptionalHelperSourceCategory -Path $planted | Should -Be "Other"
+    }
+
+    It "loads nothing while the CPU helper is disabled" {
+        $script:CpuMonitorEnabled = $false
+        Initialize-CpuMonitor
+        $script:HasCpuTempMonitor | Should -BeFalse
+        $script:HardwareMonitorComputer | Should -BeNullOrEmpty
+    }
+
+    It "resolves nothing while PresentMon is disabled" {
+        $script:PresentMonEnabled = $false
+        $script:PresentMonPath = "C:\somewhere\PresentMon.exe"
+        Initialize-PresentMon | Should -BeFalse
+        $script:PresentMonPath | Should -BeNullOrEmpty
+    }
+
+    It "round-trips the enabled flags through disk" {
+        $script:CpuMonitorEnabled = $true
+        $script:PresentMonEnabled = $true
+        Save-OptionalHelperSettings | Out-Null
+
+        $script:CpuMonitorEnabled = $false
+        $script:PresentMonEnabled = $false
+        Import-OptionalHelperSettings
+
+        $script:CpuMonitorEnabled | Should -BeTrue
+        $script:PresentMonEnabled | Should -BeTrue
+    }
+
+    It "starts disabled when no settings file exists" {
+        $script:CpuMonitorEnabled = $true
+        $script:PresentMonEnabled = $true
+        Import-OptionalHelperSettings
+        $script:CpuMonitorEnabled | Should -BeFalse
+        $script:PresentMonEnabled | Should -BeFalse
+    }
+
+    It "keeps helpers disabled when the settings schema is from a newer build" {
+        $future = [PSCustomObject]@{ SchemaVersion = 99; CpuMonitorEnabled = $true; PresentMonEnabled = $true }
+        Write-JsonFileSafely -Path $script:OptionalHelperSettingsPath -Data $future -Depth 4 | Out-Null
+
+        Import-OptionalHelperSettings
+
+        $script:CpuMonitorEnabled | Should -BeFalse
+        $script:PresentMonEnabled | Should -BeFalse
+        $script:LastStatusMessage | Should -Match "schema v99"
+    }
+
+    It "describes a disabled helper without probing the filesystem" {
+        Format-OptionalHelperProvenance -Label "PresentMon" -Provenance $null -Enabled $false | Should -Be "PresentMon: disabled"
+    }
+
+    It "surfaces path, source, version, and hash once a helper is resolved" {
+        $record = [PSCustomObject]@{
+            Kind = "PresentMon"
+            Path = "C:\Tools\PresentMon.exe"
+            Exists = $true
+            SourceCategory = "Other"
+            ProductVersion = "2.5.1"
+            FileVersion = "2.5.1.0"
+            Version = [version]"2.5.1.0"
+            Sha256 = ("a" * 64)
+            Supported = $true
+            Reason = "Supported"
+        }
+        $text = Format-OptionalHelperProvenance -Label "PresentMon" -Provenance $record -Enabled $true
+
+        $text | Should -Match "C:\\Tools\\PresentMon.exe"
+        $text | Should -Match "Source: Other"
+        $text | Should -Match "2\.5\.1\.0"
+        $text | Should -Match ("a" * 64)
     }
 }
 
