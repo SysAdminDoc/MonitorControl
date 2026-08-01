@@ -177,6 +177,110 @@ function Find-FirstExistingPath {
     return ""
 }
 
+function Get-RunAtLoginShortcutDefinition {
+    param([string]$LauncherPath)
+    if ([string]::IsNullOrWhiteSpace($LauncherPath)) {
+        $LauncherPath = Join-Path $script:MonitorControlRoot "MonitorControlPro.ps1"
+    }
+    $powerShellPath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+    return [PSCustomObject]@{
+        TargetPath = [System.IO.Path]::GetFullPath($powerShellPath)
+        Arguments = "-NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$([System.IO.Path]::GetFullPath($LauncherPath))`" -StartMinimized"
+        WorkingDirectory = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($LauncherPath))
+        IconLocation = "imageres.dll,109"
+    }
+}
+
+function Get-RunAtLoginShortcutPath {
+    $startup = [Environment]::GetFolderPath([Environment+SpecialFolder]::Startup)
+    if ([string]::IsNullOrWhiteSpace($startup)) {
+        $startup = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup"
+    }
+    return (Join-Path $startup "MonitorControl Pro.lnk")
+}
+
+function Test-RunAtLoginShortcut {
+    param([string]$ShortcutPath, [string]$LauncherPath, [scriptblock]$ReadShortcut)
+    if ([string]::IsNullOrWhiteSpace($ShortcutPath)) { $ShortcutPath = Get-RunAtLoginShortcutPath }
+    if (-not (Test-Path -LiteralPath $ShortcutPath -PathType Leaf)) { return $false }
+    $expected = Get-RunAtLoginShortcutDefinition -LauncherPath $LauncherPath
+    if ($null -eq $ReadShortcut) {
+        $ReadShortcut = {
+            param([string]$Path)
+            $shell = New-Object -ComObject WScript.Shell
+            $shortcut = $null
+            try {
+                $shortcut = $shell.CreateShortcut($Path)
+                return [PSCustomObject]@{
+                    TargetPath = [string]$shortcut.TargetPath
+                    Arguments = [string]$shortcut.Arguments
+                    WorkingDirectory = [string]$shortcut.WorkingDirectory
+                }
+            } finally {
+                if ($null -ne $shortcut) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shortcut) }
+                [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell)
+            }
+        }
+    }
+    try { $actual = & $ReadShortcut $ShortcutPath } catch { return $false }
+    if ($null -eq $actual) { return $false }
+    try {
+        return [string]::Equals([System.IO.Path]::GetFullPath([string]$actual.TargetPath), [string]$expected.TargetPath, [StringComparison]::OrdinalIgnoreCase) -and
+            [string]$actual.Arguments -eq [string]$expected.Arguments -and
+            [string]::Equals([System.IO.Path]::GetFullPath([string]$actual.WorkingDirectory), [string]$expected.WorkingDirectory, [StringComparison]::OrdinalIgnoreCase)
+    } catch {
+        return $false
+    }
+}
+
+function Set-RunAtLoginEnabled {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute("PSUseShouldProcessForStateChangingFunctions", "", Justification = "This user-invoked setting mutates one per-user Startup shortcut and verifies the exact result.")]
+    param(
+        [bool]$Enabled,
+        [string]$ShortcutPath,
+        [string]$LauncherPath,
+        [scriptblock]$WriteShortcut,
+        [scriptblock]$RemoveShortcut,
+        [scriptblock]$ReadShortcut
+    )
+    if ([string]::IsNullOrWhiteSpace($ShortcutPath)) { $ShortcutPath = Get-RunAtLoginShortcutPath }
+    if ([string]::IsNullOrWhiteSpace($LauncherPath)) { $LauncherPath = Join-Path $script:MonitorControlRoot "MonitorControlPro.ps1" }
+    $LauncherPath = [System.IO.Path]::GetFullPath($LauncherPath)
+    if (-not (Test-Path -LiteralPath $LauncherPath -PathType Leaf)) { throw "MonitorControl launcher not found: $LauncherPath" }
+    if ($Enabled) {
+        $definition = Get-RunAtLoginShortcutDefinition -LauncherPath $LauncherPath
+        if ($null -eq $WriteShortcut) {
+            $WriteShortcut = {
+                param([string]$Path, $Definition)
+                $directory = [System.IO.Path]::GetDirectoryName($Path)
+                if (-not (Test-Path -LiteralPath $directory)) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
+                $shell = New-Object -ComObject WScript.Shell
+                $shortcut = $null
+                try {
+                    $shortcut = $shell.CreateShortcut($Path)
+                    $shortcut.TargetPath = [string]$Definition.TargetPath
+                    $shortcut.Arguments = [string]$Definition.Arguments
+                    $shortcut.WorkingDirectory = [string]$Definition.WorkingDirectory
+                    $shortcut.IconLocation = [string]$Definition.IconLocation
+                    $shortcut.Save()
+                } finally {
+                    if ($null -ne $shortcut) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shortcut) }
+                    [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell)
+                }
+            }
+        }
+        & $WriteShortcut $ShortcutPath $definition
+        if (-not (Test-RunAtLoginShortcut -ShortcutPath $ShortcutPath -LauncherPath $LauncherPath -ReadShortcut $ReadShortcut)) {
+            throw "The Startup shortcut was not created with the expected command"
+        }
+        return $true
+    }
+    if ($null -eq $RemoveShortcut) { $RemoveShortcut = { param([string]$Path) Remove-Item -LiteralPath $Path -Force } }
+    if (Test-Path -LiteralPath $ShortcutPath) { & $RemoveShortcut $ShortcutPath }
+    if (Test-Path -LiteralPath $ShortcutPath) { throw "The Startup shortcut could not be removed" }
+    return $false
+}
+
 function Initialize-GPU {
     $gpus = Get-CimInstance -ClassName Win32_VideoController -ErrorAction SilentlyContinue
     foreach ($gpu in $gpus) {

@@ -4,6 +4,7 @@ All notable changes to MonitorControl will be documented in this file.
 
 ## [Unreleased]
 
+- Added: System > Automation now has a **Run at login** toggle backed by one per-user Startup-folder shortcut. The shortcut launches the current portable script with `-StartMinimized`, its exact command is verified on every launch, and disabling the option removes it without writing the registry.
 - Security: automation bridge keys now use a once-generated 32-byte per-install entropy file separate from the DPAPI blob. Existing `dpapi:v1` keys migrate transparently to `dpapi:v2`, and an AST regression guard traces every `XamlReader.Load` call back to a literal, non-interpolated here-string.
 - Fixed: startup now treats the inline native C# block as an explicit dependency: compiler diagnostics identify that block immediately, a missing `MonitorAPI` type fails at the call site, and neither failure can be hidden until a later consumer crashes.
 - Fixed: malformed capability-list values can no longer escape into the advertised VCP code set; unregistered native monitor handles are destroyed during topology races; stale selected-monitor indexes no longer throw; NVIDIA helper discovery keeps the first valid path; brightness controls update their monitor-specific range before the raw value; and bridge route timeouts atomically retire their response slot so late dispatcher work cannot leak entries.

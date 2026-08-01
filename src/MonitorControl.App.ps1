@@ -973,6 +973,7 @@ $script:AutomationBridgeRequests = New-Object 'System.Collections.Concurrent.Con
 $script:AutomationBridgeResponses = [hashtable]::Synchronized(@{})
 $script:AutomationBridgeState = [hashtable]::Synchronized(@{ Stop = $false })
 $script:UpdatingAutomationBridgeUI = $false
+$script:UpdatingRunAtLoginUI = $false
 $script:DdcTimingSchemaVersion = 3
 $script:DdcTimingProfiles = @{}
 $script:DdcRespondedIdentityKeys = @{}
@@ -3120,6 +3121,19 @@ function Update-AutomationBridgeControls {
     }
 }
 
+function Update-RunAtLoginControls {
+    if ($null -eq $runAtLoginEnabledCheckbox) { return }
+    $script:UpdatingRunAtLoginUI = $true
+    try {
+        $shortcutPath = Get-RunAtLoginShortcutPath
+        $enabled = Test-RunAtLoginShortcut -ShortcutPath $shortcutPath
+        $runAtLoginEnabledCheckbox.IsChecked = $enabled
+        $runAtLoginStatusText.Text = if ($enabled) { "On" } elseif (Test-Path -LiteralPath $shortcutPath) { "Needs repair" } else { "Off" }
+    } finally {
+        $script:UpdatingRunAtLoginUI = $false
+    }
+}
+
 
 
 
@@ -4518,6 +4532,7 @@ try {
                 </TabItem>
                 <TabItem x:Name="SystemAutomationCategory" Header="Automation" Style="{StaticResource SettingsTabItem}" AutomationProperties.Name="Automation system settings">
                     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                        <StackPanel>
                         <Border Style="{StaticResource PageCard}">
                             <Grid>
                                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="18"/><RowDefinition Height="Auto"/><RowDefinition Height="10"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
@@ -4532,6 +4547,14 @@ try {
                                 </Grid>
                             </Grid>
                         </Border>
+                        <Border Style="{StaticResource PageCard}" Margin="0,14,0,0">
+                            <Grid>
+                                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="14"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                                <Grid><StackPanel><TextBlock Text="Run at login" Style="{StaticResource SectionTitle}"/><TextBlock Text="Start MonitorControl directly in the notification area after you sign in." Foreground="{DynamicResource MutedTextBrush}" Margin="0,3,0,0"/></StackPanel><TextBlock x:Name="RunAtLoginStatusText" Text="Off" Foreground="{DynamicResource MutedTextBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/></Grid>
+                                <CheckBox x:Name="RunAtLoginEnabledCheckbox" Grid.Row="2" Content="Run MonitorControl at login" AutomationProperties.Name="Run MonitorControl at login"/>
+                            </Grid>
+                        </Border>
+                        </StackPanel>
                     </ScrollViewer>
                 </TabItem>
                 <TabItem x:Name="SystemDiagnosticsCategory" Header="Diagnostics" Style="{StaticResource SettingsTabItem}" AutomationProperties.Name="Diagnostics system settings">
@@ -4684,6 +4707,7 @@ $riskyVcpEnabledCheckbox = $window.FindName("RiskyVcpEnabledCheckbox"); $riskyVc
 $automationBridgeEnabledCheckbox = $window.FindName("AutomationBridgeEnabledCheckbox"); $automationBridgeStatusText = $window.FindName("AutomationBridgeStatusText")
 $automationBridgeBindBox = $window.FindName("AutomationBridgeBindBox"); $automationBridgePortBox = $window.FindName("AutomationBridgePortBox")
 $automationBridgeKeyBox = $window.FindName("AutomationBridgeKeyBox"); $automationBridgeSaveBtn = $window.FindName("AutomationBridgeSaveBtn")
+$runAtLoginEnabledCheckbox = $window.FindName("RunAtLoginEnabledCheckbox"); $runAtLoginStatusText = $window.FindName("RunAtLoginStatusText")
 $ddcReportGenerateBtn = $window.FindName("DdcReportGenerateBtn"); $ddcReportCopyBtn = $window.FindName("DdcReportCopyBtn")
 $statusText = $window.FindName("StatusText"); $autoModeText = $window.FindName("AutoModeText")
 $transactionProgressPanel = $window.FindName("TransactionProgressPanel"); $transactionProgressText = $window.FindName("TransactionProgressText")
@@ -8659,6 +8683,26 @@ $automationBridgeSaveBtn.Add_Click({
     if ($script:AutomationBridgeEnabled) { Start-AutomationBridge } else { Stop-AutomationBridge }
     Update-Status "Bridge settings saved"
 })
+$runAtLoginEnabledCheckbox.Add_Checked({
+    if ($script:UpdatingRunAtLoginUI) { return }
+    try {
+        Set-RunAtLoginEnabled -Enabled $true | Out-Null
+        Update-Status "MonitorControl will run at login"
+    } catch {
+        Update-Status "Run at login could not be enabled: $($_.Exception.Message)"
+    }
+    Update-RunAtLoginControls
+})
+$runAtLoginEnabledCheckbox.Add_Unchecked({
+    if ($script:UpdatingRunAtLoginUI) { return }
+    try {
+        Set-RunAtLoginEnabled -Enabled $false | Out-Null
+        Update-Status "Run at login disabled"
+    } catch {
+        Update-Status "Run at login could not be disabled: $($_.Exception.Message)"
+    }
+    Update-RunAtLoginControls
+})
 $ddcReportGenerateBtn.Add_Click({ Start-DdcReportWorker })
 $ddcReportCopyBtn.Add_Click({
     $text = if ($script:DdcReportLastText) { $script:DdcReportLastText } else { $ddcReportBox.Text }
@@ -8797,6 +8841,7 @@ Load-ProfileSchedules; Update-ScheduleControls; Start-ProfileScheduleWatcher
 Load-IdleDimSettings; Update-IdleDimControls; Start-IdleDimWatcher
 Load-BatteryProfileSettings; Update-BatteryProfileControls; Start-BatteryProfileWatcher
 Load-AutomationBridgeSettings; Update-AutomationBridgeControls; Start-AutomationBridge
+Update-RunAtLoginControls
 Update-ProfileStorageControls
 Sync-CapabilitySafetyUi
 Sync-VcpWriteSafetyUi

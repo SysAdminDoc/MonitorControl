@@ -296,6 +296,10 @@ public static class MonitorControlVcpWriteProbe
         "Save-OptionalHelperSettings",
         "Import-OptionalHelperSettings",
         "Find-FirstExistingPath",
+        "Get-RunAtLoginShortcutDefinition",
+        "Get-RunAtLoginShortcutPath",
+        "Test-RunAtLoginShortcut",
+        "Set-RunAtLoginEnabled",
         "Initialize-CpuMonitor",
         "Initialize-PresentMon",
         "Invoke-VerifiedVcpTransaction",
@@ -2597,6 +2601,55 @@ Describe "GPU helper discovery" {
         $found = Find-FirstExistingPath -CandidatePaths @("preferred.exe", "fallback.exe") -PathExists { param($Path) return $true }
 
         $found | Should -Be "preferred.exe"
+    }
+}
+
+Describe "Per-user run at login" {
+    BeforeEach {
+        $script:RunAtLoginTestDefinition = $null
+        $script:MonitorControlRoot = Join-Path $TestDrive "app"
+        New-Item -ItemType Directory -Path $script:MonitorControlRoot -Force | Out-Null
+        $script:RunAtLoginLauncher = Join-Path $script:MonitorControlRoot "MonitorControlPro.ps1"
+        Set-Content -LiteralPath $script:RunAtLoginLauncher -Value "# launcher"
+        $script:RunAtLoginShortcut = Join-Path $TestDrive "Startup\MonitorControl Pro.lnk"
+        $script:WriteRunAtLoginTestShortcut = {
+            param([string]$Path, $Definition)
+            New-Item -ItemType Directory -Path ([System.IO.Path]::GetDirectoryName($Path)) -Force | Out-Null
+            Set-Content -LiteralPath $Path -Value "shortcut"
+            $script:RunAtLoginTestDefinition = $Definition
+        }
+        $script:ReadRunAtLoginTestShortcut = {
+            param([string]$Path)
+            return $script:RunAtLoginTestDefinition
+        }
+        $script:RemoveRunAtLoginTestShortcut = {
+            param([string]$Path)
+            Remove-Item -LiteralPath $Path -Force
+            $script:RunAtLoginTestDefinition = $null
+        }
+    }
+
+    It "creates an exact minimized Startup shortcut and removes it completely" {
+        Set-RunAtLoginEnabled -Enabled $true -ShortcutPath $script:RunAtLoginShortcut -LauncherPath $script:RunAtLoginLauncher -WriteShortcut $script:WriteRunAtLoginTestShortcut -ReadShortcut $script:ReadRunAtLoginTestShortcut | Should -BeTrue
+
+        Test-RunAtLoginShortcut -ShortcutPath $script:RunAtLoginShortcut -LauncherPath $script:RunAtLoginLauncher -ReadShortcut $script:ReadRunAtLoginTestShortcut | Should -BeTrue
+        $script:RunAtLoginTestDefinition.TargetPath | Should -Match 'WindowsPowerShell\\v1\.0\\powershell\.exe$'
+        $script:RunAtLoginTestDefinition.Arguments | Should -Be "-NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$script:RunAtLoginLauncher`" -StartMinimized"
+
+        Set-RunAtLoginEnabled -Enabled $false -ShortcutPath $script:RunAtLoginShortcut -LauncherPath $script:RunAtLoginLauncher -RemoveShortcut $script:RemoveRunAtLoginTestShortcut | Should -BeFalse
+        Test-Path -LiteralPath $script:RunAtLoginShortcut | Should -BeFalse
+    }
+
+    It "does not report a stale or altered shortcut as enabled" {
+        New-Item -ItemType Directory -Path ([System.IO.Path]::GetDirectoryName($script:RunAtLoginShortcut)) -Force | Out-Null
+        Set-Content -LiteralPath $script:RunAtLoginShortcut -Value "shortcut"
+        $script:RunAtLoginTestDefinition = [PSCustomObject]@{
+            TargetPath = "C:\Windows\System32\cmd.exe"
+            Arguments = "/c something-else"
+            WorkingDirectory = $TestDrive
+        }
+
+        Test-RunAtLoginShortcut -ShortcutPath $script:RunAtLoginShortcut -LauncherPath $script:RunAtLoginLauncher -ReadShortcut $script:ReadRunAtLoginTestShortcut | Should -BeFalse
     }
 }
 
