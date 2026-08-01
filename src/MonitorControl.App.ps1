@@ -1,3 +1,24 @@
+function Update-AutomationBridgeBrightnessUi {
+    param([double]$RawValue)
+    if ($brightnessSlider) { $brightnessSlider.Value = $RawValue }
+    if ($brightnessValue) { $brightnessValue.Text = ([int]$RawValue).ToString() }
+}
+
+function Set-VcpWorkerUiIdle {
+    if ($vcpQueryBtn) { $vcpQueryBtn.IsEnabled = $true }
+    if ($vcpScanBtn) { $vcpScanBtn.IsEnabled = $true }
+}
+
+function Set-VcpWorkerResultText {
+    param([AllowEmptyString()][string]$Text)
+    if ($vcpResultBox) { $vcpResultBox.Text = $Text }
+}
+
+function Set-DdcReportWorkerUiIdle {
+    if ($ddcReportGenerateBtn) { $ddcReportGenerateBtn.IsEnabled = $true }
+    if ($ddcReportCopyBtn) { $ddcReportCopyBtn.IsEnabled = $true }
+}
+
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, UIAutomationTypes, UIAutomationProvider, System.Windows.Forms, System.Drawing, System.IO.Compression, System.IO.Compression.FileSystem, System.Management
 
 $nativeCode = @"
@@ -1210,6 +1231,16 @@ $script:WmiBrightnessEventSubscription = $null
 $script:DisplayRecoveryEventSourceIdentifier = "MonitorControlPro.WmiBrightness.$PID"
 $script:DisplayRecoveryDebounceMilliseconds = 650
 $script:DisplayRecoveryOfflineThreshold = 4
+$script:DdcLivenessProbeIntervalSeconds = 60
+$script:DdcLivenessNextProbeUtc = [DateTime]::UtcNow.AddSeconds($script:DdcLivenessProbeIntervalSeconds)
+$script:DdcLivenessLastRecoveryGeneration = 0
+$script:DdcLivenessLastSuccessUtc = @{}
+$script:DdcLivenessWorker = $null
+$script:DdcLivenessWorkerInput = $null
+$script:DdcLivenessWorkerOutput = $null
+$script:DdcLivenessWorkerAsyncResult = $null
+$script:DdcLivenessWorkerGeneration = 0
+$script:DdcLivenessWorkerTargets = @()
 
 $script:VCPCodeDescriptions = @{
     0x04 = "Factory Reset"; 0x08 = "Reset Color"; 0x10 = "Brightness"; 0x12 = "Contrast"
@@ -4639,6 +4670,7 @@ function Refresh-Monitors {
     Load-MonitorSettings
     Start-CapabilitiesWorker
     Update-ProfilesList
+    $script:DdcLivenessNextProbeUtc = [DateTime]::UtcNow.AddSeconds($script:DdcLivenessProbeIntervalSeconds)
     return $true
 }
 
@@ -4664,6 +4696,7 @@ function Request-DisplayRecoveryRefresh {
     Stop-MonitorSettingsWorker -Cancel
     Stop-VcpWorker -Cancel
     Stop-DdcReportWorker -Cancel
+    Stop-DdcLivenessWorker -Cancel
     if (-not $script:DisplayRecoveryDebounceTimer) {
         $script:DisplayRecoveryDebounceTimer = New-Object System.Windows.Threading.DispatcherTimer
         $script:DisplayRecoveryDebounceTimer.Interval = [TimeSpan]::FromMilliseconds($script:DisplayRecoveryDebounceMilliseconds)
@@ -4678,7 +4711,138 @@ function Request-DisplayRecoveryRefresh {
     Update-SelectedMonitorRecoveryUi
 }
 
+function Stop-DdcLivenessWorker {
+    param([switch]$Cancel)
+    if ($script:DdcLivenessWorker) {
+        if ($Cancel -and $script:DdcLivenessWorkerAsyncResult -and -not $script:DdcLivenessWorkerAsyncResult.IsCompleted) {
+            try { $script:DdcLivenessWorker.Stop() } catch {}
+        }
+        try { $script:DdcLivenessWorker.Dispose() } catch {}
+    }
+    if ($script:DdcLivenessWorkerInput) { try { $script:DdcLivenessWorkerInput.Dispose() } catch {} }
+    if ($script:DdcLivenessWorkerOutput) { try { $script:DdcLivenessWorkerOutput.Dispose() } catch {} }
+    $script:DdcLivenessWorker = $null
+    $script:DdcLivenessWorkerInput = $null
+    $script:DdcLivenessWorkerOutput = $null
+    $script:DdcLivenessWorkerAsyncResult = $null
+    $script:DdcLivenessWorkerGeneration = 0
+    $script:DdcLivenessWorkerTargets = @()
+}
+
+function Update-DdcLivenessWorkerOutput {
+    if (-not $script:DdcLivenessWorker -or -not $script:DdcLivenessWorkerAsyncResult) { return }
+    if (-not $script:DdcLivenessWorkerAsyncResult.IsCompleted) { return }
+    $generation = [int]$script:DdcLivenessWorkerGeneration
+    try { $script:DdcLivenessWorker.EndInvoke($script:DdcLivenessWorkerAsyncResult) } catch { $null = $_ }
+    $results = @($script:DdcLivenessWorkerOutput | Where-Object {
+        Test-DisplayWorkerResultCurrent -Result $_ -CurrentGeneration $generation -Monitors $script:PhysicalMonitors
+    })
+    Stop-DdcLivenessWorker
+    $script:DdcLivenessNextProbeUtc = [DateTime]::UtcNow.AddSeconds($script:DdcLivenessProbeIntervalSeconds)
+    if ($generation -ne $script:DisplayRecoveryGeneration) { return }
+
+    foreach ($result in $results) {
+        $identityKey = [string]$result.IdentityKey
+        $probeUtc = if ($result.PSObject.Properties.Name -contains "TimestampUtc") { [DateTime]$result.TimestampUtc } else { [DateTime]::UtcNow }
+        foreach ($monitor in @($script:PhysicalMonitors)) {
+            if ($null -eq $monitor -or [string]$monitor.IdentityKey -ne $identityKey) { continue }
+            $monitor | Add-Member -NotePropertyName DdcLastProbeUtc -NotePropertyValue $probeUtc -Force
+            $monitor | Add-Member -NotePropertyName DdcLastProbeSucceeded -NotePropertyValue ([bool]$result.Success) -Force
+            if ([bool]$result.Success) {
+                $script:DdcLivenessLastSuccessUtc[$identityKey] = $probeUtc
+                $monitor | Add-Member -NotePropertyName DdcLastSuccessfulProbeUtc -NotePropertyValue $probeUtc -Force
+            }
+            break
+        }
+        if ([bool]$result.Success) {
+            Set-DisplayRecoveryOutcome -IdentityKey $identityKey -Outcome "Success" -Generation $generation -NowUtc $probeUtc | Out-Null
+        } else {
+            Set-DisplayRecoveryOutcome -IdentityKey $identityKey -Outcome "Failure" -Generation $generation -NowUtc $probeUtc -ErrorMessage "Periodic DDC liveness read failed" | Out-Null
+        }
+    }
+
+    $decision = Invoke-DdcLivenessRecovery -Results $results -CurrentGeneration $generation -RequestRecovery {
+        param([object[]]$FailedIdentities)
+        $failedLabels = @($FailedIdentities | ForEach-Object {
+            $failedIndex = Find-MonitorIndexByIdentity -IdentityKey ([string]$_)
+            if ($failedIndex -ge 0) { Get-MonitorDisplayLabel -Monitor $script:PhysicalMonitors[$failedIndex] } else { [string]$_ }
+        })
+        Update-Status "DDC liveness failed for $($failedLabels -join ', '); reacquiring monitor handles"
+        Request-DisplayRecoveryRefresh -Reason "ddc-liveness"
+    }
+    if (-not [bool]$decision.RecoveryRequested -and $results.Count -gt 0) {
+        Update-SelectedMonitorRecoveryUi
+    }
+}
+
+function Start-DdcLivenessProbe {
+    if ($script:DdcLivenessWorker) { return }
+    $generation = [int]$script:DisplayRecoveryGeneration
+    $targets = @()
+    for ($index = 0; $index -lt $script:PhysicalMonitors.Count; $index++) {
+        $monitor = $script:PhysicalMonitors[$index]
+        if ($null -eq $monitor -or $monitor.Handle -eq [IntPtr]::Zero -or [string]::IsNullOrWhiteSpace([string]$monitor.IdentityKey)) { continue }
+        $probeCode = [int][MonitorAPI]::VCP_BRIGHTNESS
+        if ([bool]$monitor.CapabilitiesKnown) {
+            $probeCode = -1
+            foreach ($candidate in @([int][MonitorAPI]::VCP_BRIGHTNESS, [int][MonitorAPI]::VCP_CONTRAST, [int][MonitorAPI]::VCP_VERSION)) {
+                if (Test-MonitorSupportsVcp -Monitor $monitor -Code $candidate) { $probeCode = $candidate; break }
+            }
+            if ($probeCode -lt 0) { continue }
+        }
+        $timing = Get-DdcWorkerTiming -IdentityKey ([string]$monitor.IdentityKey)
+        $targets += [PSCustomObject]@{
+            MonitorIndex = [int]$index
+            MonitorName = [string]$monitor.Name
+            IdentityKey = [string]$monitor.IdentityKey
+            Handle = $monitor.Handle
+            HandleValue = [int64]$monitor.Handle.ToInt64()
+            Generation = $generation
+            Code = [int]$probeCode
+            ReadRetries = [int]$timing.ReadRetries
+            DelayMilliseconds = [int]$timing.DelayMilliseconds
+        }
+    }
+    $script:DdcLivenessNextProbeUtc = [DateTime]::UtcNow.AddSeconds($script:DdcLivenessProbeIntervalSeconds)
+    if ($targets.Count -eq 0) { return }
+    $workerScript = {
+        param([object[]]$Targets)
+        foreach ($target in $Targets) {
+            $vct = [uint32]0
+            $current = [uint32]0
+            $maximum = [uint32]0
+            $lastError = [int]0
+            $attempts = [int]0
+            $ok = [MonitorAPI]::ReadVCPWithRetry($target.Handle, [byte]$target.Code, [int]$target.ReadRetries, [int]$target.DelayMilliseconds, [ref]$vct, [ref]$current, [ref]$maximum, [ref]$lastError, [ref]$attempts)
+            [PSCustomObject]@{
+                Success = [bool]$ok
+                Code = [int]$target.Code
+                Current = [uint32]$current
+                Maximum = [uint32]$maximum
+                Type = [uint32]$vct
+                LastError = [int]$lastError
+                Attempts = [int]$attempts
+                MonitorName = [string]$target.MonitorName
+                IdentityKey = [string]$target.IdentityKey
+                MonitorIndex = [int]$target.MonitorIndex
+                Generation = [int]$target.Generation
+                HandleValue = [int64]$target.HandleValue
+                TimestampUtc = [DateTime]::UtcNow
+            }
+        }
+    }
+    $script:DdcLivenessWorkerGeneration = $generation
+    $script:DdcLivenessWorkerTargets = $targets
+    $script:DdcLivenessWorkerInput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
+    $script:DdcLivenessWorkerInput.Complete()
+    $script:DdcLivenessWorkerOutput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
+    $script:DdcLivenessWorker = [PowerShell]::Create()
+    $script:DdcLivenessWorker.AddScript($workerScript.ToString()).AddArgument($targets) | Out-Null
+    $script:DdcLivenessWorkerAsyncResult = $script:DdcLivenessWorker.BeginInvoke($script:DdcLivenessWorkerInput, $script:DdcLivenessWorkerOutput)
+}
+
 function Invoke-DisplayRecoveryEventPump {
+    Update-DdcLivenessWorkerOutput
     $reason = ""
     while ($script:DisplayRecoveryEventQueue.TryDequeue([ref]$reason)) {
         Request-DisplayRecoveryRefresh -Reason $reason
@@ -4696,11 +4860,19 @@ function Invoke-DisplayRecoveryEventPump {
             $dueIdentities += $identityKey
         }
     }
-    if ($dueIdentities.Count -eq 0) { return }
-    foreach ($identityKey in $dueIdentities) {
-        Set-DisplayRecoveryOutcome -IdentityKey $identityKey -Outcome "Retry" -Generation $script:DisplayRecoveryGeneration | Out-Null
+    if ($dueIdentities.Count -gt 0) {
+        foreach ($identityKey in $dueIdentities) {
+            Set-DisplayRecoveryOutcome -IdentityKey $identityKey -Outcome "Retry" -Generation $script:DisplayRecoveryGeneration | Out-Null
+        }
+        Load-MonitorSettings
+        return
     }
-    Load-MonitorSettings
+    if ($nowUtc -lt $script:DdcLivenessNextProbeUtc -or $script:DdcLivenessWorker) { return }
+    if (($script:CapabilitiesWorker -and $script:CapabilitiesWorkerAsyncResult -and -not $script:CapabilitiesWorkerAsyncResult.IsCompleted) -or
+        ($script:VcpWorker -and $script:VcpWorkerAsyncResult -and -not $script:VcpWorkerAsyncResult.IsCompleted) -or
+        ($script:DdcReportWorker -and $script:DdcReportWorkerAsyncResult -and -not $script:DdcReportWorkerAsyncResult.IsCompleted) -or
+        [MonitorAPI]::IsVCPWriteWorkerActive()) { return }
+    Start-DdcLivenessProbe
 }
 
 function Initialize-DisplayRecoveryEventPipeline {
@@ -4766,6 +4938,7 @@ function Stop-DisplayRecoveryEventPipeline {
     param()
     if ($script:DisplayRecoveryDebounceTimer) { $script:DisplayRecoveryDebounceTimer.Stop() }
     if ($script:DisplayRecoveryEventPumpTimer) { $script:DisplayRecoveryEventPumpTimer.Stop() }
+    Stop-DdcLivenessWorker -Cancel
     if ($script:DisplayRecoveryHwndSource -and $script:DisplayRecoveryWindowHook) {
         try { $script:DisplayRecoveryHwndSource.RemoveHook($script:DisplayRecoveryWindowHook) } catch { $null = $_ }
     }

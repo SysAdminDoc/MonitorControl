@@ -331,6 +331,54 @@ function Get-DisplayRecoveryReadRetryCount {
     return [int][Math]::Min(5, [Math]::Max(0, $DefaultRetries) + [Math]::Floor($failureCount / 2))
 }
 
+function Get-DdcLivenessRecoveryDecision {
+    param(
+        [object[]]$Results,
+        [int]$CurrentGeneration,
+        [int]$LastRecoveryGeneration = 0
+    )
+    $current = @($Results | Where-Object {
+        $null -ne $_ -and
+        [int]$_.Generation -eq $CurrentGeneration -and
+        -not [string]::IsNullOrWhiteSpace([string]$_.IdentityKey)
+    })
+    $successfulIdentities = @($current | Where-Object { [bool]$_.Success } |
+        ForEach-Object { [string]$_.IdentityKey } | Sort-Object -Unique)
+    $failedIdentities = @($current | Where-Object { -not [bool]$_.Success } |
+        ForEach-Object { [string]$_.IdentityKey } | Sort-Object -Unique |
+        Where-Object { $successfulIdentities -notcontains $_ })
+    $mixedOutcome = $successfulIdentities.Count -gt 0 -and $failedIdentities.Count -gt 0
+    $alreadyRecovered = $LastRecoveryGeneration -eq $CurrentGeneration
+    return [PSCustomObject]@{
+        Generation = [int]$CurrentGeneration
+        SuccessfulIdentities = [object[]]$successfulIdentities
+        FailedIdentities = [object[]]$failedIdentities
+        MixedOutcome = [bool]$mixedOutcome
+        AlreadyRecovered = [bool]$alreadyRecovered
+        ShouldRecover = [bool]($mixedOutcome -and -not $alreadyRecovered)
+    }
+}
+
+function Invoke-DdcLivenessRecovery {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Coordinates an injected in-process refresh callback.')]
+    param(
+        [object[]]$Results,
+        [int]$CurrentGeneration,
+        [scriptblock]$RequestRecovery
+    )
+    $decision = Get-DdcLivenessRecoveryDecision -Results $Results -CurrentGeneration $CurrentGeneration -LastRecoveryGeneration ([int]$script:DdcLivenessLastRecoveryGeneration)
+    $requested = $false
+    if ([bool]$decision.ShouldRecover) {
+        $script:DdcLivenessLastRecoveryGeneration = $CurrentGeneration
+        if ($null -ne $RequestRecovery) {
+            & $RequestRecovery ([object[]]$decision.FailedIdentities)
+            $requested = $true
+        }
+    }
+    $decision | Add-Member -NotePropertyName RecoveryRequested -NotePropertyValue ([bool]$requested) -Force
+    return $decision
+}
+
 function Get-DisplayRecoveryTransition {
     param(
         [string]$IdentityKey,
@@ -1382,8 +1430,7 @@ function Stop-VcpWorker {
     $script:VcpWorkerIdentityKey = ""
     $script:VcpWorkerMonitorIndex = -1
     $script:VcpWorkerHandleValue = [int64]0
-    if ($vcpQueryBtn) { $vcpQueryBtn.IsEnabled = $true }
-    if ($vcpScanBtn) { $vcpScanBtn.IsEnabled = $true }
+    Set-VcpWorkerUiIdle
 }
 
 function Update-VcpWorkerOutput {
@@ -1411,12 +1458,12 @@ function Update-VcpWorkerOutput {
                 $code = [int]$result.Code
                 $desc = Get-VcpDescription -Code $code
                 if ([bool]$result.Success) {
-                    $vcpResultBox.Text = "VCP 0x$("{0:X2}" -f $code) ($desc)`nCurrent: $($result.Current)`nMaximum: $($result.Maximum)"
+                    Set-VcpWorkerResultText -Text "VCP 0x$("{0:X2}" -f $code) ($desc)`nCurrent: $($result.Current)`nMaximum: $($result.Maximum)"
                 } else {
-                    $vcpResultBox.Text = Format-DdcDiagnostic -Operation "Read" -Monitor ([string]$result.MonitorName) -Code $code -Value $null -LastError ([int]$result.LastError) -Attempts ([int]$result.Attempts) -Message ""
+                    Set-VcpWorkerResultText -Text (Format-DdcDiagnostic -Operation "Read" -Monitor ([string]$result.MonitorName) -Code $code -Value $null -LastError ([int]$result.LastError) -Attempts ([int]$result.Attempts) -Message "")
                 }
             } else {
-                $vcpResultBox.Text = "Reading VCP..."
+                Set-VcpWorkerResultText -Text "Reading VCP..."
             }
         } else {
             $last = if ($items.Count -gt 0) { $items[-1] } else { $null }
@@ -1434,7 +1481,7 @@ function Update-VcpWorkerOutput {
             } else {
                 $body = if ($found.Count -gt 0) { $found -join "`n" } else { "" }
             }
-            $vcpResultBox.Text = "$header`n$body"
+            Set-VcpWorkerResultText -Text "$header`n$body"
         }
     }
     if ($completed) {
@@ -1529,6 +1576,9 @@ function Get-DdcReportTargets {
             RiskyWritesEnabled = Test-VcpWriteEnabledForMonitor -Monitor $mon
             RecoveryState = if ($mon.PSObject.Properties.Name -contains "RecoveryState") { [string]$mon.RecoveryState } else { "Stale" }
             RecoveryLastSuccessUtc = if ($mon.PSObject.Properties.Name -contains "RecoveryLastSuccessUtc") { $mon.RecoveryLastSuccessUtc } else { $null }
+            DdcLastProbeUtc = if ($mon.PSObject.Properties.Name -contains "DdcLastProbeUtc") { $mon.DdcLastProbeUtc } else { $null }
+            DdcLastSuccessfulProbeUtc = if ($mon.PSObject.Properties.Name -contains "DdcLastSuccessfulProbeUtc") { $mon.DdcLastSuccessfulProbeUtc } elseif ($script:DdcLivenessLastSuccessUtc.ContainsKey([string]$mon.IdentityKey)) { $script:DdcLivenessLastSuccessUtc[[string]$mon.IdentityKey] } else { $null }
+            DdcLastProbeSucceeded = if ($mon.PSObject.Properties.Name -contains "DdcLastProbeSucceeded") { [bool]$mon.DdcLastProbeSucceeded } else { $null }
             Handle = $mon.Handle
             HandleValue = [int64]$mon.Handle.ToInt64()
             Generation = [int]$script:DisplayRecoveryGeneration
@@ -1585,6 +1635,8 @@ function New-DdcCompatibilityReport {
     [void]$sb.AppendLine("OS: $($system.OS)")
     [void]$sb.AppendLine("PowerShell: $($system.PowerShell)")
     [void]$sb.AppendLine("Probe safety: read-only probes only; risky codes are never written automatically and power, input, reset, PiP/PbP, OSD, and arbitrary codes are not queried")
+    $livenessInterval = if ($script:DdcLivenessProbeIntervalSeconds -gt 0) { [int]$script:DdcLivenessProbeIntervalSeconds } else { 60 }
+    [void]$sb.AppendLine("DDC liveness: one read-only VCP query per monitor every $livenessInterval seconds; this probe never writes to a display")
     [void]$sb.AppendLine("Capability cache entries: $($script:CapabilitiesCache.Count); shipped known-bad models: $(@($script:CapabilitiesKnownBadModels).Count)")
     [void]$sb.AppendLine("Redundant writes suppressed this session: $(Get-SuppressedDdcWriteCount)")
     [void]$sb.AppendLine("")
@@ -1652,6 +1704,9 @@ function New-DdcCompatibilityReport {
         [void]$sb.AppendLine("  Parsed VCP list: $(Format-DdcReportCodeList -Codes $target.SupportedCodes)")
         $recoverySuccess = if ($null -ne $target.RecoveryLastSuccessUtc) { ([DateTime]$target.RecoveryLastSuccessUtc).ToString("o") } else { "never" }
         [void]$sb.AppendLine("  Recovery: $($target.RecoveryState), last successful read=$recoverySuccess")
+        $livenessSuccess = if ($null -ne $target.DdcLastSuccessfulProbeUtc) { ([DateTime]$target.DdcLastSuccessfulProbeUtc).ToString("o") } else { "never" }
+        $livenessAttempt = if ($null -ne $target.DdcLastProbeUtc) { ([DateTime]$target.DdcLastProbeUtc).ToString("o") } else { "never" }
+        [void]$sb.AppendLine("  Liveness probe: last success=$livenessSuccess, last attempt=$livenessAttempt")
         [void]$sb.AppendLine("  Risky VCP writes: $(if ([bool]$target.RiskyWritesEnabled) { 'identity unlocked; direct confirmation still required' } else { 'disabled' })")
         if (@($target.SkippedProbeCodes).Count -gt 0) {
             [void]$sb.AppendLine("  Common probes skipped by capabilities: $(Format-DdcReportCodeList -Codes $target.SkippedProbeCodes)")
@@ -1714,8 +1769,7 @@ function Stop-DdcReportWorker {
     $script:DdcReportWorkerLastOutputCount = 0
     $script:DdcReportTargets = @()
     $script:DdcReportWorkerGeneration = -1
-    if ($ddcReportGenerateBtn) { $ddcReportGenerateBtn.IsEnabled = $true }
-    if ($ddcReportCopyBtn) { $ddcReportCopyBtn.IsEnabled = $true }
+    Set-DdcReportWorkerUiIdle
 }
 
 function Stop-MonitorSettingsWorker {

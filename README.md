@@ -63,10 +63,11 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 - **Portable Release ZIP** — Local release builds package the script, icon, README, LICENSE, signature status, and SHA256 checksums
 - **Verified Risky Writes** — Power, input, reset, color preset, OSD lock, OSD language, auxiliary power, PiP/PbP, and arbitrary commands require a per-monitor identity unlock plus an exact code/value confirmation. The confirmation names the specific consequence for that code, and readback reports verified, mismatched, or unavailable outcomes
 - **Async Capabilities Reads** — Monitor `vcp(...)` capabilities load from a background worker after enumeration, keeping refresh responsive
-- **DDC Compatibility Report** — Builds a copyable diagnostics report with monitor identities, capability status, common VCP probe results, OS/GPU driver data, and recent DDC errors
+- **DDC Compatibility Report** — Builds a copyable diagnostics report with monitor identities, capability status, common VCP probe results, per-monitor liveness history, OS/GPU driver data, and recent DDC errors
 - **No-Hardware Regression Tests** — Pester tests cover schedule rollover, idle tick wraparound, profile transactions, hostile bundles, capability safety, risky-write rollback, bridge framing/auth, and VCP input parsing
 - **Async VCP Reads** — VCP Explorer query and scan operations run in a background worker with live scan progress
 - **Async Monitor Refresh** — Monitor brightness, contrast, color gain, volume, and sharpness reads refresh from a background worker
+- **Silent DDC Recovery** — While the DDC pipeline is otherwise idle, one inexpensive supported VCP code is read from each monitor every 60 seconds. The probe never writes to a display. If one channel fails while others answer, stale physical-monitor handles are destroyed and the complete inventory is re-enumerated once for that recovery generation
 - **Coalesced Routine Writes** — Sliders, presets, and brightness automation queue on a background worker so rapid routine changes do not block the WPF thread
 - **No Redundant DDC Writes** — Reads and writes record each monitor's current value, and a routine write that would not change it is skipped and counted rather than sent. Repeating automation such as ambient mode touches the panel once instead of on every poll, which matters because many monitors store these settings in limited-endurance EEPROM. The cache is dropped whenever monitor handles are released, and verified profile writes always go through
 - **Recoverable Profile Apply** — Profile loads snapshot every readable hardware value, verify writes, and restore readable prior values in reverse order after a failure or mismatch
@@ -264,6 +265,10 @@ These controls are under **System > Display & DDC**.
 - **Reset calibration** clears both the learned multiplier and the skipped-code list for the
   selected monitor
 - Effective values, calibration state, and skipped codes appear in the DDC Compatibility Report
+- A separate liveness probe performs one read-only VCP query per monitor every 60 seconds while
+  the DDC pipeline is idle. It never writes to a display. The report records the last attempt and
+  last successful probe for each display; an isolated failure causes full handle re-acquisition
+  instead of continuing to retry a dead handle
 
 ### Risky VCP Write Safety
 - Risky controls start disabled. Select a display, open **System > Safety**, and explicitly enable risky VCP writes for that stable monitor identity
