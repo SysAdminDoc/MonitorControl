@@ -220,6 +220,12 @@ public static class MonitorControlVcpWriteProbe
         "Update-RiskyVcpControlState",
         "Set-ControlVcpSupport",
         "Get-VcpWriteOperation",
+        "New-DdcTimingProfile",
+        "Get-DdcTimingProfile",
+        "Get-DdcEffectiveTiming",
+        "Set-DdcVerifyPolicy",
+        "Get-DdcTransactionVerificationSettings",
+        "Test-VcpReadbackOutOfRange",
         "Test-VcpCodeIsScaled",
         "Get-VcpMaximumForMonitor",
         "Set-VcpMaximumForMonitor",
@@ -594,6 +600,8 @@ Describe "Build-time source composition" {
         $parameterNames = @($transaction.Body.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
         $parameterNames | Should -Contain "ReadValue"
         $parameterNames | Should -Contain "WriteValue"
+        $parameterNames | Should -Contain "DelayAction"
+        $parameterNames | Should -Not -Contain "VerificationDelayMs"
     }
 
     It "composes a standalone script without development source references" {
@@ -1641,6 +1649,11 @@ Describe "Verified risky VCP write safety" {
         $script:RiskyVcpEnabledIdentityKeys = @{}
         $script:VCPCodeDescriptions = @{ 0x10 = "Brightness"; 0x12 = "Contrast"; 0x60 = "Input Source" }
         $script:PendingStatusMessage = ""
+        $script:VcpDefaultMaximum = 100
+        $script:DdcTimingProfiles = @{}
+        $script:DdcTimingMinMultiplier = 1.0
+        $script:DdcTimingMaxMultiplier = 4.0
+        $script:DdcTimingMaxRetries = 10
     }
 
     AfterEach {
@@ -1743,7 +1756,7 @@ Describe "Verified risky VCP write safety" {
         $read = { param($operation) [pscustomobject]@{ Success = $true; Current = [uint32]$state[[int]$operation.Code] } }
         $write = { param($operation, [uint32]$value) $state[[int]$operation.Code] = $value; return $true }
 
-        $result = Invoke-VerifiedVcpTransaction -Operations $operations -ReadValue $read -WriteValue $write -RollbackOnFailure -VerificationDelayMs 0
+        $result = Invoke-VerifiedVcpTransaction -Operations $operations -ReadValue $read -WriteValue $write -RollbackOnFailure -DelayAction { param([int]$Milliseconds) $null = $Milliseconds }
 
         $result.Success | Should -BeTrue
         $result.Outcome | Should -Be "Verified"
@@ -1773,7 +1786,7 @@ Describe "Verified risky VCP write safety" {
             return $true
         }
 
-        $result = Invoke-VerifiedVcpTransaction -Operations $operations -ReadValue $read -WriteValue $write -RollbackOnFailure -VerificationDelayMs 0
+        $result = Invoke-VerifiedVcpTransaction -Operations $operations -ReadValue $read -WriteValue $write -RollbackOnFailure -DelayAction { param([int]$Milliseconds) $null = $Milliseconds }
 
         $result.Success | Should -BeFalse
         $result.Outcome | Should -Be "Mismatched"
@@ -1794,12 +1807,103 @@ Describe "Verified risky VCP write safety" {
         }
         $write = { param($ignoredOperation, [uint32]$ignoredValue) return $true }
 
-        $result = Invoke-VerifiedVcpTransaction -Operations @($operation) -ReadValue $read -WriteValue $write -VerificationDelayMs 0
+        $result = Invoke-VerifiedVcpTransaction -Operations @($operation) -ReadValue $read -WriteValue $write -DelayAction { param([int]$Milliseconds) $null = $Milliseconds }
 
         $result.Success | Should -BeTrue
         $result.Outcome | Should -Be "Unverified"
         $result.Results[0].PreviousReadable | Should -BeTrue
         $result.Results[0].Verification | Should -Be "Unverified"
+    }
+
+    It "uses calibrated delays and lets lenient verification recover from one stale read" {
+        $monitor = [pscustomobject]@{ Handle = [IntPtr]1; IdentityKey = "edid:slow"; Name = "Slow monitor" }
+        $operation = Get-VcpWriteOperation -Monitor $monitor -Code 0x10 -Value 70
+        $timing = Get-DdcTimingProfile -IdentityKey $monitor.IdentityKey
+        $timing.SleepMultiplier = 3.0
+        Set-DdcVerifyPolicy -IdentityKey $monitor.IdentityKey -Policy "Lenient" | Out-Null
+        $readState = @{ Number = 0 }
+        $read = {
+            param($ignoredOperation)
+            $readState.Number++
+            $value = switch ($readState.Number) { 1 { 20 } 2 { 20 } default { 70 } }
+            return [pscustomobject]@{ Success = $true; Current = [uint32]$value; Maximum = [uint32]100 }
+        }
+        $writes = @{ Count = 0 }
+        $write = { param($ignoredOperation, [uint32]$ignoredValue) $writes.Count++; return $true }
+        $delays = New-Object System.Collections.Generic.List[int]
+
+        $result = Invoke-VerifiedVcpTransaction -Operations @($operation) -ReadValue $read -WriteValue $write -RollbackOnFailure -DelayAction { param([int]$Milliseconds) $delays.Add($Milliseconds) }
+
+        $result.Success | Should -BeTrue
+        $result.Outcome | Should -Be "VerifiedAfterRetry"
+        $result.Results[0].Verification | Should -Be "VerifiedAfterRetry"
+        $result.Results[0].VerificationReads | Should -Be 2
+        $result.Results[0].VerificationDelayMilliseconds | Should -Be ([int][MonitorAPI]::VcpRetryDelayMilliseconds * 3)
+        @($delays) | Should -Be @(([int][MonitorAPI]::VcpRetryDelayMilliseconds * 3), ([int][MonitorAPI]::VcpRetryDelayMilliseconds * 6))
+        $writes.Count | Should -Be 1
+        $result.Rollback | Should -Be "NotNeeded"
+    }
+
+    It "requires two in-range mismatches before lenient rollback" {
+        $monitor = [pscustomobject]@{ Handle = [IntPtr]1; IdentityKey = "edid:liar"; Name = "Lying monitor" }
+        $operation = Get-VcpWriteOperation -Monitor $monitor -Code 0x10 -Value 70
+        Set-DdcVerifyPolicy -IdentityKey $monitor.IdentityKey -Policy "Lenient" | Out-Null
+        $readState = @{ Number = 0 }
+        $read = {
+            param($ignoredOperation)
+            $readState.Number++
+            $value = if ($readState.Number -eq 1 -or $readState.Number -ge 4) { 20 } else { 69 }
+            return [pscustomobject]@{ Success = $true; Current = [uint32]$value; Maximum = [uint32]100 }
+        }
+        $writes = New-Object System.Collections.Generic.List[int]
+        $write = { param($ignoredOperation, [uint32]$value) $writes.Add([int]$value); return $true }
+
+        $result = Invoke-VerifiedVcpTransaction -Operations @($operation) -ReadValue $read -WriteValue $write -RollbackOnFailure -DelayAction { param([int]$Milliseconds) $null = $Milliseconds }
+
+        $result.Success | Should -BeFalse
+        $result.Outcome | Should -Be "Mismatched"
+        $result.Results[0].VerificationReads | Should -Be 2
+        @($writes) | Should -Be @(70, 20)
+    }
+
+    It "classifies out-of-range readback as unreliable without rolling back the write" {
+        $monitor = [pscustomobject]@{ Handle = [IntPtr]1; IdentityKey = "edid:garbage"; Name = "Garbage monitor" }
+        $operation = Get-VcpWriteOperation -Monitor $monitor -Code 0x10 -Value 70
+        $readState = @{ Number = 0 }
+        $read = {
+            param($ignoredOperation)
+            $readState.Number++
+            $value = if ($readState.Number -eq 1) { 20 } else { 65535 }
+            return [pscustomobject]@{ Success = $true; Current = [uint32]$value; Maximum = [uint32]100 }
+        }
+        $writes = New-Object System.Collections.Generic.List[int]
+        $write = { param($ignoredOperation, [uint32]$value) $writes.Add([int]$value); return $true }
+
+        $result = Invoke-VerifiedVcpTransaction -Operations @($operation) -ReadValue $read -WriteValue $write -RollbackOnFailure -DelayAction { param([int]$Milliseconds) $null = $Milliseconds }
+
+        $result.Success | Should -BeTrue
+        $result.Outcome | Should -Be "UnreliableReadback"
+        $result.Results[0].Verification | Should -Be "UnreliableReadback"
+        $result.Results[0].ReadbackValue | Should -Be 65535
+        @($writes) | Should -Be @(70)
+        $result.Rollback | Should -Be "NotNeeded"
+    }
+
+    It "can disable readback verification per monitor while retaining a rollback snapshot" {
+        $monitor = [pscustomobject]@{ Handle = [IntPtr]1; IdentityKey = "edid:trusted"; Name = "Trusted monitor" }
+        $operation = Get-VcpWriteOperation -Monitor $monitor -Code 0x10 -Value 70
+        Set-DdcVerifyPolicy -IdentityKey $monitor.IdentityKey -Policy "Off" | Out-Null
+        $readState = @{ Count = 0 }
+        $read = { param($ignoredOperation) $readState.Count++; return [pscustomobject]@{ Success = $true; Current = [uint32]20; Maximum = [uint32]100 } }
+        $write = { param($ignoredOperation, [uint32]$ignoredValue) return $true }
+
+        $result = Invoke-VerifiedVcpTransaction -Operations @($operation) -ReadValue $read -WriteValue $write -RollbackOnFailure -DelayAction { throw "verification delay should not run" }
+
+        $result.Success | Should -BeTrue
+        $result.Outcome | Should -Be "VerificationOff"
+        $result.Results[0].Verification | Should -Be "Off"
+        $result.Results[0].PreviousReadable | Should -BeTrue
+        $readState.Count | Should -Be 1
     }
 
     It "shows the exact code and value and keeps risky codes out of automatic reports" {
@@ -3344,7 +3448,7 @@ Describe "Per-monitor DDC timing and null-message semantics" {
             "New-DdcTimingProfile", "Get-DdcTimingProfile", "Get-DdcEffectiveTiming", "Get-DdcWorkerTiming",
             "Get-DdcCalibratedSleepMultiplier", "Test-DdcCodeUnsupported", "Register-DdcCodeOutcome",
             "Test-DdcErrorIndicatesNullResponse", "Get-DdcNullSemanticsDecision", "Set-DdcNullSemanticsClassification",
-            "Set-DdcTimingMode", "Clear-DdcTimingCalibration", "Update-DdcTimingCalibration",
+            "Set-DdcTimingMode", "Set-DdcVerifyPolicy", "Clear-DdcTimingCalibration", "Update-DdcTimingCalibration",
             "Get-DdcTimingSettingsObject", "Get-VCPValue"
         )
         $script:DdcTimingMinMultiplier = 1.0
@@ -3363,6 +3467,7 @@ Describe "Per-monitor DDC timing and null-message semantics" {
         $timing.CalibratedAt | Should -BeNullOrEmpty
         $timing.ReadRetries | Should -Be ([int][MonitorAPI]::VcpReadRetryCount)
         $timing.WriteRetries | Should -Be ([int][MonitorAPI]::VcpWriteRetryCount)
+        $timing.VerifyPolicy | Should -Be "Strict"
         $timing.NullMeansUnsupported | Should -BeFalse
         $timing.NullSemanticsClassifiedAt | Should -BeNullOrEmpty
         @($timing.UnsupportedCodes).Count | Should -Be 0
@@ -3377,6 +3482,19 @@ Describe "Per-monitor DDC timing and null-message semantics" {
         $effective.ReadRetries | Should -Be 5
         $effective.WriteRetries | Should -Be 0
         $effective.CapabilityRetries | Should -Be $script:DdcTimingMaxRetries
+    }
+
+    It "normalizes the per-monitor verification policy and derives both readback delays" {
+        $timing = Get-DdcTimingProfile -IdentityKey "edid:a"
+        $timing.SleepMultiplier = 3.0
+        Set-DdcVerifyPolicy -IdentityKey "edid:a" -Policy "Lenient" | Out-Null
+
+        $effective = Get-DdcEffectiveTiming -TimingProfile $timing
+
+        $effective.VerifyPolicy | Should -Be "Lenient"
+        $effective.VerificationDelayMilliseconds | Should -Be ([int][MonitorAPI]::VcpRetryDelayMilliseconds * 3)
+        $effective.LenientVerificationDelayMilliseconds | Should -Be ([int][MonitorAPI]::VcpRetryDelayMilliseconds * 6)
+        (Set-DdcVerifyPolicy -IdentityKey "edid:a" -Policy "unknown").VerifyPolicy | Should -Be "Strict"
     }
 
     It "passes each monitor's effective budgets and delay into both background workers" {
@@ -3509,9 +3627,11 @@ Describe "Per-monitor DDC timing and null-message semantics" {
         Register-DdcCodeOutcome -TimingProfile $timing -Code 0xDF -Success $false -LastError ([int]0xC0262585) -Attempts 1 -OtherCodesResponded $true | Should -BeTrue
         Register-DdcCodeOutcome -TimingProfile $timing -Code 0xC0 -Success $false -LastError 31 -Attempts 1 -OtherCodesResponded $true | Should -BeFalse
 
-        $script:DdcTimingSchemaVersion = 2
+        $timing.VerifyPolicy = "Lenient"
+        $script:DdcTimingSchemaVersion = 3
         $document = Get-DdcTimingSettingsObject
-        $document.SchemaVersion | Should -Be 2
+        $document.SchemaVersion | Should -Be 3
+        $document.Monitors[0].VerifyPolicy | Should -Be "Lenient"
         $document.Monitors[0].NullMeansUnsupported | Should -BeTrue
         $document.Monitors[0].NullSemanticsClassifiedAt | Should -Be $classifiedAt.ToString("o")
     }
@@ -3523,6 +3643,16 @@ Describe "Per-monitor DDC timing and null-message semantics" {
         $source | Should -Match 'if \(\[bool\]\$target\.ProbeNullSemantics -and \$anySuccess\)'
         $source | Should -Match 'stopOnNullResponse && lastError == ErrorGraphicsDdcciInvalidData'
         (Get-Command Get-VCPValue).Definition | Should -Match 'ReadVCPWithRetry\(\$Handle, \$VCPCode, \[int\]\$timing\.ReadRetries, \[int\]\$timing\.DelayMilliseconds, \[bool\]\$stopOnNullResponse,'
+    }
+
+    It "exposes the effective verification policy in System and the DDC report" {
+        $source = Get-Content -LiteralPath $script:AppPath -Raw
+        $source | Should -Match 'x:Name="DdcVerifyPolicyCombo"'
+        $source | Should -Match 'Strict - one mismatch fails'
+        $source | Should -Match 'Lenient - re-read before failure'
+        $source | Should -Match 'Off - trust successful writes'
+        $source | Should -Match 'verify=\$\(\$timing\.VerifyPolicy\)'
+        $source | Should -Match 'lenient-reread=\$\(\$timing\.LenientVerificationDelayMilliseconds\)ms'
     }
 
     It "forgets a skipped code as soon as it answers again" {
