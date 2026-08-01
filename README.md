@@ -240,6 +240,29 @@ otherwise load or execute from the folder it was extracted into, so both are **o
 - A successful read is cached in `%APPDATA%\MonitorControlPro\capabilities-cache.json` and replayed on later launches; use **Clear cache** to force a re-read
 - Monitor models known upstream to fault the Windows kernel during a capability read are skipped before any probe, with the reason shown in the DDC compatibility report
 
+### DDC Timing Per Monitor
+
+Panels differ by an order of magnitude in how long they need between DDC/CI requests, so retry
+budgets and delays are stored against each stable monitor identity in
+`%APPDATA%\MonitorControlPro\ddc-timing.json` and survive restarts.
+
+- **Adaptive** (default) learns a sleep multiplier from the first successful handshake with the
+  monitor: a panel that answered on attempt three gets three times the default delay between
+  retries. The multiplier is clamped to 4x so one bad handshake cannot stall the app
+- **Manual** ignores the learned multiplier entirely and uses the default delay, so an operator
+  value is never silently modified by calibration. The two modes are mutually exclusive, and
+  returning to Adaptive discards the stored calibration and relearns it - the card says so before
+  you switch
+- Read, write, and capability retry budgets are set separately, each 0-10
+- A VCP code that fails every retry on a monitor that is answering other codes is recorded as
+  null-signalled-unsupported for that monitor and skipped from then on. Some monitors use the DDC
+  Null Message to mean "not supported" rather than "not ready", and burning the full retry budget
+  on every such code is the usual cause of a scan that looks like a hang. The code is forgotten
+  again the moment it answers
+- **Reset calibration** clears both the learned multiplier and the skipped-code list for the
+  selected monitor
+- Effective values, calibration state, and skipped codes appear in the DDC Compatibility Report
+
 ### Risky VCP Write Safety
 - Risky controls start disabled. Select a display, open **System**, and explicitly enable risky VCP writes for that stable monitor identity
 - The unlock covers power (`0xD6`), input (`0x60`), factory and color reset (`0x04`, `0x08`), color preset (`0x14`), OSD/button control (`0xCA`), OSD language (`0xCC`), auxiliary power (`0xD7`), PiP/PbP (`0xE8`, `0xE9`), and arbitrary VCP writes; identities without a stable key cannot be unlocked

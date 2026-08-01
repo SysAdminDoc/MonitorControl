@@ -174,6 +174,7 @@ public class MonitorAPI
     public const int VcpReadRetryCount = 2;
     public const int VcpWriteRetryCount = 2;
     public const int VcpRetryDelayMilliseconds = 60;
+    public const int VcpRetryDelayCeilingMilliseconds = 2000;
 
     public static void QueueVCPWrite(IntPtr hMonitor, byte bVCPCode, uint dwNewValue, string coalesceKey, string monitorName)
     {
@@ -208,8 +209,24 @@ public class MonitorAPI
         }
     }
 
+    // The delay between retries is a per-monitor property: panels differ by an order of
+    // magnitude in how long they need before they will answer a second request. The
+    // parameterless overload keeps the shipped default for callers that have no profile.
     public static bool ReadVCPWithRetry(IntPtr hMonitor, byte bVCPCode, int maxRetries, out uint pvct, out uint pdwCurrentValue, out uint pdwMaximumValue, out int lastError, out int attempts)
     {
+        return ReadVCPWithRetry(hMonitor, bVCPCode, maxRetries, VcpRetryDelayMilliseconds, out pvct, out pdwCurrentValue, out pdwMaximumValue, out lastError, out attempts);
+    }
+
+    public static int ClampRetryDelay(int delayMilliseconds)
+    {
+        if (delayMilliseconds < 0) { return 0; }
+        if (delayMilliseconds > VcpRetryDelayCeilingMilliseconds) { return VcpRetryDelayCeilingMilliseconds; }
+        return delayMilliseconds;
+    }
+
+    public static bool ReadVCPWithRetry(IntPtr hMonitor, byte bVCPCode, int maxRetries, int delayMilliseconds, out uint pvct, out uint pdwCurrentValue, out uint pdwMaximumValue, out int lastError, out int attempts)
+    {
+        delayMilliseconds = ClampRetryDelay(delayMilliseconds);
         pvct = 0;
         pdwCurrentValue = 0;
         pdwMaximumValue = 0;
@@ -227,13 +244,19 @@ public class MonitorAPI
                 return true;
             }
             lastError = Marshal.GetLastWin32Error();
-            if (retry < maxRetries) { Thread.Sleep(VcpRetryDelayMilliseconds); }
+            if (retry < maxRetries) { Thread.Sleep(delayMilliseconds); }
         }
         return false;
     }
 
     public static bool SetVCPWithRetry(IntPtr hMonitor, byte bVCPCode, uint dwNewValue, int maxRetries, out int lastError, out int attempts)
     {
+        return SetVCPWithRetry(hMonitor, bVCPCode, dwNewValue, maxRetries, VcpRetryDelayMilliseconds, out lastError, out attempts);
+    }
+
+    public static bool SetVCPWithRetry(IntPtr hMonitor, byte bVCPCode, uint dwNewValue, int maxRetries, int delayMilliseconds, out int lastError, out int attempts)
+    {
+        delayMilliseconds = ClampRetryDelay(delayMilliseconds);
         lastError = 0;
         attempts = 0;
         if (maxRetries < 0) { maxRetries = 0; }
@@ -248,7 +271,7 @@ public class MonitorAPI
                 return true;
             }
             lastError = Marshal.GetLastWin32Error();
-            if (retry < maxRetries) { Thread.Sleep(VcpRetryDelayMilliseconds); }
+            if (retry < maxRetries) { Thread.Sleep(delayMilliseconds); }
         }
         ForgetVcpValue(hMonitor, bVCPCode);
         return false;
@@ -922,6 +945,14 @@ $script:AutomationBridgeRequests = New-Object 'System.Collections.Concurrent.Con
 $script:AutomationBridgeResponses = [hashtable]::Synchronized(@{})
 $script:AutomationBridgeState = [hashtable]::Synchronized(@{ Stop = $false })
 $script:UpdatingAutomationBridgeUI = $false
+$script:DdcTimingSchemaVersion = 1
+$script:DdcTimingProfiles = @{}
+$script:DdcRespondedIdentityKeys = @{}
+# ddcutil calls this the sleep multiplier: how much longer than the default a panel
+# needs between DDC requests. Calibrated once from the first successful handshake.
+$script:DdcTimingMinMultiplier = 1.0
+$script:DdcTimingMaxMultiplier = 4.0
+$script:DdcTimingMaxRetries = 10
 $script:DdcReadRetryCount = [MonitorAPI]::VcpReadRetryCount
 $script:DdcWriteRetryCount = [MonitorAPI]::VcpWriteRetryCount
 $script:DdcScanRetryCount = 0
@@ -933,6 +964,7 @@ $script:ProfileStorageSettingsPath = Join-Path $script:DefaultProfilesPath "prof
 $script:AutomationBridgeSettingsPath = Join-Path $script:DefaultProfilesPath "automation-bridge.json"
 $script:AutomationBridgeWriteLogPath = Join-Path $script:DefaultProfilesPath "automation-bridge-writes.jsonl"
 $script:CapabilitiesCachePath = Join-Path $script:DefaultProfilesPath "capabilities-cache.json"
+$script:DdcTimingSettingsPath = Join-Path $script:DefaultProfilesPath "ddc-timing.json"
 $script:CapabilitiesCacheSchemaVersion = 1
 $script:CapabilitiesCache = @{}
 # Reading a capability string is the one call Microsoft documents as able to bring down
@@ -950,6 +982,7 @@ $script:DisplayStateRestoreEnabled = $false
 $script:DisplayStateRestoreValues = @{}
 $script:DisplayStateRestoreGeneration = -1
 $script:UpdatingDisplayStateRestoreUI = $false
+$script:UpdatingDdcTimingUI = $false
 $script:OptionalHelperSettingsPath = Join-Path $script:DefaultProfilesPath "optional-helpers.json"
 $script:OptionalHelperSchemaVersion = 1
 # Optional native helpers are discovered next to the script and on PATH, so they stay off
@@ -1008,7 +1041,7 @@ $script:ProfileBundleMaxTotalBytes = 10485760
 $script:ProfileBundleMaxCompressionRatio = 100
 $script:ProfileBundleMaxMonitorSettings = 32
 $script:ProfileExportsPath = Join-Path $script:ProfilesPath "exports"
-$script:ProfileMetadataFiles = @("app-profile-rules.json", "profile-schedules.json", "idle-dim.json", "battery-profile.json", "profile-storage.json", "monitor-identities.json", "automation-bridge.json", "capabilities-safety.json", "capabilities-probe-pending.json", "vcp-write-safety.json", "optional-helpers.json", "display-restore.json", "capabilities-cache.json")
+$script:ProfileMetadataFiles = @("app-profile-rules.json", "profile-schedules.json", "idle-dim.json", "battery-profile.json", "profile-storage.json", "monitor-identities.json", "automation-bridge.json", "capabilities-safety.json", "capabilities-probe-pending.json", "vcp-write-safety.json", "optional-helpers.json", "display-restore.json", "capabilities-cache.json", "ddc-timing.json")
 $script:MonitorIdentityRecords = @{}
 $script:UpdatingMonitorLabelUI = $false
 $script:UiCulture = "en-US"
@@ -1073,6 +1106,12 @@ $script:UiStrings = @{
     "A11y.Capabilities" = "Monitor capabilities"
     "A11y.CapabilitiesDiscovery" = "Allow monitor capability discovery"
     "A11y.ClearCapabilityCache" = "Clear cached monitor capabilities"
+    "A11y.DdcTimingAdaptive" = "Adaptive DDC timing"
+    "A11y.DdcTimingManual" = "Manual DDC timing"
+    "A11y.DdcTimingReset" = "Reset DDC timing calibration for this monitor"
+    "A11y.DdcTimingReadRetries" = "DDC read retry budget"
+    "A11y.DdcTimingWriteRetries" = "DDC write retry budget"
+    "A11y.DdcTimingCapabilityRetries" = "DDC capability retry budget"
     "A11y.DisplayRestore" = "Restore brightness at launch and after resume"
     "A11y.CpuMonitorHelper" = "Load CPU temperature library"
     "A11y.PresentMonHelper" = "Run PresentMon for the FPS overlay"
@@ -2384,6 +2423,12 @@ function Initialize-LocalizationAndAccessibility {
     Set-AccessibleName -Control $capabilitiesBox -Key "A11y.Capabilities"
     Set-AccessibleName -Control $capabilitiesDiscoveryEnabledCheckbox -Key "A11y.CapabilitiesDiscovery"
     Set-AccessibleName -Control $capabilitiesClearCacheBtn -Key "A11y.ClearCapabilityCache"
+    Set-AccessibleName -Control $ddcTimingAdaptiveRadio -Key "A11y.DdcTimingAdaptive"
+    Set-AccessibleName -Control $ddcTimingManualRadio -Key "A11y.DdcTimingManual"
+    Set-AccessibleName -Control $ddcTimingResetBtn -Key "A11y.DdcTimingReset"
+    Set-AccessibleName -Control $ddcTimingReadRetriesBox -Key "A11y.DdcTimingReadRetries"
+    Set-AccessibleName -Control $ddcTimingWriteRetriesBox -Key "A11y.DdcTimingWriteRetries"
+    Set-AccessibleName -Control $ddcTimingCapabilityRetriesBox -Key "A11y.DdcTimingCapabilityRetries"
     Set-AccessibleName -Control $displayRestoreEnabledCheckbox -Key "A11y.DisplayRestore"
     Set-AccessibleName -Control $cpuMonitorEnabledCheckbox -Key "A11y.CpuMonitorHelper"
     Set-AccessibleName -Control $presentMonEnabledCheckbox -Key "A11y.PresentMonHelper"
@@ -2446,7 +2491,7 @@ function Initialize-LocalizationAndAccessibility {
         $idleDimEnabledCheckbox,$idleDimMinutesBox,$idleDimBrightnessBox,$idleDimRestoreCheckbox,$idleDimSaveBtn,
         $batteryProfileEnabledCheckbox,$batteryBrightnessBox,$acBrightnessBox,$batteryProfileSaveBtn,
         $displaySettingsBtn,$colorMgmtBtn,$gpuControlPanelBtn,$gammaRedSlider,$gammaGreenSlider,$gammaBlueSlider,$resetGammaBtn,$capabilitiesBox,
-        $capabilitiesClearCacheBtn,$displayRestoreEnabledCheckbox,$cpuMonitorEnabledCheckbox,$presentMonEnabledCheckbox,$optionalHelperStatusBox,$capabilitiesDiscoveryEnabledCheckbox,$capabilitiesMaximumCompatibilityCheckbox,$capabilitiesExcludeCurrentBtn,$capabilitiesClearExclusionsBtn,$riskyVcpEnabledCheckbox,
+        $capabilitiesClearCacheBtn,$ddcTimingAdaptiveRadio,$ddcTimingManualRadio,$ddcTimingReadRetriesBox,$ddcTimingWriteRetriesBox,$ddcTimingCapabilityRetriesBox,$ddcTimingResetBtn,$displayRestoreEnabledCheckbox,$cpuMonitorEnabledCheckbox,$presentMonEnabledCheckbox,$optionalHelperStatusBox,$capabilitiesDiscoveryEnabledCheckbox,$capabilitiesMaximumCompatibilityCheckbox,$capabilitiesExcludeCurrentBtn,$capabilitiesClearExclusionsBtn,$riskyVcpEnabledCheckbox,
         $automationBridgeEnabledCheckbox,$automationBridgeBindBox,$automationBridgePortBox,$automationBridgeKeyBox,$automationBridgeSaveBtn,
         $ddcReportGenerateBtn,$ddcReportCopyBtn,$ddcReportBox
     )
@@ -3396,21 +3441,239 @@ function Start-DdcWriteResultTimer {
     $script:DdcWriteResultTimer.Start()
 }
 
+function New-DdcTimingProfile {
+    param([string]$IdentityKey)
+    return [PSCustomObject]@{
+        IdentityKey = [string]$IdentityKey
+        Mode = "Adaptive"
+        SleepMultiplier = 1.0
+        CalibratedAt = ""
+        ReadRetries = [int][MonitorAPI]::VcpReadRetryCount
+        WriteRetries = [int][MonitorAPI]::VcpWriteRetryCount
+        CapabilityRetries = [int][MonitorAPI]::VcpReadRetryCount
+        UnsupportedCodes = @()
+    }
+}
+
+function Get-DdcTimingProfile {
+    param([string]$IdentityKey)
+    if ([string]::IsNullOrWhiteSpace($IdentityKey)) { return (New-DdcTimingProfile -IdentityKey "") }
+    if (-not $script:DdcTimingProfiles.ContainsKey([string]$IdentityKey)) {
+        $script:DdcTimingProfiles[[string]$IdentityKey] = New-DdcTimingProfile -IdentityKey ([string]$IdentityKey)
+    }
+    return $script:DdcTimingProfiles[[string]$IdentityKey]
+}
+
+function Get-DdcEffectiveTiming {
+    param($TimingProfile)
+    if ($null -eq $TimingProfile) { $TimingProfile = New-DdcTimingProfile -IdentityKey "" }
+    $mode = [string]$TimingProfile.Mode
+    # Manual is an override, not a modifier: an operator-set delay is used verbatim so the
+    # calibration cannot quietly move it underneath them.
+    $multiplier = if ($mode -eq "Manual") { 1.0 } else {
+        [Math]::Min($script:DdcTimingMaxMultiplier, [Math]::Max($script:DdcTimingMinMultiplier, [double]$TimingProfile.SleepMultiplier))
+    }
+    $delay = [int][Math]::Round([MonitorAPI]::VcpRetryDelayMilliseconds * $multiplier, [System.MidpointRounding]::AwayFromZero)
+    return [PSCustomObject]@{
+        Mode = $mode
+        SleepMultiplier = [double]$multiplier
+        DelayMilliseconds = [int][MonitorAPI]::ClampRetryDelay($delay)
+        ReadRetries = [int][Math]::Min($script:DdcTimingMaxRetries, [Math]::Max(0, [int]$TimingProfile.ReadRetries))
+        WriteRetries = [int][Math]::Min($script:DdcTimingMaxRetries, [Math]::Max(0, [int]$TimingProfile.WriteRetries))
+        CapabilityRetries = [int][Math]::Min($script:DdcTimingMaxRetries, [Math]::Max(0, [int]$TimingProfile.CapabilityRetries))
+    }
+}
+
+function Get-DdcCalibratedSleepMultiplier {
+    param([int]$Attempts, [bool]$Success, [double]$Current = 1.0)
+    # The delay only ever runs between retries, so a first-attempt success proves nothing
+    # about it and leaves the multiplier alone. Every extra attempt the panel needed scales
+    # the delay by that many times, bounded so one bad handshake cannot stall the app.
+    if (-not $Success) { return [double]$Current }
+    $attemptCount = [Math]::Max(1, $Attempts)
+    if ($attemptCount -le 1) { return [double]$Current }
+    $target = [double]$attemptCount
+    if ($target -lt $script:DdcTimingMinMultiplier) { $target = $script:DdcTimingMinMultiplier }
+    if ($target -gt $script:DdcTimingMaxMultiplier) { $target = $script:DdcTimingMaxMultiplier }
+    return [double]$target
+}
+
+function Test-DdcCodeUnsupported {
+    param($TimingProfile, [int]$Code)
+    if ($null -eq $TimingProfile) { return $false }
+    foreach ($entry in @($TimingProfile.UnsupportedCodes)) {
+        if ($null -ne $entry -and [int]$entry.Code -eq [int]$Code) { return $true }
+    }
+    return $false
+}
+
+function Register-DdcCodeOutcome {
+    param($TimingProfile, [int]$Code, [bool]$Success, [int]$LastError = 0, [int]$Attempts = 0, [bool]$OtherCodesResponded = $false)
+    if ($null -eq $TimingProfile) { return $false }
+    if ($Success) {
+        $remaining = @(@($TimingProfile.UnsupportedCodes) | Where-Object { $null -ne $_ -and [int]$_.Code -ne [int]$Code })
+        $changed = @($remaining).Count -ne @($TimingProfile.UnsupportedCodes).Count
+        $TimingProfile.UnsupportedCodes = $remaining
+        return $changed
+    }
+    # A code that fails every retry on a monitor that answers other codes is signalling
+    # "not supported", not "not ready". ddcutil documents panels that use the DDC Null
+    # Message for both, and burning the full retry budget on each of them is what makes a
+    # scan look like the app has hung.
+    if (-not $OtherCodesResponded) { return $false }
+    if ($Attempts -lt 2) { return $false }
+    if (Test-DdcCodeUnsupported -TimingProfile $TimingProfile -Code $Code) { return $false }
+    $TimingProfile.UnsupportedCodes = @(@($TimingProfile.UnsupportedCodes) + [PSCustomObject]@{
+        Code = [int]$Code
+        LastError = [int]$LastError
+        ObservedAt = (Get-Date).ToString("o")
+    })
+    return $true
+}
+
+function Set-DdcTimingMode {
+    param([string]$IdentityKey, [string]$Mode)
+    $timingProfile = Get-DdcTimingProfile -IdentityKey $IdentityKey
+    $requested = if ($Mode -eq "Manual") { "Manual" } else { "Adaptive" }
+    if ([string]$timingProfile.Mode -eq $requested) { return $timingProfile }
+    $timingProfile.Mode = $requested
+    if ($requested -eq "Adaptive") {
+        # Adaptive and manual are mutually exclusive, so re-entering adaptive discards the
+        # stored calibration rather than mixing an operator value with a learned one.
+        $timingProfile.SleepMultiplier = 1.0
+        $timingProfile.CalibratedAt = ""
+    }
+    return $timingProfile
+}
+
+function Clear-DdcTimingCalibration {
+    param([string]$IdentityKey)
+    $timingProfile = Get-DdcTimingProfile -IdentityKey $IdentityKey
+    $timingProfile.SleepMultiplier = 1.0
+    $timingProfile.CalibratedAt = ""
+    $timingProfile.UnsupportedCodes = @()
+    return $timingProfile
+}
+
+function Update-DdcTimingCalibration {
+    param([string]$IdentityKey, [int]$Attempts, [bool]$Success)
+    if ([string]::IsNullOrWhiteSpace($IdentityKey)) { return $false }
+    $timingProfile = Get-DdcTimingProfile -IdentityKey $IdentityKey
+    if ([string]$timingProfile.Mode -ne "Adaptive") { return $false }
+    if (-not [string]::IsNullOrWhiteSpace([string]$timingProfile.CalibratedAt)) { return $false }
+    if (-not $Success) { return $false }
+    $timingProfile.SleepMultiplier = Get-DdcCalibratedSleepMultiplier -Attempts $Attempts -Success $Success -Current ([double]$timingProfile.SleepMultiplier)
+    $timingProfile.CalibratedAt = (Get-Date).ToString("o")
+    return $true
+}
+
+function Get-DdcTimingSettingsObject {
+    $records = @()
+    foreach ($key in @($script:DdcTimingProfiles.Keys)) {
+        $entry = $script:DdcTimingProfiles[$key]
+        if ($null -eq $entry) { continue }
+        $records += [PSCustomObject]@{
+            IdentityKey = [string]$key
+            Mode = [string]$entry.Mode
+            SleepMultiplier = [double]$entry.SleepMultiplier
+            CalibratedAt = [string]$entry.CalibratedAt
+            ReadRetries = [int]$entry.ReadRetries
+            WriteRetries = [int]$entry.WriteRetries
+            CapabilityRetries = [int]$entry.CapabilityRetries
+            UnsupportedCodes = @(@($entry.UnsupportedCodes) | ForEach-Object {
+                [PSCustomObject]@{ Code = [int]$_.Code; LastError = [int]$_.LastError; ObservedAt = [string]$_.ObservedAt }
+            })
+        }
+    }
+    return [PSCustomObject]@{
+        SchemaVersion = [int]$script:DdcTimingSchemaVersion
+        Monitors = @($records)
+    }
+}
+
+function Save-DdcTimingSettings {
+    return (Write-JsonFileSafely -Path $script:DdcTimingSettingsPath -Data (Get-DdcTimingSettingsObject) -Depth 6)
+}
+
+function Import-DdcTimingSettings {
+    $script:DdcTimingProfiles = @{}
+    if (-not (Test-Path -LiteralPath $script:DdcTimingSettingsPath)) { return }
+    $data = Read-JsonFileSafely -Path $script:DdcTimingSettingsPath -Label "DDC timing settings"
+    if ($null -eq $data) { return }
+    $schema = if ($data.PSObject.Properties.Name -contains "SchemaVersion") { [int]$data.SchemaVersion } else { 1 }
+    if ($schema -gt $script:DdcTimingSchemaVersion) {
+        Update-Status "DDC timing settings use schema v$schema; defaults will be used instead"
+        return
+    }
+    foreach ($record in @((Get-ProfilePropertyValue -Object $data -Property "Monitors" -Default @()))) {
+        if ($null -eq $record) { continue }
+        $identityKey = [string](Get-ProfilePropertyValue -Object $record -Property "IdentityKey" -Default "")
+        if ([string]::IsNullOrWhiteSpace($identityKey)) { continue }
+        $timingProfile = New-DdcTimingProfile -IdentityKey $identityKey
+        $mode = [string](Get-ProfilePropertyValue -Object $record -Property "Mode" -Default "Adaptive")
+        $timingProfile.Mode = if ($mode -eq "Manual") { "Manual" } else { "Adaptive" }
+        $timingProfile.SleepMultiplier = [double](Get-ProfilePropertyValue -Object $record -Property "SleepMultiplier" -Default 1.0)
+        $timingProfile.CalibratedAt = [string](Get-ProfilePropertyValue -Object $record -Property "CalibratedAt" -Default "")
+        $timingProfile.ReadRetries = [int](Get-ProfilePropertyValue -Object $record -Property "ReadRetries" -Default ([int][MonitorAPI]::VcpReadRetryCount))
+        $timingProfile.WriteRetries = [int](Get-ProfilePropertyValue -Object $record -Property "WriteRetries" -Default ([int][MonitorAPI]::VcpWriteRetryCount))
+        $timingProfile.CapabilityRetries = [int](Get-ProfilePropertyValue -Object $record -Property "CapabilityRetries" -Default ([int][MonitorAPI]::VcpReadRetryCount))
+        $codes = @()
+        foreach ($codeRecord in @((Get-ProfilePropertyValue -Object $record -Property "UnsupportedCodes" -Default @()))) {
+            if ($null -eq $codeRecord) { continue }
+            $codes += [PSCustomObject]@{
+                Code = [int](Get-ProfilePropertyValue -Object $codeRecord -Property "Code" -Default 0)
+                LastError = [int](Get-ProfilePropertyValue -Object $codeRecord -Property "LastError" -Default 0)
+                ObservedAt = [string](Get-ProfilePropertyValue -Object $codeRecord -Property "ObservedAt" -Default "")
+            }
+        }
+        $timingProfile.UnsupportedCodes = @($codes)
+        $script:DdcTimingProfiles[$identityKey] = $timingProfile
+    }
+}
+
+function Test-DdcMonitorResponded {
+    param([string]$IdentityKey)
+    if ([string]::IsNullOrWhiteSpace($IdentityKey)) { return $false }
+    return [bool]$script:DdcRespondedIdentityKeys.ContainsKey([string]$IdentityKey)
+}
+
+function Get-IdentityKeyForHandle {
+    param([IntPtr]$Handle)
+    if ($Handle -eq [IntPtr]::Zero) { return "" }
+    foreach ($monitor in @($script:PhysicalMonitors)) {
+        if ($null -ne $monitor -and $monitor.Handle -eq $Handle) { return [string]$monitor.IdentityKey }
+    }
+    return ""
+}
+
 function Get-VCPValue {
-    param([IntPtr]$Handle, [byte]$VCPCode, [string]$MonitorName = "")
+    param([IntPtr]$Handle, [byte]$VCPCode, [string]$MonitorName = "", [string]$IdentityKey = "")
+    if ([string]::IsNullOrWhiteSpace($IdentityKey)) { $IdentityKey = Get-IdentityKeyForHandle -Handle $Handle }
+    $timingProfile = Get-DdcTimingProfile -IdentityKey $IdentityKey
+    if (Test-DdcCodeUnsupported -TimingProfile $timingProfile -Code ([int]$VCPCode)) {
+        return @{ Success = $false; Current = [uint32]0; Maximum = [uint32]0; Type = [uint32]0; LastError = 0; Attempts = 0; RetryCount = 0; Skipped = $true }
+    }
+    $timing = Get-DdcEffectiveTiming -TimingProfile $timingProfile
     $vct = [uint32]0; $cur = [uint32]0; $max = [uint32]0
     $lastError = [int]0; $attempts = [int]0
-    $result = [MonitorAPI]::ReadVCPWithRetry($Handle, $VCPCode, $script:DdcReadRetryCount, [ref]$vct, [ref]$cur, [ref]$max, [ref]$lastError, [ref]$attempts)
+    $result = [MonitorAPI]::ReadVCPWithRetry($Handle, $VCPCode, [int]$timing.ReadRetries, [int]$timing.DelayMilliseconds, [ref]$vct, [ref]$cur, [ref]$max, [ref]$lastError, [ref]$attempts)
+    if (-not [string]::IsNullOrWhiteSpace($IdentityKey)) {
+        $dirty = Update-DdcTimingCalibration -IdentityKey $IdentityKey -Attempts $attempts -Success $result
+        if (Register-DdcCodeOutcome -TimingProfile $timingProfile -Code ([int]$VCPCode) -Success $result -LastError $lastError -Attempts $attempts -OtherCodesResponded (Test-DdcMonitorResponded -IdentityKey $IdentityKey)) { $dirty = $true }
+        if ($dirty) { Save-DdcTimingSettings | Out-Null }
+        if ($result) { $script:DdcRespondedIdentityKeys[$IdentityKey] = $true }
+    }
     if (-not $result) {
         Register-DdcDiagnostic -Operation "Read" -Monitor $MonitorName -Code ([int]$VCPCode) -Value $null -LastError $lastError -Attempts $attempts -Message "" -SuppressStatus | Out-Null
     }
-    return @{ Success = $result; Current = $cur; Maximum = $max; Type = $vct; LastError = $lastError; Attempts = $attempts; RetryCount = [Math]::Max(0, $attempts - 1) }
+    return @{ Success = $result; Current = $cur; Maximum = $max; Type = $vct; LastError = $lastError; Attempts = $attempts; RetryCount = [Math]::Max(0, $attempts - 1); Skipped = $false }
 }
 
 function Set-VCPValue {
     param([IntPtr]$Handle, [byte]$VCPCode, [uint32]$Value, [string]$MonitorName = "")
     $lastError = [int]0; $attempts = [int]0
-    $result = [MonitorAPI]::SetVCPWithRetry($Handle, $VCPCode, $Value, $script:DdcWriteRetryCount, [ref]$lastError, [ref]$attempts)
+    $timing = Get-DdcEffectiveTiming -TimingProfile (Get-DdcTimingProfile -IdentityKey (Get-IdentityKeyForHandle -Handle $Handle))
+    $result = [MonitorAPI]::SetVCPWithRetry($Handle, $VCPCode, $Value, [int]$timing.WriteRetries, [int]$timing.DelayMilliseconds, [ref]$lastError, [ref]$attempts)
     if (-not $result) {
         Register-DdcDiagnostic -Operation "Write" -Monitor $MonitorName -Code ([int]$VCPCode) -Value $Value -LastError $lastError -Attempts $attempts -Message "" | Out-Null
     }
@@ -4064,6 +4327,23 @@ function New-DdcCompatibilityReport {
         foreach ($path in @($script:DisplayPathInventory)) {
             $channelText = if ([bool]$path.HasControlChannel) { "DDC/CI channel" } else { "no DDC/CI channel" }
             [void]$sb.AppendLine("- $($path.DeviceName) [$($path.Kind)] $channelText | $($path.Name) | adapter $($path.Adapter)")
+        }
+    }
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("DDC timing (effective values):")
+    if (@($Targets).Count -eq 0) {
+        [void]$sb.AppendLine("- no monitors")
+    } else {
+        foreach ($target in @($Targets | Sort-Object -Property Index)) {
+            $timingProfile = Get-DdcTimingProfile -IdentityKey ([string]$target.IdentityKey)
+            $timing = Get-DdcEffectiveTiming -TimingProfile $timingProfile
+            $calibration = if ([string]::IsNullOrWhiteSpace([string]$timingProfile.CalibratedAt)) { "uncalibrated" } else { "calibrated $($timingProfile.CalibratedAt)" }
+            [void]$sb.AppendLine("- $($target.Label): mode=$($timing.Mode) multiplier=$($timing.SleepMultiplier) delay=$($timing.DelayMilliseconds)ms retries read=$($timing.ReadRetries) write=$($timing.WriteRetries) capability=$($timing.CapabilityRetries) ($calibration)")
+            $unsupported = @($timingProfile.UnsupportedCodes)
+            if ($unsupported.Count -gt 0) {
+                $codeText = ($unsupported | ForEach-Object { "0x{0:X2} (Win32 {1})" -f [int]$_.Code, [int]$_.LastError }) -join ", "
+                [void]$sb.AppendLine("    null-signalled unsupported: $codeText")
+            }
         }
     }
     [void]$sb.AppendLine("")
@@ -5626,7 +5906,9 @@ function Start-MonitorSettingsWorker {
             HandleValue = [int64]$monitor.Handle.ToInt64()
             Generation = $generation
             Codes = [object[]]$codes
-            ReadRetries = Get-DisplayRecoveryReadRetryCount -State $state -DefaultRetries $script:DdcReadRetryCount
+            ReadRetries = Get-DisplayRecoveryReadRetryCount -State $state -DefaultRetries ([int](Get-DdcEffectiveTiming -TimingProfile (Get-DdcTimingProfile -IdentityKey ([string]$monitor.IdentityKey))).ReadRetries)
+            DelayMilliseconds = [int](Get-DdcEffectiveTiming -TimingProfile (Get-DdcTimingProfile -IdentityKey ([string]$monitor.IdentityKey))).DelayMilliseconds
+            SkipCodes = [object[]]@(@((Get-DdcTimingProfile -IdentityKey ([string]$monitor.IdentityKey)).UnsupportedCodes) | ForEach-Object { [int]$_.Code })
         }
         Set-DisplayRecoveryOutcome -IdentityKey ([string]$monitor.IdentityKey) -Outcome "Retry" -Generation $generation | Out-Null
     }
@@ -5642,7 +5924,8 @@ function Start-MonitorSettingsWorker {
                 $maximum = [uint32]0
                 $lastError = [int]0
                 $attempts = [int]0
-                $ok = [MonitorAPI]::ReadVCPWithRetry($target.Handle, [byte]$code, [int]$target.ReadRetries, [ref]$vct, [ref]$current, [ref]$maximum, [ref]$lastError, [ref]$attempts)
+                if (@($target.SkipCodes) -contains [int]$code) { continue }
+                $ok = [MonitorAPI]::ReadVCPWithRetry($target.Handle, [byte]$code, [int]$target.ReadRetries, [int]$target.DelayMilliseconds, [ref]$vct, [ref]$current, [ref]$maximum, [ref]$lastError, [ref]$attempts)
                 [PSCustomObject]@{
                     Code = [int]$code
                     Success = [bool]$ok
@@ -6832,7 +7115,7 @@ try {
         </TabItem>
         <TabItem x:Name="SystemTab" Header="System" Tag="&#xE713;">
             <Border Background="Transparent" Padding="0"><ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><Grid>
-                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Border Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><StackPanel><TextBlock Text="Quick links" FontSize="12" Foreground="{DynamicResource TextBrush}" FontWeight="SemiBold" Margin="0,0,0,8"/>
                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                         <Button x:Name="DisplaySettingsBtn" Content="Display" Style="{StaticResource Btn}" Padding="5,4" FontSize="12"/>
@@ -6891,6 +7174,26 @@ try {
                         <Button x:Name="DdcReportCopyBtn" Grid.Column="4" Content="Copy" Style="{StaticResource Btn}" Padding="10,4" FontSize="12"/>
                     </Grid>
                     <TextBox x:Name="DdcReportBox" Grid.Row="2" IsReadOnly="True" TextWrapping="Wrap" Height="180" VerticalScrollBarVisibility="Auto" Background="{DynamicResource ControlBrush}" FontFamily="Consolas" FontSize="12" AcceptsReturn="True"/>
+                </Grid></Border>
+                <Border Grid.Row="18" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <TextBlock Text="DDC timing for the selected monitor" FontSize="12" Foreground="{DynamicResource TextBrush}" FontWeight="SemiBold"/>
+                    <StackPanel Grid.Row="2" Orientation="Horizontal">
+                        <RadioButton x:Name="DdcTimingAdaptiveRadio" GroupName="DdcTimingMode" Content="Adaptive" IsChecked="True" VerticalAlignment="Center"/>
+                        <RadioButton x:Name="DdcTimingManualRadio" GroupName="DdcTimingMode" Content="Manual" Margin="16,0,0,0" VerticalAlignment="Center"/>
+                        <Button x:Name="DdcTimingResetBtn" Content="Reset calibration" Style="{StaticResource Btn}" Padding="10,4" FontSize="12" Margin="20,0,0,0"/>
+                    </StackPanel>
+                    <Grid Grid.Row="4">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="8"/><ColumnDefinition Width="60"/><ColumnDefinition Width="16"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="8"/><ColumnDefinition Width="60"/><ColumnDefinition Width="16"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="8"/><ColumnDefinition Width="60"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                        <TextBlock Text="Read retries" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center"/>
+                        <TextBox x:Name="DdcTimingReadRetriesBox" Grid.Column="2" FontSize="12" Background="{DynamicResource ControlBrush}"/>
+                        <TextBlock Grid.Column="4" Text="Write retries" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center"/>
+                        <TextBox x:Name="DdcTimingWriteRetriesBox" Grid.Column="6" FontSize="12" Background="{DynamicResource ControlBrush}"/>
+                        <TextBlock Grid.Column="8" Text="Capability retries" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center"/>
+                        <TextBox x:Name="DdcTimingCapabilityRetriesBox" Grid.Column="10" FontSize="12" Background="{DynamicResource ControlBrush}"/>
+                    </Grid>
+                    <TextBlock x:Name="DdcTimingEffectiveText" Grid.Row="6" Text="" TextWrapping="Wrap" Foreground="{DynamicResource TextBrush}" FontSize="12"/>
+                    <TextBlock x:Name="DdcTimingWarningText" Grid.Row="8" Text="" TextWrapping="Wrap" Foreground="{DynamicResource WarningBrush}" FontSize="12"/>
                 </Grid></Border>
                 <Border Grid.Row="16" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
@@ -6999,6 +7302,11 @@ $gammaRedSlider = $window.FindName("GammaRedSlider"); $gammaRedValue = $window.F
 $gammaGreenSlider = $window.FindName("GammaGreenSlider"); $gammaGreenValue = $window.FindName("GammaGreenValue")
 $gammaBlueSlider = $window.FindName("GammaBlueSlider"); $gammaBlueValue = $window.FindName("GammaBlueValue")
 $capabilitiesBox = $window.FindName("CapabilitiesBox"); $ddcReportBox = $window.FindName("DdcReportBox")
+$ddcTimingAdaptiveRadio = $window.FindName("DdcTimingAdaptiveRadio"); $ddcTimingManualRadio = $window.FindName("DdcTimingManualRadio")
+$ddcTimingResetBtn = $window.FindName("DdcTimingResetBtn"); $ddcTimingEffectiveText = $window.FindName("DdcTimingEffectiveText")
+$ddcTimingWarningText = $window.FindName("DdcTimingWarningText")
+$ddcTimingReadRetriesBox = $window.FindName("DdcTimingReadRetriesBox"); $ddcTimingWriteRetriesBox = $window.FindName("DdcTimingWriteRetriesBox")
+$ddcTimingCapabilityRetriesBox = $window.FindName("DdcTimingCapabilityRetriesBox")
 $displayRestoreEnabledCheckbox = $window.FindName("DisplayRestoreEnabledCheckbox"); $displayRestoreStatusText = $window.FindName("DisplayRestoreStatusText")
 $cpuMonitorEnabledCheckbox = $window.FindName("CpuMonitorEnabledCheckbox"); $presentMonEnabledCheckbox = $window.FindName("PresentMonEnabledCheckbox"); $optionalHelperStatusBox = $window.FindName("OptionalHelperStatusBox")
 $capabilitiesClearCacheBtn = $window.FindName("CapabilitiesClearCacheBtn")
@@ -7064,6 +7372,63 @@ function Update-SelectedMonitorRecoveryUi {
     if (-not [string]::IsNullOrWhiteSpace($lastError)) { $tooltip += "`n$lastError" }
     $selectedMonitorHealthText.ToolTip = $tooltip
     $selectedMonitorHealthDot.ToolTip = $tooltip
+}
+
+function Get-SelectedTimingIdentityKey {
+    if ($script:CurrentMonitorIndex -lt 0 -or $script:CurrentMonitorIndex -ge $script:PhysicalMonitors.Count) { return "" }
+    $monitor = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
+    if ($null -eq $monitor) { return "" }
+    return [string]$monitor.IdentityKey
+}
+
+function Update-DdcTimingControls {
+    if ($null -eq $ddcTimingAdaptiveRadio) { return }
+    $identityKey = Get-SelectedTimingIdentityKey
+    $timingProfile = Get-DdcTimingProfile -IdentityKey $identityKey
+    $timing = Get-DdcEffectiveTiming -TimingProfile $timingProfile
+    $script:UpdatingDdcTimingUI = $true
+    try {
+        $isManual = [string]$timingProfile.Mode -eq "Manual"
+        $ddcTimingAdaptiveRadio.IsChecked = -not $isManual
+        $ddcTimingManualRadio.IsChecked = $isManual
+        $ddcTimingReadRetriesBox.Text = [string][int]$timingProfile.ReadRetries
+        $ddcTimingWriteRetriesBox.Text = [string][int]$timingProfile.WriteRetries
+        $ddcTimingCapabilityRetriesBox.Text = [string][int]$timingProfile.CapabilityRetries
+        $ddcTimingReadRetriesBox.IsEnabled = $true
+        $ddcTimingWriteRetriesBox.IsEnabled = $true
+        $ddcTimingCapabilityRetriesBox.IsEnabled = $true
+        $calibration = if ([string]::IsNullOrWhiteSpace([string]$timingProfile.CalibratedAt)) { "not calibrated yet" } else { "calibrated $($timingProfile.CalibratedAt)" }
+        $skipped = @($timingProfile.UnsupportedCodes)
+        $skippedText = if ($skipped.Count -eq 0) { "no codes skipped" } else {
+            "skipping " + (($skipped | ForEach-Object { "0x{0:X2}" -f [int]$_.Code }) -join ", ")
+        }
+        $ddcTimingEffectiveText.Text = "Effective: $($timing.DelayMilliseconds) ms between retries (multiplier $($timing.SleepMultiplier)), read $($timing.ReadRetries), write $($timing.WriteRetries), capability $($timing.CapabilityRetries). $calibration; $skippedText."
+        $ddcTimingWarningText.Text = if ($isManual) {
+            "Manual mode ignores the learned sleep multiplier. Switching back to Adaptive discards the stored calibration and relearns it from the next successful handshake."
+        } else {
+            "Adaptive mode learns the sleep multiplier from the first successful handshake with this monitor. Switching to Manual leaves that calibration unused."
+        }
+    } finally {
+        $script:UpdatingDdcTimingUI = $false
+    }
+}
+
+function Set-DdcTimingRetryFromUi {
+    param([string]$Field, [string]$Text)
+    $identityKey = Get-SelectedTimingIdentityKey
+    if ([string]::IsNullOrWhiteSpace($identityKey)) { return }
+    $value = 0
+    if (-not [int]::TryParse(([string]$Text).Trim(), [ref]$value)) { Update-DdcTimingControls; return }
+    $value = [Math]::Min($script:DdcTimingMaxRetries, [Math]::Max(0, $value))
+    $timingProfile = Get-DdcTimingProfile -IdentityKey $identityKey
+    switch ($Field) {
+        "Read" { $timingProfile.ReadRetries = [int]$value }
+        "Write" { $timingProfile.WriteRetries = [int]$value }
+        default { $timingProfile.CapabilityRetries = [int]$value }
+    }
+    Save-DdcTimingSettings | Out-Null
+    Update-Status "DDC $($Field.ToLowerInvariant()) retry budget set to $value for this monitor"
+    Update-DdcTimingControls
 }
 
 function Update-DisplayStateRestoreControls {
@@ -7272,6 +7637,7 @@ function Draw-MonitorLayout {
         $selectedMonitorInfo.Text = "$($mon.DeviceName)$(if ($mon.IsPrimary) { ' (Primary)' } else { '' })"
         Update-MonitorIdentityControls
         Update-SelectedMonitorRecoveryUi
+        Update-DdcTimingControls
     }
 }
 
@@ -10427,6 +10793,35 @@ $batteryProfileSaveBtn.Add_Click({
 $displaySettingsBtn.Add_Click({ Start-Process "ms-settings:display" }); $colorMgmtBtn.Add_Click({ Start-Process "colorcpl.exe" })
 $gpuControlPanelBtn.Add_Click({ if ($script:HasNvidia) { Start-Process "nvidia-settings" -ErrorAction SilentlyContinue } else { Start-Process "ms-settings:display" } })
 $capabilitiesClearCacheBtn.Add_Click({ Clear-CapabilitiesCache; Start-CapabilitiesWorker })
+$ddcTimingAdaptiveRadio.Add_Checked({
+    if ($script:UpdatingDdcTimingUI) { return }
+    $identityKey = Get-SelectedTimingIdentityKey
+    if ([string]::IsNullOrWhiteSpace($identityKey)) { return }
+    Set-DdcTimingMode -IdentityKey $identityKey -Mode "Adaptive" | Out-Null
+    Save-DdcTimingSettings | Out-Null
+    Update-Status "DDC timing set to adaptive; the stored calibration was discarded"
+    Update-DdcTimingControls
+})
+$ddcTimingManualRadio.Add_Checked({
+    if ($script:UpdatingDdcTimingUI) { return }
+    $identityKey = Get-SelectedTimingIdentityKey
+    if ([string]::IsNullOrWhiteSpace($identityKey)) { return }
+    Set-DdcTimingMode -IdentityKey $identityKey -Mode "Manual" | Out-Null
+    Save-DdcTimingSettings | Out-Null
+    Update-Status "DDC timing set to manual; the learned sleep multiplier is no longer applied"
+    Update-DdcTimingControls
+})
+$ddcTimingResetBtn.Add_Click({
+    $identityKey = Get-SelectedTimingIdentityKey
+    if ([string]::IsNullOrWhiteSpace($identityKey)) { return }
+    Clear-DdcTimingCalibration -IdentityKey $identityKey | Out-Null
+    Save-DdcTimingSettings | Out-Null
+    Update-Status "DDC timing calibration and skipped-code list cleared for this monitor"
+    Update-DdcTimingControls
+})
+$ddcTimingReadRetriesBox.Add_LostFocus({ if (-not $script:UpdatingDdcTimingUI) { Set-DdcTimingRetryFromUi -Field "Read" -Text $ddcTimingReadRetriesBox.Text } })
+$ddcTimingWriteRetriesBox.Add_LostFocus({ if (-not $script:UpdatingDdcTimingUI) { Set-DdcTimingRetryFromUi -Field "Write" -Text $ddcTimingWriteRetriesBox.Text } })
+$ddcTimingCapabilityRetriesBox.Add_LostFocus({ if (-not $script:UpdatingDdcTimingUI) { Set-DdcTimingRetryFromUi -Field "Capability" -Text $ddcTimingCapabilityRetriesBox.Text } })
 $displayRestoreEnabledCheckbox.Add_Checked({
     if ($script:UpdatingDisplayStateRestoreUI) { return }
     Set-DisplayStateRestoreEnabled -Enabled $true
@@ -10649,7 +11044,7 @@ function Update-GpuStats {
 }
 
 # Initialize
-Initialize-WmiBrightness; Load-MonitorIdentitySettings; Import-CapabilitySafetyState; Import-VcpWriteSafetyState; Import-OptionalHelperSettings; Import-DisplayStateRestoreSettings; Import-CapabilitiesCache; Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList
+Initialize-WmiBrightness; Load-MonitorIdentitySettings; Import-CapabilitySafetyState; Import-VcpWriteSafetyState; Import-OptionalHelperSettings; Import-DisplayStateRestoreSettings; Import-CapabilitiesCache; Import-DdcTimingSettings; Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList
 Load-AppProfileRules; Update-AppProfileControls; Start-AppProfileWatcher
 Load-ProfileSchedules; Update-ScheduleControls; Start-ProfileScheduleWatcher
 Load-IdleDimSettings; Update-IdleDimControls; Start-IdleDimWatcher
@@ -10660,6 +11055,7 @@ Sync-CapabilitySafetyUi
 Sync-VcpWriteSafetyUi
 Update-OptionalHelperControls
 Update-DisplayStateRestoreControls
+Update-DdcTimingControls
 Update-HardwareTabVisibility
 
 Initialize-TrayIcon
