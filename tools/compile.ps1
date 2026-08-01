@@ -48,6 +48,7 @@ $entryPrefix = $launcherText.Substring(0, $launcherAst.ParamBlock.Extent.EndOffs
 $parts = New-Object System.Collections.Generic.List[string]
 $parts.Add($entryPrefix)
 $parts.Add('$script:MonitorControlRoot = $PSScriptRoot')
+$parts.Add('$script:MonitorControlEntryPath = $PSCommandPath')
 $parts.Add(('$script:AppName = "{0}"' -f $appName))
 $parts.Add(('$script:AppVersion = "{0}"' -f $appVersion))
 foreach ($sourcePath in $sourcePaths) {

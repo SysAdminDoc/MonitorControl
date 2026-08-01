@@ -50,7 +50,7 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 - **Profile System** — Save and load custom configurations
 - **Hardened Profile Storage** — Profile and automation JSON writes use atomic replacement, valid backups, corrupt-file quarantine, and filename validation
 - **Recoverable Profile Deletion** — Deleting a profile moves its exact bytes and dependent application/schedule rules into bounded local Trash. **Restore Last** works after restart; **Empty Trash** requires a separate permanent-delete confirmation
-- **Command-line Support** — Launch minimized or with a specific profile
+- **Headless Command Line** — List stable monitor identities, read or write any VCP code, apply profiles, and collect diagnostics without creating a WPF window; human-readable and schema-versioned JSON output share the GUI's verified-write and per-identity safety policy
 
 ### Advanced Features
 - **VCP Explorer** — Query and set any VCP code for advanced users
@@ -128,6 +128,57 @@ $Shortcut.Arguments = "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$PWD\
 $Shortcut.IconLocation = "imageres.dll,109"
 $Shortcut.Save()
 ```
+
+## Headless Command Line
+
+The portable script also provides one-shot commands that never create the WPF window. Every command
+runs in a bounded worker process; the default timeout is 10 seconds, and `-TimeoutSeconds` accepts
+1 through 120 seconds. Use the stable identity printed by `list` whenever more than one controllable
+display is connected.
+
+```powershell
+# Inventory, with stable identities
+powershell.exe -NoProfile -File .\MonitorControlPro.ps1 list
+powershell.exe -NoProfile -File .\MonitorControlPro.ps1 list -Json
+
+# Read or write any VCP code. Generic set values are raw MCCS values.
+powershell.exe -NoProfile -File .\MonitorControlPro.ps1 get 0x10 -Monitor "winrt:0123456789abcdef" -Json
+powershell.exe -NoProfile -File .\MonitorControlPro.ps1 set -Vcp 0x10 -Value 50 -Monitor "winrt:0123456789abcdef" -IfNeeded
+powershell.exe -NoProfile -File .\MonitorControlPro.ps1 set -Vcp 0x10 -Delta -5 -Monitor "winrt:0123456789abcdef"
+powershell.exe -NoProfile -File .\MonitorControlPro.ps1 set -Vcp 0xDC -Cycle "0,1,3,5" -Monitor "winrt:0123456789abcdef"
+
+# Terse aliases: brightness is a percentage; input accepts the names in the table below.
+powershell.exe -NoProfile -File .\MonitorControlPro.ps1 b 50 -Monitor "winrt:0123456789abcdef"
+powershell.exe -NoProfile -File .\MonitorControlPro.ps1 s hdmi1 -Monitor "winrt:0123456789abcdef" -AllowRisky
+
+# Apply the profile's stable-identity records, or collect a non-invasive diagnostic snapshot.
+powershell.exe -NoProfile -File .\MonitorControlPro.ps1 profile "Work" -Json
+powershell.exe -NoProfile -File .\MonitorControlPro.ps1 diagnostics -Json
+```
+
+`-IfNeeded` reads first and sends no write when the target is already set. `-Delta` applies a signed
+relative change, while `-Cycle` selects the value after the current one from a comma-separated list.
+The `b` alias maps a 0-100 percentage onto the monitor's reported brightness maximum. Input aliases
+are `vga`, `dvi`, `dp1`, `dp2`, `hdmi1`, `hdmi2`, and `usbc`.
+
+Power, input, reset, OSD, PiP/PbP, and the other risky VCP codes never prompt on the command line.
+They require both `-AllowRisky` and a saved unlock for that stable identity from **System > Safety**;
+without both, the command fails before writing. Every write uses snapshot, readback verification, and
+best-effort rollback from the GUI transaction path. JSON mode emits exactly one schema-v1 envelope:
+
+```json
+{"SchemaVersion":1,"Command":"get","Success":true,"ExitCode":0,"Data":{"Identity":"winrt:0123456789abcdef","Vcp":"0x10","Current":50,"Maximum":100,"Type":0},"Error":null}
+```
+
+| Exit code | Meaning |
+|---:|---|
+| `0` | Success, including an `-IfNeeded` no-op |
+| `2` | Invalid command, option, VCP code, value, cycle, or profile data |
+| `3` | Monitor/profile not found, ambiguous monitor, or unsupported advertised code/value |
+| `4` | Worker timed out and was terminated |
+| `5` | Monitor read, write, verification, or profile transaction failed |
+| `6` | Risky write denied by the shared per-identity safety policy |
+| `10` | Unexpected internal or worker-start failure |
 
 ### Build a Release ZIP
 ```powershell
@@ -520,7 +571,7 @@ The full breakdown - every display path, its classification, and whether it answ
 
 - `MonitorControlPro.ps1` is the development launcher and preserves the public command-line switches.
 - `src\MonitorControl.Metadata.psd1` is the single source for the application name and semantic version used by the launcher, UI, diagnostics, profile exports, and release artifacts.
-- `src\MonitorControl.Core.psm1`, `Storage`, `Ddc`, `Automation`, and `Bridge` contain testable function definitions without WPF globals.
+- `src\MonitorControl.Core.psm1`, `Storage`, `Ddc`, `Automation`, `Bridge`, and `Cli` contain testable function definitions without WPF globals.
 - `src\MonitorControl.App.ps1` owns native type initialization, XAML, UI binding, handlers, and startup.
 - `tools\compile.ps1` composes those sources into the single portable script used by tests and release builds, and rejects duplicate function definitions or invalid PowerShell syntax.
 

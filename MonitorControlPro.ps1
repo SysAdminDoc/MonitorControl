@@ -8,7 +8,23 @@
     Version metadata is loaded by the development launcher.
 #>
 
+[CmdletBinding()]
 param(
+    [Parameter(Position = 0)]
+    [string]$Command = "",
+    [Parameter(Position = 1)]
+    [string]$Argument = "",
+    [string]$Monitor = "",
+    [string]$Vcp = "",
+    [string]$Value = "",
+    [long]$Delta = [long]::MinValue,
+    [string]$Cycle = "",
+    [switch]$IfNeeded,
+    [switch]$Json,
+    [switch]$AllowRisky,
+    [ValidateRange(1, 120)]
+    [int]$TimeoutSeconds = 10,
+    [switch]$CliWorker,
     [switch]$StartMinimized,
     [string]$LoadProfile,
     [ValidateSet("System", "Dark", "HighContrast")]
@@ -19,6 +35,7 @@ param(
 )
 
 $script:MonitorControlRoot = $PSScriptRoot
+$script:MonitorControlEntryPath = $PSCommandPath
 $metadataPath = Join-Path $script:MonitorControlRoot "src\MonitorControl.Metadata.psd1"
 if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) {
     throw "MonitorControl metadata is missing: $metadataPath"

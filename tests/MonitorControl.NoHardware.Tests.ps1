@@ -354,7 +354,27 @@ public static class MonitorControlVcpWriteProbe
         "Get-WcagContrastRatio",
         "Resolve-TextScaleFactor",
         "Get-StatusMessageSeverity",
-        "Get-NavigationShortcutTarget"
+        "Get-NavigationShortcutTarget",
+        "Get-CliExitCodes",
+        "New-CliEnvelope",
+        "New-CliResult",
+        "New-CliFailureException",
+        "ConvertTo-CliQuotedArgument",
+        "Wait-CliProcess",
+        "Get-CliChildArguments",
+        "Resolve-CliMonitor",
+        "Resolve-CliVcpCode",
+        "Resolve-CliVcpValue",
+        "Get-CliMonitorData",
+        "Read-CliVcpValue",
+        "Test-CliRiskyWriteAllowed",
+        "Get-CliSetTarget",
+        "Invoke-CliTransaction",
+        "Get-CliTransactionData",
+        "Read-CliProfile",
+        "Get-CliProfilePercent",
+        "Get-CliProfileOperations",
+        "Invoke-MonitorControlCli"
     )
     $script:SettingsDocumentRegistry = Initialize-MonitorControlSettingsDocumentRegistry
 
@@ -576,7 +596,7 @@ Describe "Build-time source composition" {
     It "keeps function bodies unique across source components" {
         $sourceFiles = @(Get-Content -LiteralPath (Join-Path $script:RepoRoot "src\MonitorControl.sources") |
             Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-        $sourceFiles.Count | Should -Be 6
+        $sourceFiles.Count | Should -Be 7
 
         $allNames = New-Object System.Collections.Generic.List[string]
         foreach ($relativePath in $sourceFiles) {
@@ -4284,6 +4304,205 @@ Describe "Per-monitor DDC timing and null-message semantics" {
         Update-DdcTimingCalibration -IdentityKey "edid:a" -Attempts 4 -Success $true | Out-Null
         (Get-DdcTimingProfile -IdentityKey "edid:b").SleepMultiplier | Should -Be 1.0
         (Get-DdcTimingProfile -IdentityKey "edid:a").SleepMultiplier | Should -Be 4.0
+    }
+}
+
+Describe "Headless CLI contract" {
+    BeforeEach {
+        $script:RiskyVcpCodes = @(0x04, 0x08, 0x14, 0x60, 0xCA, 0xCC, 0xD6, 0xD7, 0xE8, 0xE9)
+        $script:RiskyVcpEnabledIdentityKeys = @{}
+        $script:VcpScaledCodes = @(0x10, 0x12, 0x16, 0x18, 0x1A, 0x62, 0x87)
+        $script:VcpDefaultMaximum = 100
+        $script:DdcRecentErrors = New-Object System.Collections.Generic.List[object]
+        $script:AppVersion = "3.37.0"
+        $script:ProfileSchemaVersion = 3
+        $script:ProfileMetadataFiles = @("monitor-identities.json")
+        $script:CapturedCliOperations = @()
+    }
+
+    function global:New-CliTestMonitor {
+        param(
+            [string]$Identity = "winrt:stable-a",
+            [string]$Label = "Desk display",
+            [IntPtr]$Handle = ([IntPtr]0x7001)
+        )
+        return [PSCustomObject]@{
+            IdentityKey = $Identity
+            IdentityAliases = @()
+            IdentitySource = "winrt"
+            IdentityDefaultLabel = $Label
+            UserLabel = ""
+            Name = $Label
+            DeviceName = "DISPLAY1"
+            Handle = $Handle
+            Width = 2560
+            Height = 1440
+            IsPrimary = $true
+            CapabilitiesKnown = $false
+            SupportedVcpCodes = @{}
+            VcpMaximums = @{}
+        }
+    }
+
+    function global:New-CliTestTransaction {
+        return {
+            param($Operations)
+            $script:CapturedCliOperations = @($Operations)
+            [PSCustomObject]@{
+                Success = $true
+                Outcome = "Verified"
+                Rollback = "NotNeeded"
+                Results = @($Operations | ForEach-Object {
+                    [PSCustomObject]@{
+                        Operation = $_
+                        WriteSuccess = $true
+                        Verification = "Verified"
+                        ReadbackValue = [uint32]$_.Value
+                        Rollback = "NotNeeded"
+                    }
+                })
+            }
+        }
+    }
+
+    It "lists stable identities in a versioned JSON-ready result" {
+        $monitor = New-CliTestMonitor
+        $result = Invoke-MonitorControlCli -Command list -MonitorData @($monitor)
+        $result.ExitCode | Should -Be 0
+        $result.Envelope.SchemaVersion | Should -Be 1
+        $result.Envelope.Command | Should -Be "list"
+        $result.Envelope.Data[0].Identity | Should -Be "winrt:stable-a"
+        $result.Envelope.Data[0].DdcAvailable | Should -BeTrue
+        (($result.Envelope | ConvertTo-Json -Depth 10 -Compress) | ConvertFrom-Json).Error | Should -BeNullOrEmpty
+    }
+
+    It "requires a stable monitor selector when more than one target is usable" {
+        $monitors = @((New-CliTestMonitor), (New-CliTestMonitor -Identity "winrt:stable-b" -Label "Side display" -Handle ([IntPtr]0x7002)))
+        $result = Invoke-MonitorControlCli -Command get -Argument 0x10 -MonitorData $monitors -ReadAction { throw "must not read" }
+        $result.ExitCode | Should -Be 3
+        $result.Envelope.Error.Code | Should -Be "monitor_required"
+    }
+
+    It "gets a VCP value from the exact stable identity" {
+        $monitor = New-CliTestMonitor
+        $result = Invoke-MonitorControlCli -Command get -Argument 0x10 -Monitor "winrt:stable-a" -MonitorData @($monitor) -ReadAction {
+            [PSCustomObject]@{ Success = $true; Current = [uint32]42; Maximum = [uint32]100; Type = [uint32]0 }
+        }
+        $result.ExitCode | Should -Be 0
+        $result.Envelope.Data.Current | Should -Be 42
+        $result.Envelope.Data.Identity | Should -Be "winrt:stable-a"
+    }
+
+    It "implements set-if-needed without sending a write" {
+        $monitor = New-CliTestMonitor
+        $result = Invoke-MonitorControlCli -Command set -Vcp 0x10 -Value 42 -IfNeeded -MonitorData @($monitor) -ReadAction {
+            [PSCustomObject]@{ Success = $true; Current = [uint32]42; Maximum = [uint32]100; Type = [uint32]0 }
+        } -TransactionAction { throw "must not write" }
+        $result.ExitCode | Should -Be 0
+        $result.Envelope.Data.Changed | Should -BeFalse
+        $result.Envelope.Data.Outcome | Should -Be "AlreadySet"
+    }
+
+    It "calculates relative deltas and cycle values before the verified transaction" {
+        $monitor = New-CliTestMonitor
+        $read = { [PSCustomObject]@{ Success = $true; Current = [uint32]40; Maximum = [uint32]100; Type = [uint32]0 } }
+        $transaction = New-CliTestTransaction
+        (Invoke-MonitorControlCli -Command set -Vcp 0x10 -Delta 5 -MonitorData @($monitor) -ReadAction $read -TransactionAction $transaction).ExitCode | Should -Be 0
+        $script:CapturedCliOperations[0].Value | Should -Be 45
+
+        $read = { [PSCustomObject]@{ Success = $true; Current = [uint32]45; Maximum = [uint32]100; Type = [uint32]0 } }
+        (Invoke-MonitorControlCli -Command set -Vcp 0x10 -Cycle "25,45,75" -MonitorData @($monitor) -ReadAction $read -TransactionAction $transaction).ExitCode | Should -Be 0
+        $script:CapturedCliOperations[0].Value | Should -Be 75
+    }
+
+    It "rejects a relative delta above the monitor's reported range" {
+        $monitor = New-CliTestMonitor
+        $result = Invoke-MonitorControlCli -Command set -Vcp 0x10 -Delta 20 -MonitorData @($monitor) -ReadAction {
+            [PSCustomObject]@{ Success = $true; Current = [uint32]90; Maximum = [uint32]100; Type = [uint32]0 }
+        } -TransactionAction { throw "must not write" }
+        $result.ExitCode | Should -Be 2
+        $result.Envelope.Error.Code | Should -Be "value_above_maximum"
+    }
+
+    It "maps the terse brightness alias as a percentage of the reported maximum" {
+        $monitor = New-CliTestMonitor
+        $transaction = New-CliTestTransaction
+        $result = Invoke-MonitorControlCli -Command b -Argument 50 -MonitorData @($monitor) -ReadAction {
+            [PSCustomObject]@{ Success = $true; Current = [uint32]20; Maximum = [uint32]200; Type = [uint32]0 }
+        } -TransactionAction $transaction
+        $result.ExitCode | Should -Be 0
+        $script:CapturedCliOperations[0].Code | Should -Be 0x10
+        $script:CapturedCliOperations[0].Value | Should -Be 100
+    }
+
+    It "requires both safety signals for the terse input alias" {
+        $monitor = New-CliTestMonitor
+        $transaction = New-CliTestTransaction
+        $denied = Invoke-MonitorControlCli -Command s -Argument hdmi1 -MonitorData @($monitor) -TransactionAction $transaction
+        $denied.ExitCode | Should -Be 6
+        $denied.Envelope.Error.Code | Should -Be "risky_write_denied"
+
+        $script:RiskyVcpEnabledIdentityKeys[$monitor.IdentityKey] = $true
+        $allowed = Invoke-MonitorControlCli -Command s -Argument hdmi1 -AllowRisky -MonitorData @($monitor) -TransactionAction $transaction
+        $allowed.ExitCode | Should -Be 0
+        $script:CapturedCliOperations[0].Code | Should -Be 0x60
+        $script:CapturedCliOperations[0].Value | Should -Be 0x11
+    }
+
+    It "applies a stored profile through one verified transaction" {
+        $monitor = New-CliTestMonitor
+        $script:ProfilesPath = $TestDrive
+        @{
+            SchemaVersion = 3
+            Name = "Work"
+            MonitorSettings = @(@{ IdentityKey = $monitor.IdentityKey; Brightness = 60; Contrast = 50; Red = 40; Green = 50; Blue = 60 })
+        } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $TestDrive "Work.json") -Encoding utf8
+        $transaction = New-CliTestTransaction
+        $result = Invoke-MonitorControlCli -Command profile -Argument Work -MonitorData @($monitor) -ReadAction {
+            [PSCustomObject]@{ Success = $true; Current = [uint32]25; Maximum = [uint32]200; Type = [uint32]0 }
+        } -TransactionAction $transaction
+        $result.ExitCode | Should -Be 0
+        $script:CapturedCliOperations.Count | Should -Be 5
+        $script:CapturedCliOperations[0].Value | Should -Be 120
+        $result.Envelope.Data.Profile | Should -Be "Work"
+    }
+
+    It "validates every stable profile target before sending any write" {
+        $monitor = New-CliTestMonitor
+        $script:ProfilesPath = $TestDrive
+        @{
+            SchemaVersion = 3
+            Name = "Two desks"
+            MonitorSettings = @(
+                @{ IdentityKey = $monitor.IdentityKey; Brightness = 60 },
+                @{ IdentityKey = "winrt:not-connected"; Brightness = 40 }
+            )
+        } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $TestDrive "Two desks.json") -Encoding utf8
+        $result = Invoke-MonitorControlCli -Command profile -Argument "Two desks" -MonitorData @($monitor) -ReadAction { throw "must not read" } -TransactionAction { throw "must not write" }
+        $result.ExitCode | Should -Be 3
+        $result.Envelope.Error.Code | Should -Be "profile_targets_missing"
+    }
+
+    It "quotes child-process arguments and carries every non-interactive safety switch" {
+        ConvertTo-CliQuotedArgument -Value 'a b"c\' | Should -Be '"a b\"c\\"'
+        $arguments = Get-CliChildArguments -EntryPath "C:\Program Files\MonitorControl.ps1" -Command set -Argument "" -Monitor "winrt:a b" -Vcp 0x10 -Value 50 -Delta ([long]::MinValue) -Cycle "" -IfNeeded -Json -AllowRisky -TimeoutSeconds 7
+        $arguments | Should -Match '"C:\\Program Files\\MonitorControl.ps1"'
+        $arguments | Should -Match '-CliWorker'
+        $arguments | Should -Match '-IfNeeded'
+        $arguments | Should -Match '-Json'
+        $arguments | Should -Match '-AllowRisky'
+    }
+
+    It "honors the process timeout helper and dispatches before WPF markup" {
+        $process = [PSCustomObject]@{}
+        $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($Milliseconds) $script:CliWaitMilliseconds = $Milliseconds; return $false }
+        Wait-CliProcess -Process $process -TimeoutSeconds 3 | Should -BeFalse
+        $script:CliWaitMilliseconds | Should -Be 3000
+
+        $source = Get-Content -LiteralPath $script:AppPath -Raw
+        $source.IndexOf('if ($CliWorker)') | Should -BeLessThan $source.IndexOf('[xml]$xaml')
+        $cliSource = Get-Content -LiteralPath (Join-Path $script:RepoRoot "src\MonitorControl.Cli.psm1") -Raw
+        $cliSource | Should -Not -Match 'MessageBox|Read-Host|PromptForChoice'
     }
 }
 
