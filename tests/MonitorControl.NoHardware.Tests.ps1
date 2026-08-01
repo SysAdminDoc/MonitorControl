@@ -256,6 +256,16 @@ public static class MonitorControlVcpWriteProbe
         "Get-SelectedBrightnessPercent",
         "Set-BrightnessSliderFromPercent",
         "Get-ProfilePercentValue",
+        "Get-ProfileVcpValueSet",
+        "Get-ProfileVcpWritePlan",
+        "Get-ProfileOrderedVcpOperations",
+        "Find-ProfileSettingForMonitor",
+        "Get-ProfileApplyTargetReport",
+        "Format-ProfileApplyTargetReport",
+        "Get-ProfileCoverageReport",
+        "Format-ProfileCoverageReport",
+        "Get-SelectedMonitorIdentityKey",
+        "Test-IsSelectedMonitor",
         "Get-MonitorEdidModelId",
         "Get-CapabilitiesBlocklistEntry",
         "Get-CapabilitiesCacheKey",
@@ -938,7 +948,7 @@ Describe "Unified settings document registry" {
 
 Describe "Profile schema migration" {
     BeforeEach {
-        $script:ProfileSchemaVersion = 4
+        $script:ProfileSchemaVersion = [int]$script:SettingsDocumentRegistry.Profile.CurrentVersion
     }
 
     It "migrates every supported legacy schema to the current schema" {
@@ -977,7 +987,7 @@ Describe "Profile schema migration" {
             ConvertTo-CurrentProfileSchema -Profile $_ -FallbackName "Fallback"
         })
 
-        @($migrated.SchemaVersion) | Should -Be @(4, 4)
+        @($migrated.SchemaVersion) | Should -Be @($script:ProfileSchemaVersion, $script:ProfileSchemaVersion)
         $migrated[0].MonitorSettings.Count | Should -Be 1
         $migrated[0].MonitorSettings[0].IdentityKey | Should -Be "edid:v1"
         $migrated[1].MonitorSettings.Count | Should -Be 1
@@ -1045,7 +1055,7 @@ Describe "Transactional profile bundle import" {
         $script:ProfilesPath = Join-Path $TestDrive "profiles"
         $script:ProfileExportsPath = Join-Path $TestDrive "exports"
         New-Item -ItemType Directory -Path $script:ProfilesPath -Force | Out-Null
-        $script:ProfileSchemaVersion = 4
+        $script:ProfileSchemaVersion = [int]$script:SettingsDocumentRegistry.Profile.CurrentVersion
         $script:ProfileBundleSchemaVersion = 2
         $script:ProfileBundleMaxProfiles = 100
         $script:ProfileBundleMaxArchiveBytes = 16777216
@@ -2602,7 +2612,7 @@ Describe "Monitor reported VCP range normalization" {
     BeforeEach {
         $script:VcpScaledCodes = @(0x10, 0x12, 0x16, 0x18, 0x1A, 0x62, 0x87)
         $script:VcpDefaultMaximum = 100
-        $script:ProfileSchemaVersion = 4
+        $script:ProfileSchemaVersion = [int]$script:SettingsDocumentRegistry.Profile.CurrentVersion
     }
 
     It "treats only continuous codes as scaled" {
@@ -3562,6 +3572,10 @@ Describe "Redundant DDC write suppression" {
 }
 
 Describe "Profile percentage schema" {
+    BeforeEach {
+        $script:ProfileSchemaVersion = [int]$script:SettingsDocumentRegistry.Profile.CurrentVersion
+    }
+
     It "clamps pre-v4 raw values into the percentage domain" {
         $legacy = [PSCustomObject]@{ Brightness = 200; Contrast = 31; Red = -5 }
         Get-ProfilePercentValue -Object $legacy -Property "Brightness" -Default 50 | Should -Be 100
@@ -3571,7 +3585,7 @@ Describe "Profile percentage schema" {
     }
 
     It "upgrades every legacy profile schema to the percentage schema" {
-        foreach ($schema in @(1, 2, 3)) {
+        foreach ($schema in @(1, 2, 3, 4)) {
             $legacy = [PSCustomObject]@{
                 SchemaVersion = $schema
                 Name = "Legacy$schema"
@@ -3579,15 +3593,205 @@ Describe "Profile percentage schema" {
                 Contrast = 60
             }
             $converted = ConvertTo-CurrentProfileSchema -Profile $legacy -FallbackName "Legacy$schema"
-            $converted.SchemaVersion | Should -Be 4
+            $converted.SchemaVersion | Should -Be $script:ProfileSchemaVersion
             $converted.Brightness | Should -Be 100
             $converted.Contrast | Should -Be 60
         }
     }
 
+    It "gives a single-monitor legacy profile the selected-monitor capture scope" {
+        $legacy = [PSCustomObject]@{
+            SchemaVersion = 4
+            Name = "Legacy single"
+            MonitorIdentityKey = "edid:one"
+            Brightness = 40
+        }
+
+        $converted = ConvertTo-CurrentProfileSchema -Profile $legacy -FallbackName "Legacy single"
+
+        $converted.CaptureScope | Should -Be "SelectedMonitor"
+        @($converted.MonitorSettings).Count | Should -Be 1
+        @($converted.CaptureWarnings).Count | Should -Be 0
+    }
+
     It "rejects a profile schema newer than this build" {
-        $future = [PSCustomObject]@{ SchemaVersion = 5; Name = "Future" }
+        $future = [PSCustomObject]@{ SchemaVersion = ($script:ProfileSchemaVersion + 1); Name = "Future" }
         { ConvertTo-CurrentProfileSchema -Profile $future -FallbackName "Future" } | Should -Throw
+    }
+}
+
+Describe "Multi-monitor profile capture and apply" {
+    BeforeAll {
+        function global:New-TestMultiMonitorProfile {
+            return [PSCustomObject]@{
+                SchemaVersion = 5
+                Name = "Desk"
+                CaptureScope = "AllMonitors"
+                CaptureWarnings = @()
+                MonitorIdentityKey = "edid:right"
+                Brightness = 70; Contrast = 70; Red = 70; Green = 70; Blue = 70
+                Gamma = 100; GammaRed = 100; GammaGreen = 100; GammaBlue = 100
+                MonitorSettings = @(
+                    [PSCustomObject]@{ IdentityKey = "legacy:left"; MonitorName = "Left panel"; DevicePath = "\\?\DISPLAY#LEFT"; Brightness = 20; Contrast = 30; Red = 40; Green = 50; Blue = 60; Gamma = 100; GammaRed = 100; GammaGreen = 100; GammaBlue = 100 },
+                    [PSCustomObject]@{ IdentityKey = "edid:right"; MonitorName = "Right panel"; DevicePath = "\\?\DISPLAY#RIGHT"; Brightness = 70; Contrast = 80; Red = 90; Green = 10; Blue = 15; Gamma = 100; GammaRed = 100; GammaGreen = 100; GammaBlue = 100 }
+                )
+            }
+        }
+    }
+
+    BeforeEach {
+        $script:ProfileSchemaVersion = [int]$script:SettingsDocumentRegistry.Profile.CurrentVersion
+        $script:VcpScaledCodes = @(0x10, 0x12, 0x16, 0x18, 0x1A, 0x62, 0x87)
+        $script:VcpDefaultMaximum = 100
+        $script:ApplyToAll = $true
+        $script:CurrentMonitorIndex = 1
+        $script:RiskyVcpCodes = @(0x60, 0xD6, 0x04, 0x05)
+        $script:PhysicalMonitors = @(
+            [PSCustomObject]@{
+                Name = "Left panel"; IdentityKey = "edid:left"; IdentityAliases = @("legacy:left"); DevicePath = "\\?\DISPLAY#LEFT"
+                Handle = [IntPtr]11; CapabilitiesKnown = $true
+                SupportedVcpCodes = @{ 0x10 = $true; 0x12 = $true; 0x16 = $true; 0x18 = $true; 0x1A = $true }
+                VcpMaximums = @{ 0x10 = 255; 0x12 = 100; 0x16 = 100; 0x18 = 100; 0x1A = 100 }
+                VcpCurrentValues = @{}
+            },
+            [PSCustomObject]@{
+                Name = "Right panel"; IdentityKey = "edid:right"; IdentityAliases = @(); DevicePath = "\\?\DISPLAY#RIGHT"
+                Handle = [IntPtr]12; CapabilitiesKnown = $true
+                SupportedVcpCodes = @{ 0x10 = $true; 0x12 = $true }
+                VcpMaximums = @{ 0x10 = 100; 0x12 = 100 }
+                VcpCurrentValues = @{}
+            }
+        )
+    }
+
+    It "writes each monitor its own captured values instead of one shared set" {
+        $profileData = New-TestMultiMonitorProfile
+
+        $plan = Get-ProfileVcpWritePlan -ProfileData $profileData -ActiveProfile $profileData
+
+        @($plan.ValidationErrors).Count | Should -Be 0
+        $plan.IsPerMonitor | Should -BeTrue
+        # 0x10 has a reported maximum of 255 on the left panel, so 20% must not be written as 20.
+        $leftBrightness = @($plan.Operations | Where-Object { [string]$_.IdentityKey -eq "edid:left" -and [int]$_.Code -eq 0x10 })[0]
+        $leftBrightness.Value | Should -Be 51
+        $rightBrightness = @($plan.Operations | Where-Object { [string]$_.IdentityKey -eq "edid:right" -and [int]$_.Code -eq 0x10 })[0]
+        $rightBrightness.Value | Should -Be 70
+        @($plan.Operations | Where-Object { [string]$_.IdentityKey -eq "edid:left" -and [int]$_.Code -eq 0x12 })[0].Value | Should -Be 30
+        @($plan.Operations | Where-Object { [string]$_.IdentityKey -eq "edid:right" -and [int]$_.Code -eq 0x12 })[0].Value | Should -Be 80
+    }
+
+    It "matches a captured record through the monitor's legacy identity alias" {
+        $profileData = New-TestMultiMonitorProfile
+
+        $plan = Get-ProfileVcpWritePlan -ProfileData $profileData -ActiveProfile $profileData
+
+        $leftPlan = @($plan.TargetPlans | Where-Object { [string]$_.IdentityKey -eq "edid:left" })[0]
+        $leftPlan.MissingSetting | Should -BeFalse
+        $leftPlan.Values.Brightness | Should -Be 20
+    }
+
+    It "reports the selected monitor's values as the plan headline, not the first target's" {
+        $profileData = New-TestMultiMonitorProfile
+
+        $plan = Get-ProfileVcpWritePlan -ProfileData $profileData -ActiveProfile $profileData
+
+        $plan.Values.Brightness | Should -Be 70
+        $plan.Values.Contrast | Should -Be 80
+    }
+
+    It "records a validation error rather than writing a target with no captured setting" {
+        $profileData = New-TestMultiMonitorProfile
+        $profileData.MonitorSettings = @($profileData.MonitorSettings[1])
+
+        $plan = Get-ProfileVcpWritePlan -ProfileData $profileData -ActiveProfile $profileData
+
+        @($plan.ValidationErrors).Count | Should -Be 1
+        @($plan.ValidationErrors)[0] | Should -Match "Left panel"
+        @($plan.Operations | Where-Object { [string]$_.IdentityKey -eq "edid:left" }).Count | Should -Be 0
+    }
+
+    It "counts codes the target does not support instead of writing them" {
+        $profileData = New-TestMultiMonitorProfile
+
+        $plan = Get-ProfileVcpWritePlan -ProfileData $profileData -ActiveProfile $profileData
+
+        $rightPlan = @($plan.TargetPlans | Where-Object { [string]$_.IdentityKey -eq "edid:right" })[0]
+        @($rightPlan.UnsupportedCodes) | Should -Be @(0x16, 0x18, 0x1A)
+        $plan.SkippedUnsupported | Should -Be 3
+    }
+
+    It "keeps a single-monitor profile applying one value set to every target" {
+        $legacy = [PSCustomObject]@{
+            SchemaVersion = 4
+            Name = "Uniform"
+            MonitorIdentityKey = "edid:right"
+            Brightness = 60; Contrast = 60; Red = 60; Green = 60; Blue = 60
+            Gamma = 100; GammaRed = 100; GammaGreen = 100; GammaBlue = 100
+            MonitorSettings = @([PSCustomObject]@{ IdentityKey = "edid:right"; Brightness = 60; Contrast = 60; Red = 60; Green = 60; Blue = 60 })
+        }
+
+        $plan = Get-ProfileVcpWritePlan -ProfileData $legacy -ActiveProfile $legacy
+
+        $plan.IsPerMonitor | Should -BeFalse
+        @($plan.ValidationErrors).Count | Should -Be 0
+        @($plan.Operations | Where-Object { [int]$_.Code -eq 0x12 } | ForEach-Object { [int]$_.Value }) | Should -Be @(60, 60)
+    }
+
+    It "orders every consent-free write ahead of any risky write" {
+        $operations = @(
+            [PSCustomObject]@{ Code = 0x60; IdentityKey = "edid:left" },
+            [PSCustomObject]@{ Code = 0x10; IdentityKey = "edid:left" },
+            [PSCustomObject]@{ Code = 0xD6; IdentityKey = "edid:right" },
+            [PSCustomObject]@{ Code = 0x12; IdentityKey = "edid:left" },
+            [PSCustomObject]@{ Code = 0x10; IdentityKey = "edid:right" }
+        )
+
+        $ordered = @(Get-ProfileOrderedVcpOperations -Operations $operations)
+
+        @($ordered | ForEach-Object { [int]$_.Code }) | Should -Be @(0x10, 0x12, 0x10, 0x60, 0xD6)
+    }
+
+    It "names the outcome of every target after a partial apply" {
+        $profileData = New-TestMultiMonitorProfile
+        $plan = Get-ProfileVcpWritePlan -ProfileData $profileData -ActiveProfile $profileData
+        $leftOperations = @($plan.Operations | Where-Object { [string]$_.IdentityKey -eq "edid:left" })
+        $transaction = [PSCustomObject]@{
+            Success = $false
+            Outcome = "WriteFailed"
+            Rollback = "Restored"
+            Results = @(
+                [PSCustomObject]@{ Operation = $leftOperations[0]; WriteSuccess = $true; Rollback = "Restored" },
+                [PSCustomObject]@{ Operation = $leftOperations[1]; WriteSuccess = $false; Rollback = "NotNeeded" }
+            )
+        }
+
+        $report = @(Get-ProfileApplyTargetReport -Plan $plan -Transaction $transaction)
+
+        @($report | Where-Object { [string]$_.IdentityKey -eq "edid:left" })[0].Outcome | Should -Be "Failed"
+        @($report | Where-Object { [string]$_.IdentityKey -eq "edid:right" })[0].Outcome | Should -Be "NotAttempted"
+        (Format-ProfileApplyTargetReport -Report $report) | Should -Match "Right panel: NotAttempted"
+    }
+
+    It "previews unmatched displays and unsupported codes without writing anything" {
+        $profileData = New-TestMultiMonitorProfile
+        $profileData.MonitorSettings = @($profileData.MonitorSettings[1])
+
+        $coverage = Get-ProfileCoverageReport -ProfileData $profileData
+        $text = Format-ProfileCoverageReport -Coverage $coverage
+
+        @($coverage.Matched).Count | Should -Be 1
+        @($coverage.UnmatchedMonitors) | Should -Be @("Left panel")
+        $text | Should -Match "No captured setting for: Left panel"
+        $text | Should -Match "Right panel will skip unsupported: red, green, blue"
+    }
+
+    It "names a captured display that is no longer connected" {
+        $profileData = New-TestMultiMonitorProfile
+        $profileData.MonitorSettings += [PSCustomObject]@{ IdentityKey = "edid:gone"; MonitorName = "Retired panel"; DevicePath = "\\?\DISPLAY#GONE"; Brightness = 50 }
+
+        $coverage = Get-ProfileCoverageReport -ProfileData $profileData
+
+        @($coverage.MissingSettings) | Should -Be @("Retired panel")
     }
 }
 

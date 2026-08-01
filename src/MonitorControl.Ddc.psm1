@@ -1051,7 +1051,7 @@ function Get-Monitors {
                             RefreshRate = $devMode.dmDisplayFrequency; IsPrimary = ($monInfo.Flags -band [MonitorAPI]::MONITORINFOF_PRIMARY) -ne 0
                             Left = $monInfo.Monitor.Left; Top = $monInfo.Monitor.Top; Right = $monInfo.Monitor.Right
                             Bottom = $monInfo.Monitor.Bottom; Capabilities = ""
-                            CapabilitiesKnown = $false; SupportedVcpCodes = @{}; CapabilitiesPending = $false; VcpMaximums = @{}
+                            CapabilitiesKnown = $false; SupportedVcpCodes = @{}; CapabilitiesPending = $false; VcpMaximums = @{}; VcpCurrentValues = @{}
                             CapabilitiesExcluded = $false; CapabilitiesSafetyError = ""
                             IdentityKey = $identity.Key; IdentitySource = $identity.Source; IdentityDefaultLabel = $identity.DefaultLabel
                             IdentityAliases = if ([string]$identity.LegacyKey -ne [string]$identity.Key) { @([string]$identity.LegacyKey) } else { @() }
@@ -1084,7 +1084,7 @@ function Get-Monitors {
             Handle = [IntPtr]::Zero; HMonitor = [IntPtr]::Zero; Name = $fallbackName; Index = 1
             DeviceName = $fallbackDevice; Width = 1920; Height = 1080; RefreshRate = 60; IsPrimary = $true
             Left = 0; Top = 0; Right = 1920; Bottom = 1080; Capabilities = ""
-            CapabilitiesKnown = $false; SupportedVcpCodes = @{}; CapabilitiesPending = $false; VcpMaximums = @{}
+            CapabilitiesKnown = $false; SupportedVcpCodes = @{}; CapabilitiesPending = $false; VcpMaximums = @{}; VcpCurrentValues = @{}
             CapabilitiesExcluded = $false; CapabilitiesSafetyError = ""
             IdentityKey = $identity.Key; IdentitySource = $identity.Source; IdentityDefaultLabel = $identity.DefaultLabel
             IdentityAliases = @(); DevicePath = $identity.DevicePath; LegacyDevicePath = $identity.LegacyDevicePath; MonitorDeviceString = $identity.DeviceString; HardwareId = $identity.HardwareId

@@ -503,6 +503,46 @@ public sealed class MonitorControlLiveRegionProbe : IDisposable
         $navigated.Add($name)
     }
 
+    # Multi-monitor capture and the apply preview are the two halves of one contract: the
+    # checkbox decides how many records get written, the preview says how those records land
+    # on what is connected. Drive both rather than assert the XAML contains them.
+    $profilesTab = Get-TabByName -Root $root -Name (Get-SmokeUiText -Text "Profiles")
+    $profilesTabPattern = $null
+    if ($profilesTab.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$profilesTabPattern)) {
+        ([System.Windows.Automation.SelectionItemPattern]$profilesTabPattern).Select()
+        Start-Sleep -Milliseconds 150
+        $captureAll = Get-ControlByName -Root $root -Name (Get-SmokeUiText -Text "Capture all connected displays") -ControlType ([System.Windows.Automation.ControlType]::CheckBox)
+        if ($null -eq $captureAll) { throw "The multi-monitor profile capture control was not exposed through UI Automation." }
+        $captureAllPattern = $null
+        if (-not $captureAll.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern, [ref]$captureAllPattern)) {
+            throw "The multi-monitor profile capture control does not expose TogglePattern."
+        }
+        $captureAllToggle = [System.Windows.Automation.TogglePattern]$captureAllPattern
+        if ($captureAllToggle.Current.ToggleState -ne [System.Windows.Automation.ToggleState]::Off) {
+            throw "Multi-monitor profile capture must default to off so an existing single-display workflow is unchanged."
+        }
+        $captureAllToggle.Toggle()
+        Start-Sleep -Milliseconds 100
+        if ($captureAllToggle.Current.ToggleState -ne [System.Windows.Automation.ToggleState]::On) {
+            throw "The multi-monitor profile capture control did not turn on when toggled."
+        }
+        $captureAllToggle.Toggle()
+        Start-Sleep -Milliseconds 100
+        if ($captureAllToggle.Current.ToggleState -ne [System.Windows.Automation.ToggleState]::Off) {
+            throw "The multi-monitor profile capture control did not turn back off when toggled."
+        }
+        $applyPreview = Get-ControlByName -Root $root -Name (Get-SmokeUiText -Text "Profile apply preview") -ControlType ([System.Windows.Automation.ControlType]::Edit)
+        if ($null -eq $applyPreview) { throw "The profile apply preview was not exposed through UI Automation." }
+        $applyPreviewPattern = $null
+        if (-not $applyPreview.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$applyPreviewPattern)) {
+            throw "The profile apply preview does not expose ValuePattern, so its text cannot be read by assistive technology."
+        }
+        $applyPreviewValue = [System.Windows.Automation.ValuePattern]$applyPreviewPattern
+        if (-not $applyPreviewValue.Current.IsReadOnly) { throw "The profile apply preview must be read-only." }
+        if ([string]::IsNullOrWhiteSpace($applyPreviewValue.Current.Value)) { throw "The profile apply preview rendered no text with no profile selected." }
+        if ($applyPreview.Current.IsOffscreen) { throw "The profile apply preview was offscreen on the Profiles page." }
+    }
+
     # The DDC timing card is the only place adaptive and manual modes can be seen to be
     # mutually exclusive, so drive it rather than assert against the source text.
     $systemTab = Get-TabByName -Root $root -Name (Get-SmokeUiText -Text "System")
