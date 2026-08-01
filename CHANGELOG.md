@@ -2,7 +2,7 @@
 
 All notable changes to MonitorControl will be documented in this file.
 
-## [Unreleased]
+## [v3.37.0] - 2026-07-31
 
 - Added: DDC timing is now learned and stored per stable monitor identity instead of being three global constants. Adaptive mode calibrates a sleep multiplier from the first successful handshake with each monitor and persists it; manual mode uses the default delay verbatim so an operator value is never modified by calibration. The two are mutually exclusive and the card states that returning to adaptive discards the stored calibration. Read, write, and capability retry budgets are set separately per monitor.
 - Added: a VCP code that fails every retry on a monitor that is answering other codes is recorded as null-signalled-unsupported and skipped from then on, and forgotten again as soon as it answers. Some monitors use the DDC Null Message to mean "not supported" rather than "not ready", which is the usual cause of a scan that appears to hang. Effective timing, calibration state, and skipped codes appear in the DDC Compatibility Report.
