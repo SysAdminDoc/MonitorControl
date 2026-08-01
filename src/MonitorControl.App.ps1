@@ -951,6 +951,12 @@ $script:UpdatingCapabilitiesSafetyUI = $false
 $script:CapabilitiesConsentPromptHandled = $false
 $script:VcpWriteSafetySettingsPath = ""
 $script:RiskyVcpEnabledIdentityKeys = @{}
+$script:InputSourceSettingsPath = ""
+$script:InputSourceOverrides = @{}
+$script:InputSourceDraft = @()
+$script:InputSourceDraftIdentityKey = ""
+$script:InputSourceDraftSingleByte = $false
+$script:UpdatingInputSourceEditor = $false
 $script:RiskyVcpCodes = @(0x04, 0x08, 0x14, 0x60, 0xCA, 0xCC, 0xD6, 0xD7, 0xE8, 0xE9)
 # Continuous VCP codes whose reported maximum is monitor-defined. Stored profile,
 # automation, tray, and bridge values for these codes are percentages; the raw value
@@ -1055,6 +1061,7 @@ $script:UpdatingOptionalHelperUI = $false
 $script:CapabilitiesSafetySettingsPath = Join-Path $script:DefaultProfilesPath "capabilities-safety.json"
 $script:CapabilitiesProbeSentinelPath = Join-Path $script:DefaultProfilesPath "capabilities-probe-pending.json"
 $script:VcpWriteSafetySettingsPath = Join-Path $script:DefaultProfilesPath "vcp-write-safety.json"
+$script:InputSourceSettingsPath = Join-Path $script:DefaultProfilesPath "input-sources.json"
 $script:ProfilesPath = $script:DefaultProfilesPath
 $script:ProfileStorageMode = "Local"
 $script:ProfileStorageOffline = $false
@@ -1079,6 +1086,7 @@ $script:DisplayStateRestoreSchemaVersion = [int]$script:SettingsDocumentRegistry
 $script:CapabilitiesCacheSchemaVersion = [int]$script:SettingsDocumentRegistry.CapabilitiesCache.CurrentVersion
 $script:DdcTimingSchemaVersion = [int]$script:SettingsDocumentRegistry.DdcTiming.CurrentVersion
 $script:ProfileTrashSchemaVersion = [int]$script:SettingsDocumentRegistry.ProfileTrash.CurrentVersion
+$script:InputSourceSchemaVersion = [int]$script:SettingsDocumentRegistry.InputSources.CurrentVersion
 $script:ProfileTrashPath = Join-Path $script:DefaultProfilesPath "trash"
 $script:ProfileTrashMaxRecords = 20
 $script:ProfileTrashMaxBytes = 10485760
@@ -1117,7 +1125,7 @@ $script:ProfileBundleMaxTotalBytes = 10485760
 $script:ProfileBundleMaxCompressionRatio = 100
 $script:ProfileBundleMaxMonitorSettings = 32
 $script:ProfileExportsPath = Join-Path $script:ProfilesPath "exports"
-$script:ProfileMetadataFiles = @("app-profile-rules.json", "profile-schedules.json", "idle-dim.json", "battery-profile.json", "profile-storage.json", "monitor-identities.json", "automation-bridge.json", "capabilities-safety.json", "capabilities-probe-pending.json", "vcp-write-safety.json", "optional-helpers.json", "display-restore.json", "capabilities-cache.json", "ddc-timing.json")
+$script:ProfileMetadataFiles = @("app-profile-rules.json", "profile-schedules.json", "idle-dim.json", "battery-profile.json", "profile-storage.json", "monitor-identities.json", "automation-bridge.json", "capabilities-safety.json", "capabilities-probe-pending.json", "vcp-write-safety.json", "optional-helpers.json", "display-restore.json", "capabilities-cache.json", "ddc-timing.json", "input-sources.json")
 $script:MonitorIdentityRecords = @{}
 $script:UpdatingMonitorLabelUI = $false
 $windowsUiCulture = [System.Globalization.CultureInfo]::CurrentUICulture.Name
@@ -1175,6 +1183,10 @@ $script:UiStrings = @{
     "A11y.Mute" = "Mute"
     "A11y.Sharpness" = "Sharpness"
     "A11y.InputSource" = "Input source"
+    "A11y.InputSourceList" = "Custom input values"
+    "A11y.InputSourceValue" = "Input value"
+    "A11y.InputSourceLabel" = "Input label"
+    "A11y.InputSourceSingleByte" = "Single-byte input select"
     "A11y.ProfileName" = "Profile name"
     "A11y.ProfilesList" = "Saved profiles"
     "A11y.ProfileCaptureAll" = "Capture all connected displays"
@@ -1403,6 +1415,103 @@ function Set-ControlVcpSupport {
     }
 }
 
+# Rebuilt from the resolved per-identity map rather than a fixed table, so a user-supplied
+# vendor value survives every capability refresh. Capability gating is applied only to values
+# the app itself proposed: a value the user typed in is an assertion that the panel accepts it
+# even though the capability string never mentioned it, which is the whole reason to type one.
+function Update-InputSourceCombo {
+    param($Monitor)
+    if ($null -eq $inputSourceCombo) { return }
+    $previousValue = if ($null -ne $inputSourceCombo.SelectedItem) { [int]$inputSourceCombo.SelectedItem.Tag } else { $null }
+    $map = @(Get-MonitorInputSourceMap -Monitor $Monitor)
+    $isCustom = @($map).Count -gt 0 -and [string]$map[0].Source -eq "Custom"
+    $singleByte = Test-MonitorInputSourceSingleByte -Monitor $Monitor
+    $wasUpdating = $script:UpdatingUI
+    $script:UpdatingUI = $true
+    try {
+        $inputSourceCombo.Items.Clear()
+        foreach ($entry in $map) {
+            $item = New-Object System.Windows.Controls.ComboBoxItem
+            $item.Content = [string]$entry.Label
+            $item.Tag = [int]$entry.Value
+            if ($isCustom -or $null -eq $Monitor) {
+                $item.IsEnabled = $true
+                $item.ToolTip = "Writes 0x{0:X2}{1}" -f (Resolve-InputSourceWriteValue -Value ([int]$entry.Value) -SingleByte $singleByte), $(if ($singleByte) { " (single byte)" } else { "" })
+            } else {
+                $supported = Test-MonitorSupportsVcpValue -Monitor $Monitor -Code ([MonitorAPI]::VCP_INPUT_SOURCE) -Value ([int]$entry.Value)
+                $item.IsEnabled = [bool]$supported
+                $item.ToolTip = if ($supported) { $null } else { "Input value 0x$("{0:X2}" -f [int]$entry.Value) is not reported in capabilities. Add it as a custom input to write it anyway." }
+            }
+            $inputSourceCombo.Items.Add($item) | Out-Null
+            if ($null -ne $previousValue -and [int]$previousValue -eq [int]$entry.Value) { $inputSourceCombo.SelectedItem = $item }
+        }
+    } finally {
+        $script:UpdatingUI = $wasUpdating
+    }
+}
+
+# The editor keeps a working copy so a half-finished edit is never a live write mapping; only
+# Save commits it. Draft state is per selected identity and is discarded when selection changes.
+function Set-InputSourceEditorDraft {
+    param($Monitor)
+    $script:InputSourceDraftIdentityKey = if ($null -eq $Monitor) { "" } else { [string]$Monitor.IdentityKey }
+    $script:InputSourceDraft = @(@(Get-MonitorInputSourceMap -Monitor $Monitor) | ForEach-Object { [PSCustomObject]@{ Value = [int]$_.Value; Label = [string]$_.Label } })
+    $script:InputSourceDraftSingleByte = [bool](Test-MonitorInputSourceSingleByte -Monitor $Monitor)
+}
+
+function Update-InputSourceEditor {
+    param($Monitor)
+    if ($null -eq $inputSourceList) { return }
+    $identityKey = if ($null -eq $Monitor) { "" } else { [string]$Monitor.IdentityKey }
+    if ([string]$script:InputSourceDraftIdentityKey -ne $identityKey) { Set-InputSourceEditorDraft -Monitor $Monitor }
+    $wasUpdating = $script:UpdatingInputSourceEditor
+    $script:UpdatingInputSourceEditor = $true
+    try {
+        $selectedValue = if ($null -ne $inputSourceList.SelectedItem) { [int]$inputSourceList.SelectedItem.Tag } else { $null }
+        $inputSourceList.Items.Clear()
+        foreach ($entry in @($script:InputSourceDraft)) {
+            $item = New-Object System.Windows.Controls.ListBoxItem
+            $item.Content = "0x{0:X2}  {1}" -f [int]$entry.Value, [string]$entry.Label
+            $item.Tag = [int]$entry.Value
+            $inputSourceList.Items.Add($item) | Out-Null
+            if ($null -ne $selectedValue -and [int]$selectedValue -eq [int]$entry.Value) { $inputSourceList.SelectedItem = $item }
+        }
+        if ($null -ne $inputSourceSingleByteCheckbox) { $inputSourceSingleByteCheckbox.IsChecked = [bool]$script:InputSourceDraftSingleByte }
+        if ($null -ne $inputSourceOriginText) {
+            $map = @(Get-MonitorInputSourceMap -Monitor $Monitor)
+            $origin = if (@($map).Count -eq 0) { "Default" } else { [string]$map[0].Source }
+            $inputSourceOriginText.Text = switch ($origin) {
+                "Custom" { "Using a custom input table saved for this display." }
+                "Capability" { "Using the values this display advertised in its capability string." }
+                default { "Using the built-in input table; this display advertised no input values." }
+            }
+        }
+        $hasIdentity = -not [string]::IsNullOrWhiteSpace($identityKey)
+        foreach ($control in @($inputSourceValueBox, $inputSourceLabelBox, $inputSourceAddBtn, $inputSourceRemoveBtn, $inputSourceResetBtn, $inputSourceSingleByteCheckbox, $inputSourceSaveBtn)) {
+            if ($null -ne $control) {
+                $control.IsEnabled = $hasIdentity
+                $control.ToolTip = if ($hasIdentity) { $control.ToolTip } else { "A stable monitor identity is required to save an input mapping." }
+            }
+        }
+    } finally {
+        $script:UpdatingInputSourceEditor = $wasUpdating
+    }
+}
+
+function ConvertTo-InputSourceValue {
+    param([string]$Text)
+    $trimmed = ([string]$Text).Trim()
+    if ([string]::IsNullOrWhiteSpace($trimmed)) { return $null }
+    $parsed = 0
+    if ($trimmed -match '^(?i)0x[0-9a-f]{1,2}$') {
+        try { $parsed = [Convert]::ToInt32($trimmed.Substring(2), 16) } catch { return $null }
+    } elseif (-not [int]::TryParse($trimmed, [ref]$parsed)) {
+        return $null
+    }
+    if ($parsed -lt 0 -or $parsed -gt 255) { return $null }
+    return [int]$parsed
+}
+
 function Update-VcpPresetItems {
     param($Monitor)
     if ($null -eq $vcpPresetCombo) { return }
@@ -1541,13 +1650,8 @@ function Update-CapabilityControls {
             $control.ToolTip = if ($brightnessSupported) { $null } else { "Brightness VCP 0x10 is not reported in this monitor's capabilities." }
         }
     }
-    foreach ($item in @($inputSourceCombo.Items)) {
-        if ($null -ne $item.Tag) {
-            $supported = Test-MonitorSupportsVcpValue -Monitor $Monitor -Code ([MonitorAPI]::VCP_INPUT_SOURCE) -Value ([int]$item.Tag)
-            $item.IsEnabled = [bool]$supported
-            $item.ToolTip = if ($supported) { $null } else { "Input value 0x$("{0:X2}" -f [int]$item.Tag) is not reported in capabilities." }
-        }
-    }
+    Update-InputSourceCombo -Monitor $Monitor
+    Update-InputSourceEditor -Monitor $Monitor
     Update-VcpPresetItems -Monitor $Monitor
     Update-VcpValueEditorForCurrentCode
     Update-RiskyVcpControlState -Monitor $Monitor
@@ -2202,6 +2306,10 @@ function Initialize-LocalizationAndAccessibility {
     Set-AccessibleName -Control $muteCheckbox -Key "A11y.Mute"
     Set-AccessibleName -Control $sharpnessSlider -Key "A11y.Sharpness"
     Set-AccessibleName -Control $inputSourceCombo -Key "A11y.InputSource"
+    Set-AccessibleName -Control $inputSourceList -Key "A11y.InputSourceList"
+    Set-AccessibleName -Control $inputSourceValueBox -Key "A11y.InputSourceValue"
+    Set-AccessibleName -Control $inputSourceLabelBox -Key "A11y.InputSourceLabel"
+    Set-AccessibleName -Control $inputSourceSingleByteCheckbox -Key "A11y.InputSourceSingleByte"
     Set-AccessibleName -Control $profileNameBox -Key "A11y.ProfileName"
     Set-AccessibleName -Control $profilesList -Key "A11y.ProfilesList"
     Set-AccessibleName -Control $profileCaptureAllCheckbox -Key "A11y.ProfileCaptureAll"
@@ -2274,7 +2382,7 @@ function Initialize-LocalizationAndAccessibility {
         $applyAllCheckbox,$identifyBtn,$refreshBtn,$monitorLabelBox,$monitorLabelSaveBtn,$monitorLabelResetBtn,
         $brightnessSlider,$contrastSlider,$redSlider,$greenSlider,$blueSlider,$colorTempWarm,$colorTemp6500,$colorTempCool,$colorTempSRGB,
         $presetDay,$presetNight,$presetAutoMode,$presetAmbientMode,$presetReset,$dynamicContrastOff,$dynamicContrastOn,$pictureModeWeb,$pictureModeCinema,$pictureModeGame,
-        $inputSourceCombo,$powerOffBtn,$powerStandbyBtn,$powerOnBtn,$volumeSlider,$muteCheckbox,$sharpnessSlider,$resetColorBtn,$factoryResetBtn,$allMonitorsStandbyBtn,
+        $inputSourceCombo,$inputSourceEditorExpander,$inputSourceList,$inputSourceValueBox,$inputSourceLabelBox,$inputSourceAddBtn,$inputSourceRemoveBtn,$inputSourceResetBtn,$inputSourceSingleByteCheckbox,$inputSourceSaveBtn,$powerOffBtn,$powerStandbyBtn,$powerOnBtn,$volumeSlider,$muteCheckbox,$sharpnessSlider,$resetColorBtn,$factoryResetBtn,$allMonitorsStandbyBtn,
         $vcpCodeBox,$vcpPresetCombo,$vcpQueryBtn,$vcpSetValueBox,$vcpSetBtn,$vcpScanBtn,$vcpScanCapabilitiesOnlyCheckbox,$vcpResultBox,
         $profileNameBox,$profileCaptureAllCheckbox,$saveProfileBtn,$loadProfileBtn,$deleteProfileBtn,$profilesList,$exportProfilesBtn,$importProfilesBtn,$profileSyncFolderBtn,$profileLocalFolderBtn,
         $appProfileEnabledCheckbox,$appProfileExeBox,$appProfileCaptureBtn,$appProfileProfileCombo,$appProfileRiskyConsentCheckbox,$appProfileAddBtn,$appProfileRemoveBtn,$appProfileRulesList,
@@ -3616,7 +3724,26 @@ function Apply-MonitorSettingResult {
         $volumeSlider.Maximum = $maximum; $volumeSlider.Value = $current; $volumeValue.Text = $current
     } elseif ($code -eq [MonitorAPI]::VCP_SHARPNESS) {
         $sharpnessSlider.Maximum = $maximum; $sharpnessSlider.Value = $current; $sharpnessValue.Text = $current
+    } elseif ($code -eq [MonitorAPI]::VCP_INPUT_SOURCE) {
+        Select-InputSourceComboValue -Value ([int]$current)
     }
+}
+
+# A monitor in single-byte mode answers 0x60 with the value in the high byte, so the reported
+# number never equals the mapped one. Compare on the same masked value the write path uses.
+function Select-InputSourceComboValue {
+    param([int]$Value)
+    if ($null -eq $inputSourceCombo) { return }
+    $monitor = if ($script:CurrentMonitorIndex -ge 0 -and $script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) { $script:PhysicalMonitors[$script:CurrentMonitorIndex] } else { $null }
+    $singleByte = Test-MonitorInputSourceSingleByte -Monitor $monitor
+    $reported = Resolve-InputSourceReadValue -Value $Value -SingleByte $singleByte
+    $match = @($inputSourceCombo.Items | Where-Object {
+        $null -ne $_.Tag -and (Resolve-InputSourceReadValue -Value ([int]$_.Tag) -SingleByte $singleByte) -eq $reported
+    } | Select-Object -First 1)
+    if ($match.Count -eq 0) { return }
+    $wasUpdating = $script:UpdatingUI
+    $script:UpdatingUI = $true
+    try { $inputSourceCombo.SelectedItem = $match[0] } finally { $script:UpdatingUI = $wasUpdating }
 }
 
 function Update-MonitorSettingsWorkerOutput {
@@ -3723,6 +3850,13 @@ function Start-MonitorSettingsWorker {
         if ($null -eq $monitor -or $monitor.Handle -eq [IntPtr]::Zero -or [string]::IsNullOrWhiteSpace([string]$monitor.IdentityKey)) { continue }
         $state = if ($script:DisplayRecoveryStates.ContainsKey([string]$monitor.IdentityKey)) { $script:DisplayRecoveryStates[[string]$monitor.IdentityKey] } else { $null }
         $codes = if ($index -eq $MonitorIndex) { $selectedCodes } else { @([int][MonitorAPI]::VCP_BRIGHTNESS) }
+        # 0x60 is read only where the panel positively advertised it. Adding it unconditionally
+        # spends the retry budget on every panel that has no input control and, worse, turns its
+        # failure into a partial-read result that downgrades the DDC availability verdict.
+        if ($index -eq $MonitorIndex -and [bool]$monitor.CapabilitiesKnown -and
+            $null -ne $monitor.SupportedVcpCodes -and $monitor.SupportedVcpCodes.ContainsKey([int][MonitorAPI]::VCP_INPUT_SOURCE)) {
+            $codes = @($codes) + @([int][MonitorAPI]::VCP_INPUT_SOURCE)
+        }
         $timingProfile = Get-DdcTimingProfile -IdentityKey ([string]$monitor.IdentityKey)
         $effectiveTiming = Get-DdcEffectiveTiming -TimingProfile $timingProfile
         $targets += [PSCustomObject]@{
@@ -4492,7 +4626,26 @@ if ($CliWorker) {
                 </Grid></Border>
                 <Grid Grid.Row="2"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                     <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                        <Border Style="{StaticResource PageCardCompact}"><StackPanel><TextBlock Text="Input source" Style="{StaticResource SectionTitle}" Margin="0,0,0,12"/><ComboBox x:Name="InputSourceCombo"/></StackPanel></Border>
+                        <Border Style="{StaticResource PageCardCompact}"><StackPanel>
+                            <TextBlock Text="Input source" Style="{StaticResource SectionTitle}" Margin="0,0,0,12"/><ComboBox x:Name="InputSourceCombo"/>
+                            <Expander x:Name="InputSourceEditorExpander" Header="Edit input values" Margin="0,12,0,0" Foreground="{DynamicResource TextBrush}">
+                                <StackPanel Margin="0,10,0,0">
+                                    <TextBlock x:Name="InputSourceOriginText" Text="Using the built-in input table." TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource MutedTextBrush}"/>
+                                    <ListBox x:Name="InputSourceList" Margin="0,10,0,0" MinHeight="110" MaxHeight="160" Background="{DynamicResource ControlBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Foreground="{DynamicResource TextBrush}"/>
+                                    <Grid Margin="0,10,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="8"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <TextBox x:Name="InputSourceValueBox" ToolTip="Input value as hex (0x11) or decimal (17), 0-255."/>
+                                        <TextBox x:Name="InputSourceLabelBox" Grid.Column="2" ToolTip="Name shown in the input picker."/>
+                                    </Grid>
+                                    <Grid Margin="0,8,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <Button x:Name="InputSourceAddBtn" Content="Add / Update" Style="{StaticResource Btn}"/>
+                                        <Button x:Name="InputSourceRemoveBtn" Grid.Column="2" Content="Remove" Style="{StaticResource Btn}"/>
+                                        <Button x:Name="InputSourceResetBtn" Grid.Column="4" Content="Use Defaults" Style="{StaticResource Btn}"/>
+                                    </Grid>
+                                    <CheckBox x:Name="InputSourceSingleByteCheckbox" Content="Single-byte input select" Margin="0,12,0,0" ToolTip="Write and match only the low byte of the input value. Enable for a monitor that reports its input in the high byte and rejects the two-byte write."/>
+                                    <Button x:Name="InputSourceSaveBtn" Content="Save Input Mapping" Style="{StaticResource AccBtn}" Margin="0,10,0,0" HorizontalAlignment="Right" MinWidth="160"/>
+                                </StackPanel>
+                            </Expander>
+                        </StackPanel></Border>
                         <Border Grid.Row="2" Style="{StaticResource PageCardCompact}"><StackPanel><TextBlock Text="Power control" Style="{StaticResource SectionTitle}" Margin="0,0,0,12"/><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="4"/><ColumnDefinition Width="*"/><ColumnDefinition Width="4"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                             <Button x:Name="PowerOffBtn" Content="Off" Style="{StaticResource WarnBtn}"/><Button x:Name="PowerStandbyBtn" Grid.Column="2" Content="Standby" Style="{StaticResource Btn}"/><Button x:Name="PowerOnBtn" Grid.Column="4" Content="On" Style="{StaticResource AccBtn}"/>
                         </Grid></StackPanel></Border>
@@ -4974,6 +5127,16 @@ $presetAutoMode = $window.FindName("PresetAutoMode"); $presetAmbientMode = $wind
 $dynamicContrastOff = $window.FindName("DynamicContrastOff"); $dynamicContrastOn = $window.FindName("DynamicContrastOn")
 $pictureModeWeb = $window.FindName("PictureModeWeb"); $pictureModeCinema = $window.FindName("PictureModeCinema"); $pictureModeGame = $window.FindName("PictureModeGame")
 $inputSourceCombo = $window.FindName("InputSourceCombo")
+$inputSourceEditorExpander = $window.FindName("InputSourceEditorExpander")
+$inputSourceOriginText = $window.FindName("InputSourceOriginText")
+$inputSourceList = $window.FindName("InputSourceList")
+$inputSourceValueBox = $window.FindName("InputSourceValueBox")
+$inputSourceLabelBox = $window.FindName("InputSourceLabelBox")
+$inputSourceAddBtn = $window.FindName("InputSourceAddBtn")
+$inputSourceRemoveBtn = $window.FindName("InputSourceRemoveBtn")
+$inputSourceResetBtn = $window.FindName("InputSourceResetBtn")
+$inputSourceSingleByteCheckbox = $window.FindName("InputSourceSingleByteCheckbox")
+$inputSourceSaveBtn = $window.FindName("InputSourceSaveBtn")
 $powerOffBtn = $window.FindName("PowerOffBtn"); $powerStandbyBtn = $window.FindName("PowerStandbyBtn"); $powerOnBtn = $window.FindName("PowerOnBtn")
 $pipPbpOffBtn = $window.FindName("PipPbpOffBtn"); $pipModeBtn = $window.FindName("PipModeBtn"); $pbpModeBtn = $window.FindName("PbpModeBtn")
 $pipSecondaryDpBtn = $window.FindName("PipSecondaryDpBtn"); $pipSecondaryHdmi1Btn = $window.FindName("PipSecondaryHdmi1Btn"); $pipSecondaryHdmi2Btn = $window.FindName("PipSecondaryHdmi2Btn")
@@ -5384,10 +5547,7 @@ function Load-MonitorSettings {
     Stop-MonitorSettingsWorker -Cancel
     $script:UpdatingUI = $true
     try {
-        $inputSourceCombo.Items.Clear()
-        @(@{N="HDMI 1";V=0x11},@{N="HDMI 2";V=0x12},@{N="DisplayPort 1";V=0x0F},@{N="DisplayPort 2";V=0x10},@{N="USB-C";V=0x13},@{N="DVI";V=0x03},@{N="VGA";V=0x01}) | ForEach-Object {
-            $item = New-Object System.Windows.Controls.ComboBoxItem; $item.Content = $_.N; $item.Tag = $_.V; $inputSourceCombo.Items.Add($item) | Out-Null
-        }
+        Update-InputSourceCombo -Monitor $mon
         Update-CapabilitiesBox -Monitor $mon
         Update-CapabilityControls -Monitor $mon
         Sync-CapabilitySafetyUi
@@ -9006,7 +9166,80 @@ $presetReset.Add_Click({ $script:AutoModeEnabled = $false; $script:AmbientLightE
 
 $inputSourceCombo.Add_SelectionChanged({
     if ($script:UpdatingUI -or $inputSourceCombo.SelectedItem -eq $null) { return }
-    Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_INPUT_SOURCE) -Value ([uint32]$inputSourceCombo.SelectedItem.Tag) -ActionLabel "Change monitor input to $($inputSourceCombo.SelectedItem.Content)" | Out-Null
+    $monitor = if ($script:CurrentMonitorIndex -ge 0 -and $script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) { $script:PhysicalMonitors[$script:CurrentMonitorIndex] } else { $null }
+    $writeValue = Resolve-InputSourceWriteValue -Value ([int]$inputSourceCombo.SelectedItem.Tag) -SingleByte (Test-MonitorInputSourceSingleByte -Monitor $monitor)
+    Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_INPUT_SOURCE) -Value ([uint32]$writeValue) -ActionLabel "Change monitor input to $($inputSourceCombo.SelectedItem.Content)" | Out-Null
+})
+function Get-InputSourceEditorMonitor {
+    if ($script:CurrentMonitorIndex -lt 0 -or $script:CurrentMonitorIndex -ge $script:PhysicalMonitors.Count) { return $null }
+    return $script:PhysicalMonitors[$script:CurrentMonitorIndex]
+}
+
+$inputSourceList.Add_SelectionChanged({
+    if ($script:UpdatingInputSourceEditor -or $null -eq $inputSourceList.SelectedItem) { return }
+    $value = [int]$inputSourceList.SelectedItem.Tag
+    $entry = @(@($script:InputSourceDraft) | Where-Object { [int]$_.Value -eq $value } | Select-Object -First 1)
+    if ($entry.Count -eq 0) { return }
+    $inputSourceValueBox.Text = "0x{0:X2}" -f $value
+    $inputSourceLabelBox.Text = [string]$entry[0].Label
+})
+$inputSourceAddBtn.Add_Click({
+    $value = ConvertTo-InputSourceValue -Text ([string]$inputSourceValueBox.Text)
+    if ($null -eq $value) {
+        Update-Status "Input value must be 0x00-0xFF or 0-255" -Severity Error -Key "Status.InputSourceValueInvalid"
+        return
+    }
+    $label = ([string]$inputSourceLabelBox.Text).Trim()
+    if ([string]::IsNullOrWhiteSpace($label)) { $label = Get-InputSourceLabelForValue -Value $value }
+    $draft = @(@($script:InputSourceDraft) | Where-Object { [int]$_.Value -ne $value })
+    $draft += [PSCustomObject]@{ Value = [int]$value; Label = $label }
+    $script:InputSourceDraft = @(ConvertTo-InputSourceRecords -Records $draft)
+    if (@($script:InputSourceDraft).Count -eq 0) {
+        Update-Status "Input mapping rejected every entry" -Severity Error -Key "Status.InputSourceDraftEmpty"
+        return
+    }
+    Update-InputSourceEditor -Monitor (Get-InputSourceEditorMonitor)
+    Update-Status "Input 0x$("{0:X2}" -f $value) staged as '$label'; choose Save Input Mapping to apply"
+})
+$inputSourceRemoveBtn.Add_Click({
+    if ($null -eq $inputSourceList.SelectedItem) { return }
+    $value = [int]$inputSourceList.SelectedItem.Tag
+    $script:InputSourceDraft = @(@($script:InputSourceDraft) | Where-Object { [int]$_.Value -ne $value })
+    Update-InputSourceEditor -Monitor (Get-InputSourceEditorMonitor)
+    Update-Status "Input 0x$("{0:X2}" -f $value) staged for removal; choose Save Input Mapping to apply"
+})
+$inputSourceResetBtn.Add_Click({
+    $monitor = Get-InputSourceEditorMonitor
+    if ($null -eq $monitor) { return }
+    if (-not (Set-MonitorInputSourceSettings -Monitor $monitor -Sources @() -SingleByte $false -ClearSources)) {
+        Update-Status "Input mapping could not be reset" -Severity Error -Key "Status.InputSourceResetFailed"
+        return
+    }
+    Set-InputSourceEditorDraft -Monitor $monitor
+    Update-InputSourceCombo -Monitor $monitor
+    Update-InputSourceEditor -Monitor $monitor
+    Update-Status "Input mapping reset to advertised or built-in values"
+})
+$inputSourceSingleByteCheckbox.Add_Click({
+    if ($script:UpdatingInputSourceEditor) { return }
+    $script:InputSourceDraftSingleByte = [bool]$inputSourceSingleByteCheckbox.IsChecked
+})
+$inputSourceSaveBtn.Add_Click({
+    $monitor = Get-InputSourceEditorMonitor
+    if ($null -eq $monitor) { return }
+    $draft = @($script:InputSourceDraft)
+    if ($draft.Count -eq 0 -and -not $script:InputSourceDraftSingleByte) {
+        Update-Status "An input mapping needs at least one value" -Severity Error -Key "Status.InputSourceDraftEmpty"
+        return
+    }
+    if (-not (Set-MonitorInputSourceSettings -Monitor $monitor -Sources $draft -SingleByte ([bool]$script:InputSourceDraftSingleByte))) {
+        Update-Status "Input mapping could not be saved" -Severity Error -Key "Status.InputSourceSaveFailed"
+        return
+    }
+    Set-InputSourceEditorDraft -Monitor $monitor
+    Update-InputSourceCombo -Monitor $monitor
+    Update-InputSourceEditor -Monitor $monitor
+    Update-Status "Saved $(@($script:InputSourceDraft).Count) input value(s) for $(Get-MonitorDisplayLabel -Monitor $monitor)$(if ($script:InputSourceDraftSingleByte) { '; single-byte writes' } else { '' })"
 })
 $powerOffBtn.Add_Click({ Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_POWER_MODE) -Value ([MonitorAPI]::POWER_OFF) -ActionLabel "Power off the selected monitor" | Out-Null })
 $powerStandbyBtn.Add_Click({ Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_POWER_MODE) -Value ([MonitorAPI]::POWER_STANDBY) -ActionLabel "Put the selected monitor in standby" | Out-Null })
@@ -9685,7 +9918,7 @@ function Export-NavigationRenders {
 }
 
 # Initialize
-Initialize-WmiBrightness; Load-MonitorIdentitySettings; Import-CapabilitySafetyState; Import-VcpWriteSafetyState; Import-OptionalHelperSettings; Import-DisplayStateRestoreSettings; Import-CapabilitiesCache; Import-DdcTimingSettings; Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList
+Initialize-WmiBrightness; Load-MonitorIdentitySettings; Import-CapabilitySafetyState; Import-VcpWriteSafetyState; Import-InputSourceSettings; Import-OptionalHelperSettings; Import-DisplayStateRestoreSettings; Import-CapabilitiesCache; Import-DdcTimingSettings; Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList
 Load-AppProfileRules; Update-AppProfileControls; Start-AppProfileWatcher
 Load-ProfileSchedules; Update-ScheduleControls; Start-ProfileScheduleWatcher
 Load-IdleDimSettings; Update-IdleDimControls; Start-IdleDimWatcher

@@ -265,6 +265,21 @@ public static class MonitorControlVcpWriteProbe
         "Get-ProfileCoverageReport",
         "Format-ProfileCoverageReport",
         "Get-SelectedMonitorIdentityKey",
+        "Get-DefaultInputSourceMap",
+        "Get-InputSourceLabelForValue",
+        "ConvertTo-InputSourceRecords",
+        "ConvertTo-InputSourceValue",
+        "Get-InputSourceOverride",
+        "Get-MonitorInputSourceMap",
+        "Test-MonitorInputSourceSingleByte",
+        "Resolve-InputSourceWriteValue",
+        "Resolve-InputSourceReadValue",
+        "Set-MonitorInputSourceSettings",
+        "Get-InputSourceReportLabel",
+        "Get-InputSourceMappingReportLines",
+        "Get-InputSourceSettingsObject",
+        "Save-InputSourceSettings",
+        "Import-InputSourceSettings",
         "Test-IsSelectedMonitor",
         "Get-MonitorEdidModelId",
         "Get-CapabilitiesBlocklistEntry",
@@ -903,7 +918,7 @@ Describe "Unified settings document registry" {
             "Profile", "ProfileBundle", "ProfileStorage", "MonitorIdentity", "AppProfileRules",
             "ProfileSchedules", "IdleDim", "BatteryProfile", "AutomationBridge", "CapabilitiesSafety",
             "CapabilitiesProbeSentinel", "VcpWriteSafety", "OptionalHelpers", "DisplayRestore",
-            "CapabilitiesCache", "DdcTiming", "ProfileTrash"
+            "CapabilitiesCache", "DdcTiming", "InputSources", "ProfileTrash"
         )
         @($script:SettingsDocumentRegistry.Keys) | Should -Be $expected
         foreach ($definition in $script:SettingsDocumentRegistry.Values) {
@@ -1461,6 +1476,7 @@ Describe "WinRT monitor identity and migration" {
         $script:CapabilitiesCache = @{ $oldKey = [PSCustomObject]@{ Capabilities = "vcp(10)" } }
         $script:DdcTimingProfiles = @{ $oldKey = [PSCustomObject]@{ IdentityKey = $oldKey; Mode = "Manual" } }
         $script:DisplayStateRestoreValues = @{ $oldKey = [PSCustomObject]@{ Brightness = 37 } }
+        $script:InputSourceOverrides = @{ $oldKey = [PSCustomObject]@{ IdentityKey = $oldKey; SingleByteWrite = $true; Sources = @([PSCustomObject]@{ Value = 0xD0; Label = "Vendor input" }) } }
 
         $migration = Update-MonitorIdentityKeyedState -OldKey $oldKey -NewKey $newKey
 
@@ -1473,6 +1489,10 @@ Describe "WinRT monitor identity and migration" {
         $script:CapabilitiesCache[$newKey].Capabilities | Should -Be "vcp(10)"
         $script:DdcTimingProfiles[$newKey].IdentityKey | Should -Be $newKey
         $script:DisplayStateRestoreValues[$newKey].Brightness | Should -Be 37
+        $script:InputSourceOverrides.ContainsKey($oldKey) | Should -BeFalse
+        $script:InputSourceOverrides[$newKey].IdentityKey | Should -Be $newKey
+        $script:InputSourceOverrides[$newKey].SingleByteWrite | Should -BeTrue
+        @($script:InputSourceOverrides[$newKey].Sources)[0].Value | Should -Be 0xD0
     }
 
     It "resolves legacy profile targets through aliases and rewrites them to the current identity" {
@@ -3617,6 +3637,150 @@ Describe "Profile percentage schema" {
     It "rejects a profile schema newer than this build" {
         $future = [PSCustomObject]@{ SchemaVersion = ($script:ProfileSchemaVersion + 1); Name = "Future" }
         { ConvertTo-CurrentProfileSchema -Profile $future -FallbackName "Future" } | Should -Throw
+    }
+}
+
+Describe "Editable and single-byte input sources" {
+    BeforeEach {
+        $script:InputSourceOverrides = @{}
+        $script:InputSourceSchemaVersion = [int]$script:SettingsDocumentRegistry.InputSources.CurrentVersion
+        $script:InputSourceSettingsPath = Join-Path $TestDrive "input-sources.json"
+        $script:ProfileStorageOffline = $false
+        $script:ProfileMetadataFiles = @("input-sources.json")
+        if (Test-Path -LiteralPath $script:InputSourceSettingsPath) { Remove-Item -LiteralPath $script:InputSourceSettingsPath -Force }
+        $script:AdvertisedMonitor = [PSCustomObject]@{
+            Name = "Advertised panel"; IdentityKey = "edid:advertised"; CapabilitiesKnown = $true
+            SupportedVcpCodes = @{ 0x60 = @(0x0F, 0x11, 0x12) }
+        }
+        $script:BareMonitor = [PSCustomObject]@{
+            Name = "Bare panel"; IdentityKey = "edid:bare"; CapabilitiesKnown = $false
+            SupportedVcpCodes = @{}
+        }
+    }
+
+    It "falls back to the built-in table when nothing is advertised or saved" {
+        $map = @(Get-MonitorInputSourceMap -Monitor $script:BareMonitor)
+
+        @($map | ForEach-Object { [string]$_.Source } | Select-Object -Unique) | Should -Be @("Default")
+        @($map | ForEach-Object { [int]$_.Value }) | Should -Be @(0x11, 0x12, 0x0F, 0x10, 0x13, 0x03, 0x01)
+    }
+
+    It "pre-populates from the capability string when the monitor advertises values" {
+        $map = @(Get-MonitorInputSourceMap -Monitor $script:AdvertisedMonitor)
+
+        @($map | ForEach-Object { [int]$_.Value }) | Should -Be @(0x0F, 0x11, 0x12)
+        @($map | ForEach-Object { [string]$_.Source } | Select-Object -Unique) | Should -Be @("Capability")
+        @($map | ForEach-Object { [string]$_.Label }) | Should -Be @("DisplayPort 1", "HDMI 1", "HDMI 2")
+    }
+
+    It "names a vendor value that has no standard description" {
+        Get-InputSourceLabelForValue -Value 0xD0 | Should -Be "Input 0xD0"
+        Get-InputSourceLabelForValue -Value 0x11 | Should -Be "HDMI 1"
+    }
+
+    It "lets a saved custom table override both defaults and advertised values" {
+        Set-MonitorInputSourceSettings -Monitor $script:AdvertisedMonitor -Sources @(
+            [PSCustomObject]@{ Value = 0xD0; Label = "LG USB-C" },
+            [PSCustomObject]@{ Value = 0x11; Label = "Desk HDMI" }
+        ) -SingleByte $false | Should -BeTrue
+
+        $map = @(Get-MonitorInputSourceMap -Monitor $script:AdvertisedMonitor)
+
+        @($map | ForEach-Object { [int]$_.Value }) | Should -Be @(0xD0, 0x11)
+        @($map | ForEach-Object { [string]$_.Source } | Select-Object -Unique) | Should -Be @("Custom")
+        @($map | ForEach-Object { [string]$_.Label }) | Should -Be @("LG USB-C", "Desk HDMI")
+    }
+
+    It "rejects out-of-range values, keeps the first of a duplicate, and names an unlabelled entry" {
+        $records = @(ConvertTo-InputSourceRecords -Records @(
+            [PSCustomObject]@{ Value = 256; Label = "Too big" },
+            [PSCustomObject]@{ Value = -1; Label = "Negative" },
+            [PSCustomObject]@{ Value = 0x11; Label = "First" },
+            [PSCustomObject]@{ Value = 0x11; Label = "Duplicate" },
+            [PSCustomObject]@{ Value = 0xD1; Label = "  " },
+            [PSCustomObject]@{ Value = "not a number"; Label = "Bad" }
+        ))
+
+        @($records | ForEach-Object { [int]$_.Value }) | Should -Be @(0x11, 0xD1)
+        @($records | ForEach-Object { [string]$_.Label }) | Should -Be @("First", "Input 0xD1")
+    }
+
+    It "parses hex and decimal editor input and refuses anything else" {
+        ConvertTo-InputSourceValue -Text "0x11" | Should -Be 17
+        ConvertTo-InputSourceValue -Text "0XD0" | Should -Be 208
+        ConvertTo-InputSourceValue -Text " 17 " | Should -Be 17
+        ConvertTo-InputSourceValue -Text "255" | Should -Be 255
+        ConvertTo-InputSourceValue -Text "256" | Should -BeNullOrEmpty
+        ConvertTo-InputSourceValue -Text "0x1FF" | Should -BeNullOrEmpty
+        ConvertTo-InputSourceValue -Text "HDMI" | Should -BeNullOrEmpty
+        ConvertTo-InputSourceValue -Text "" | Should -BeNullOrEmpty
+    }
+
+    It "masks the write and the readback to one byte only when the flag is set" {
+        Resolve-InputSourceWriteValue -Value 0x1100 -SingleByte $false | Should -Be 0x1100
+        Resolve-InputSourceWriteValue -Value 0x1100 -SingleByte $true | Should -Be 0x00
+        Resolve-InputSourceWriteValue -Value 0x11 -SingleByte $true | Should -Be 0x11
+        Resolve-InputSourceReadValue -Value 0x0F11 -SingleByte $true | Should -Be 0x11
+        Resolve-InputSourceReadValue -Value 0x0F11 -SingleByte $false | Should -Be 0x0F11
+    }
+
+    It "persists the mapping and the encoding flag across a reload" {
+        Set-MonitorInputSourceSettings -Monitor $script:AdvertisedMonitor -Sources @(
+            [PSCustomObject]@{ Value = 0xD0; Label = "Vendor" }
+        ) -SingleByte $true | Should -BeTrue
+        (Get-Content -LiteralPath $script:InputSourceSettingsPath -Raw | ConvertFrom-Json).SchemaVersion | Should -Be $script:InputSourceSchemaVersion
+
+        $script:InputSourceOverrides = @{}
+        Import-InputSourceSettings
+
+        Test-MonitorInputSourceSingleByte -Monitor $script:AdvertisedMonitor | Should -BeTrue
+        @(Get-MonitorInputSourceMap -Monitor $script:AdvertisedMonitor | ForEach-Object { [int]$_.Value }) | Should -Be @(0xD0)
+    }
+
+    It "drops the override entirely when the table is cleared and the flag is off" {
+        Set-MonitorInputSourceSettings -Monitor $script:AdvertisedMonitor -Sources @([PSCustomObject]@{ Value = 0xD0; Label = "Vendor" }) -SingleByte $true | Should -BeTrue
+        Set-MonitorInputSourceSettings -Monitor $script:AdvertisedMonitor -Sources @() -SingleByte $false -ClearSources | Should -BeTrue
+
+        Get-InputSourceOverride -IdentityKey "edid:advertised" | Should -BeNullOrEmpty
+        @(Get-MonitorInputSourceMap -Monitor $script:AdvertisedMonitor | ForEach-Object { [string]$_.Source } | Select-Object -Unique) | Should -Be @("Capability")
+    }
+
+    It "keeps a single-byte-only override with no custom table" {
+        Set-MonitorInputSourceSettings -Monitor $script:AdvertisedMonitor -Sources @() -SingleByte $true | Should -BeTrue
+
+        $script:InputSourceOverrides = @{}
+        Import-InputSourceSettings
+
+        Test-MonitorInputSourceSingleByte -Monitor $script:AdvertisedMonitor | Should -BeTrue
+        @(Get-MonitorInputSourceMap -Monitor $script:AdvertisedMonitor | ForEach-Object { [string]$_.Source } | Select-Object -Unique) | Should -Be @("Capability")
+    }
+
+    It "refuses to save against a monitor with no stable identity" {
+        Set-MonitorInputSourceSettings -Monitor ([PSCustomObject]@{ Name = "No identity"; IdentityKey = "" }) -Sources @([PSCustomObject]@{ Value = 0x11; Label = "HDMI" }) -SingleByte $false | Should -BeFalse
+        Set-MonitorInputSourceSettings -Monitor $null -Sources @() -SingleByte $false | Should -BeFalse
+    }
+
+    It "reports the effective mapping with the value each entry actually writes" {
+        $map = @(Get-MonitorInputSourceMap -Monitor $script:BareMonitor)
+
+        $lines = @(Get-InputSourceMappingReportLines -Map $map -SingleByte $true -IncludeRawNames)
+
+        $lines[0] | Should -Match "^  Input source mapping: Default \(7 value\(s\)\); single-byte write: On$"
+        ($lines -join "`n") | Should -Match "0x11 HDMI 1 \(writes 0x11\)"
+    }
+
+    It "redacts a user-typed input label unless raw names are requested" {
+        $map = @([PSCustomObject]@{ Value = 0x11; Label = "Matt's laptop"; Source = "Custom" })
+
+        (@(Get-InputSourceMappingReportLines -Map $map -SingleByte $false) -join "`n") | Should -Match "\[input-label-1\]"
+        (@(Get-InputSourceMappingReportLines -Map $map -SingleByte $false) -join "`n") | Should -Not -Match "Matt"
+        (@(Get-InputSourceMappingReportLines -Map $map -SingleByte $false -IncludeRawNames) -join "`n") | Should -Match "Matt's laptop"
+    }
+
+    It "keeps a shipped label unredacted because the app wrote it" {
+        $map = @([PSCustomObject]@{ Value = 0x11; Label = "HDMI 1"; Source = "Default" })
+
+        (@(Get-InputSourceMappingReportLines -Map $map -SingleByte $false) -join "`n") | Should -Match "HDMI 1"
     }
 }
 
