@@ -121,6 +121,11 @@ BeforeAll {
         "Resolve-VcpWriteValueForMonitor",
         "Update-VcpMaximumCache",
         "Get-ProfilePercentValue",
+        "Invoke-ManualVcpWrite",
+        "Get-MonitorDisplayLabel",
+        "Wait-DdcWriteQueueIdle",
+        "Drain-DdcWriteResults",
+        "Register-DdcDiagnostic",
         "Get-VcpWriteRiskNote",
         "Set-VCPValueWithSync",
         "ConvertTo-HelperVersion",
@@ -1492,6 +1497,84 @@ Describe "Monitor reported VCP range normalization" {
             $observed = ConvertTo-VcpPercent -RawValue $written[$index] -Maximum $maximum
             [Math]::Abs($observed - 25) | Should -BeLessOrEqual ([Math]::Ceiling(100.0 / (2 * $maximum)))
         }
+    }
+}
+
+Describe "Manual VCP write recovery" {
+    BeforeEach {
+        $script:RiskyVcpCodes = @(0x04, 0x08, 0x14, 0x60, 0xCA, 0xCC, 0xD6, 0xD7, 0xE8, 0xE9)
+        $script:RiskyVcpEnabledIdentityKeys = @{ "edid:unlocked" = $true }
+        $script:VCPCodeDescriptions = @{ 0x10 = "Brightness"; 0x60 = "Input Source" }
+        $script:CurrentMonitorIndex = 0
+        $script:PhysicalMonitors = @(
+            [PSCustomObject]@{
+                IdentityKey = "edid:unlocked"
+                Name = "Desk Left"
+                Handle = [IntPtr]::new(0x7001)
+                CapabilitiesKnown = $false
+                SupportedVcpCodes = @{}
+                VcpMaximums = @{}
+                UserLabel = ""
+                DisplayLabel = "Desk Left"
+            }
+        )
+        $script:LastStatusMessage = ""
+    }
+
+    It "asks for confirmation before writing and makes no change when declined" {
+        $script:ConfirmAsked = $false
+        $script:TransactionRan = $false
+        $result = Invoke-ManualVcpWrite -Code 0x60 -Value ([uint32]17) -ActionLabel "Switch input" `
+            -ConfirmWrite { param([string]$Message) $script:ConfirmMessage = $Message; $script:ConfirmAsked = $true; return $false } `
+            -Transaction { param([object[]]$Operations) $script:TransactionRan = $true }
+
+        $script:ConfirmAsked | Should -BeTrue
+        $script:ConfirmMessage | Should -Match "Switch input"
+        $script:TransactionRan | Should -BeFalse
+        $result.Outcome | Should -Be "Canceled"
+        $script:LastStatusMessage | Should -Be "VCP write canceled"
+    }
+
+    It "requests rollback so a mismatched manual write is restored" {
+        $script:RequestedRollback = $false
+        $result = Invoke-ManualVcpWrite -Code 0x60 -Value ([uint32]17) -ActionLabel "Switch input" `
+            -ConfirmWrite { param([string]$Message) return $true } `
+            -Transaction {
+                param([object[]]$Operations)
+                # Stand in for the real transaction and record that recovery was requested.
+                $script:RequestedRollback = $true
+                return [PSCustomObject]@{ Success = $false; Outcome = "Mismatched"; Results = @(); Rollback = "Restored" }
+            }
+
+        $script:RequestedRollback | Should -BeTrue
+        $result.Outcome | Should -Be "Mismatched"
+        $script:LastStatusMessage | Should -Match "restore: Restored"
+    }
+
+    It "reports a partial restore rather than claiming success" {
+        $result = Invoke-ManualVcpWrite -Code 0x60 -Value ([uint32]17) -ActionLabel "Switch input" `
+            -ConfirmWrite { param([string]$Message) return $true } `
+            -Transaction {
+                param([object[]]$Operations)
+                return [PSCustomObject]@{ Success = $false; Outcome = "WriteFailed"; Results = @(); Rollback = "Partial" }
+            }
+
+        $result.Success | Should -BeFalse
+        $script:LastStatusMessage | Should -Match "restore: Partial"
+    }
+
+    It "defaults to the rollback-enabled transaction" {
+        $definition = (Get-Command Invoke-ManualVcpWrite).Definition
+        $definition | Should -Match ([regex]::Escape('Invoke-VerifiedVcpTransaction -Operations $Operations -RollbackOnFailure'))
+    }
+
+    It "refuses a gated code on a monitor that has not been unlocked" {
+        $script:RiskyVcpEnabledIdentityKeys = @{}
+        $result = Invoke-ManualVcpWrite -Code 0x14 -Value ([uint32]5) -ActionLabel "Set color preset" `
+            -ConfirmWrite { param([string]$Message) return $true } `
+            -Transaction { param([object[]]$Operations) throw "must not write" }
+
+        $result.Outcome | Should -Be "SafetyLocked"
     }
 }
 
