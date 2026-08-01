@@ -138,6 +138,7 @@ public static class MonitorControlVcpWriteProbe
     }
 
     Import-MonitorControlFunctions -Name @(
+        "Import-MonitorControlNativeApi",
         "Set-DeferredStatus",
         "Test-JsonFileValid",
         "Move-CorruptJsonFile",
@@ -636,6 +637,23 @@ Describe "Build-time source composition" {
             param($node)
             $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
         }, $true)).Count | Should -Be 0
+    }
+}
+
+Describe "Native API startup compilation" {
+    It "names the inline C# block and preserves compiler diagnostics on failure" {
+        {
+            Import-MonitorControlNativeApi -TypeDefinition "broken" -TypeExists { $false } -CompileType {
+                param([string]$Definition)
+                throw "CS1002: ; expected"
+            }
+        } | Should -Throw -ExpectedMessage "*MonitorControl inline C# block failed to compile*CS1002*"
+    }
+
+    It "fails immediately when compilation does not create MonitorAPI" {
+        {
+            Import-MonitorControlNativeApi -TypeDefinition "empty" -TypeExists { $false } -CompileType { param([string]$Definition) }
+        } | Should -Throw -ExpectedMessage "*expected type MonitorAPI was not created*"
     }
 }
 
