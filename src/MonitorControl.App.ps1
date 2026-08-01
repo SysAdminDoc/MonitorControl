@@ -806,7 +806,28 @@ public class AmdAdlInterop
 }
 "@
 
-try { Add-Type -TypeDefinition $nativeCode -ErrorAction SilentlyContinue } catch {}
+function Import-MonitorControlNativeApi {
+    param([string]$TypeDefinition, [scriptblock]$CompileType, [scriptblock]$TypeExists)
+    if ($null -eq $TypeExists) { $TypeExists = { return $null -ne ("MonitorAPI" -as [type]) } }
+    if (& $TypeExists) { return $true }
+    if ($null -eq $CompileType) {
+        $CompileType = {
+            param([string]$Definition)
+            Add-Type -TypeDefinition $Definition -ErrorAction Stop | Out-Null
+        }
+    }
+    try {
+        & $CompileType $TypeDefinition
+    } catch {
+        throw "MonitorControl inline C# block failed to compile: $($_.Exception.Message)"
+    }
+    if (-not (& $TypeExists)) {
+        throw "MonitorControl inline C# block failed to compile: expected type MonitorAPI was not created"
+    }
+    return $true
+}
+
+Import-MonitorControlNativeApi -TypeDefinition $nativeCode | Out-Null
 try { [MonitorAPI]::SetProcessDpiAwarenessContext([IntPtr](-4)) | Out-Null } catch {}
 
 function Set-DeferredStatus {
