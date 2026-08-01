@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    MonitorControl Pro v3.37.0 - Advanced Display & GPU Settings Utility
+    MonitorControl Pro - Advanced Display & GPU Settings Utility
 .DESCRIPTION
     Comprehensive GUI for monitor DDC/CI control with VCP explorer, input switching,
     color temperature presets, sync across monitors, and time-based automation.
 .NOTES
-    Version: 3.37.0 - Named causes for missing DDC control and per-monitor DDC timing
+    Version metadata is loaded by the development launcher.
 #>
 
 param(
@@ -19,6 +19,18 @@ param(
 )
 
 $script:MonitorControlRoot = $PSScriptRoot
+$metadataPath = Join-Path $script:MonitorControlRoot "src\MonitorControl.Metadata.psd1"
+if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) {
+    throw "MonitorControl metadata is missing: $metadataPath"
+}
+$metadata = $null
+Import-LocalizedData -BindingVariable metadata -BaseDirectory (Split-Path $metadataPath) -FileName (Split-Path $metadataPath -Leaf)
+$script:MonitorControlMetadata = $metadata
+$script:AppName = [string]$script:MonitorControlMetadata.AppName
+$script:AppVersion = [string]$script:MonitorControlMetadata.Version
+if ([string]::IsNullOrWhiteSpace($script:AppName) -or $script:AppVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
+    throw "MonitorControl metadata is invalid: $metadataPath"
+}
 $sourceManifestPath = Join-Path $script:MonitorControlRoot "src\MonitorControl.sources"
 if (-not (Test-Path -LiteralPath $sourceManifestPath -PathType Leaf)) {
     throw "MonitorControl source manifest is missing: $sourceManifestPath"

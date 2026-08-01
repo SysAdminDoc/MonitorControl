@@ -1,7 +1,7 @@
 # MonitorControl Pro
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v3.37.0-brightgreen" alt="Version v3.37.0">
+  <img src="https://img.shields.io/github/v/release/SysAdminDoc/MonitorControl?label=version" alt="Latest release">
   <img src="https://img.shields.io/badge/PowerShell-5.1+-blue?logo=powershell" alt="PowerShell 5.1+">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/DDC%2FCI-Supported-green" alt="DDC/CI">
@@ -88,12 +88,22 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 
 ## Requirements
 
-- **Windows 10/11**
+- **Windows 11**, or a security-supported Windows 10 ESU/LTSC installation
 - **PowerShell 5.1+** (included with Windows)
 - **DDC/CI Compatible Monitor** — Most modern monitors support this; ensure it's enabled in your monitor's OSD settings
 - **NVIDIA or AMD GPU** (optional) — For GPU monitoring tab
 - **LibreHardwareMonitorLib.dll or OpenHardwareMonitorLib.dll** (optional, 0.9.0+) — For CPU temperature on the hardware tab. Disabled until you enable it under **System > Integrations**
 - **PresentMon.exe** (optional, 1.6+) — For FPS overlay capture on the hardware tab. Disabled until you enable it under **System > Integrations**
+
+Release validation uses this supported-Windows matrix:
+
+| Windows lane | Servicing requirement | Required validation |
+|---|---|---|
+| Windows 11 | A currently supported feature release | Full no-hardware suite, analyzer, release build, and standard plus high-contrast WPF smoke tests |
+| Windows 10 22H2 | Enrolled in Extended Security Updates (ESU) | No-hardware suite, release build, and WPF startup compatibility |
+| Windows 10 Enterprise LTSC 2021 | Serviced through January 12, 2027 | No-hardware suite, release build, and WPF startup compatibility |
+
+Windows 10 Home and Pro reached end of support on October 14, 2025 and are unsupported without ESU. See Microsoft's [Windows 10 end-of-support notice](https://learn.microsoft.com/en-us/lifecycle/announcements/windows-10-end-of-support), [ESU guidance](https://learn.microsoft.com/en-us/windows/whats-new/extended-security-updates), and [LTSC 2021 lifecycle](https://learn.microsoft.com/en-us/lifecycle/products/windows-10-enterprise-ltsc-2021).
 
 ## Installation
 
@@ -123,7 +133,7 @@ $Shortcut.Save()
 .\tools\build-release.ps1
 ```
 
-The release builder composes the source modules into one PowerShell 5.1-compatible script, writes an unsigned `dist\MonitorControlPro-vX.Y.Z.zip`, and includes `SIGNING.txt` plus `SHA256SUMS` in the ZIP. The portable ZIP does not require the development `src` directory.
+Run the release builder under Windows PowerShell 5.1. It reads the canonical version from `src\MonitorControl.Metadata.psd1`, composes the source modules into one portable script, and writes an unsigned `dist\MonitorControlPro-vX.Y.Z.zip`. The ZIP includes `RELEASE.json`, `SIGNING.txt`, and `SHA256SUMS`; entry order and timestamps are deterministic. Set `SOURCE_DATE_EPOCH` to reproduce an earlier build byte for byte under the same pinned runtime. The portable ZIP does not require the development `src` directory.
 
 ### Run No-Hardware Tests
 ```powershell
@@ -506,6 +516,7 @@ The full breakdown - every display path, its classification, and whether it answ
 ### Source Architecture
 
 - `MonitorControlPro.ps1` is the development launcher and preserves the public command-line switches.
+- `src\MonitorControl.Metadata.psd1` is the single source for the application name and semantic version used by the launcher, UI, diagnostics, profile exports, and release artifacts.
 - `src\MonitorControl.Core.psm1`, `Storage`, `Ddc`, `Automation`, and `Bridge` contain testable function definitions without WPF globals.
 - `src\MonitorControl.App.ps1` owns native type initialization, XAML, UI binding, handlers, and startup.
 - `tools\compile.ps1` composes those sources into the single portable script used by tests and release builds, and rejects duplicate function definitions or invalid PowerShell syntax.

@@ -1,5 +1,9 @@
 # Changelog
 
+- Changed: application name and version metadata now come from one canonical data file, and the launcher, UI, diagnostics, profile exports, release filenames, and artifact manifest consume that value.
+- Changed: portable releases are pinned to Windows PowerShell 5.1 and use an ordinal ZIP entry order plus `SOURCE_DATE_EPOCH` timestamps for byte-identical rebuilds; release output cleanup is restricted to validated exact targets.
+- Changed: the support matrix now distinguishes current Windows 11 releases from Windows 10 ESU and LTSC compatibility lanes.
+
 All notable changes to MonitorControl will be documented in this file.
 
 ## [Unreleased]

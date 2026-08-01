@@ -2033,7 +2033,7 @@ function New-DdcCompatibilityReport {
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.AppendLine("MonitorControl Pro DDC Compatibility Report")
     [void]$sb.AppendLine("Generated: $((Get-Date).ToString("yyyy-MM-dd HH:mm:ss zzz"))")
-    [void]$sb.AppendLine("App version: 3.37.0")
+    [void]$sb.AppendLine("App version: $script:AppVersion")
     [void]$sb.AppendLine("OS: $($system.OS)")
     [void]$sb.AppendLine("PowerShell: $($system.PowerShell)")
     [void]$sb.AppendLine("Probe safety: read-only probes only; risky codes are never written automatically and power, input, reset, PiP/PbP, OSD, and arbitrary codes are not queried")

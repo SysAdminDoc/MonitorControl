@@ -3623,6 +3623,9 @@ Describe "Unsigned release packaging" {
     BeforeAll {
         $script:BuildReleasePath = Join-Path $script:RepoRoot "tools\build-release.ps1"
         $script:BuildReleaseText = Get-Content -LiteralPath $script:BuildReleasePath -Raw
+        $releaseMetadata = $null
+        Import-LocalizedData -BindingVariable releaseMetadata -BaseDirectory (Join-Path $script:RepoRoot "src") -FileName "MonitorControl.Metadata.psd1"
+        $script:ReleaseMetadata = $releaseMetadata
     }
 
     It "cannot invoke Authenticode signing" {
@@ -3632,6 +3635,55 @@ Describe "Unsigned release packaging" {
 
     It "packages the screenshot referenced by the README" {
         $script:BuildReleaseText | Should -Match 'Copy-Item -LiteralPath \$screenshotPath'
+    }
+
+    It "uses one canonical version for every generated surface" {
+        $script:ReleaseMetadata.Version | Should -Match '^[0-9]+\.[0-9]+\.[0-9]+$'
+
+        $compiledText = [System.IO.File]::ReadAllText($script:AppPath)
+        $compiledText | Should -Match ('\$script:AppVersion = "{0}"' -f [regex]::Escape($script:ReleaseMetadata.Version))
+        foreach ($relativePath in @(
+            "MonitorControlPro.ps1",
+            "src\MonitorControl.App.ps1",
+            "src\MonitorControl.Ddc.psm1",
+            "tools\build-release.ps1",
+            "README.md"
+        )) {
+            [System.IO.File]::ReadAllText((Join-Path $script:RepoRoot $relativePath)) |
+                Should -Not -Match [regex]::Escape($script:ReleaseMetadata.Version)
+        }
+    }
+
+    It "rejects a dangerous output root before packaging" {
+        { & $script:BuildReleasePath -OutputRoot $script:RepoRoot } |
+            Should -Throw "*protected directory*"
+    }
+
+    It "creates byte-identical releases from the same source epoch" {
+        $previousEpoch = $env:SOURCE_DATE_EPOCH
+        try {
+            $env:SOURCE_DATE_EPOCH = "1704067200"
+            $first = & $script:BuildReleasePath -OutputRoot (Join-Path $TestDrive "release-one")
+            $second = & $script:BuildReleasePath -OutputRoot (Join-Path $TestDrive "release-two")
+
+            $first.Version | Should -Be $script:ReleaseMetadata.Version
+            $first.Sha256 | Should -Be $second.Sha256
+            $firstBytes = [System.IO.File]::ReadAllBytes($first.ZipPath)
+            $secondBytes = [System.IO.File]::ReadAllBytes($second.ZipPath)
+            $firstBytes.Length | Should -Be $secondBytes.Length
+            $bytesMatch = $true
+            for ($index = 0; $index -lt $firstBytes.Length; $index++) {
+                if ($firstBytes[$index] -ne $secondBytes[$index]) { $bytesMatch = $false; break }
+            }
+            $bytesMatch | Should -BeTrue
+            $manifest = Get-Content -LiteralPath (Join-Path (Split-Path $first.ZipPath) "MonitorControlPro-v$($first.Version)\RELEASE.json") -Raw | ConvertFrom-Json
+            $manifest.Version | Should -Be $first.Version
+            $manifest.SourceDateEpoch | Should -Be 1704067200
+            $manifest.Runtime | Should -Be "Windows PowerShell 5.1"
+            $manifest.Signing | Should -Be "Unsigned"
+        } finally {
+            $env:SOURCE_DATE_EPOCH = $previousEpoch
+        }
     }
 }
 
