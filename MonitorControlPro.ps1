@@ -31,6 +31,7 @@ param(
     [string]$Theme = "System",
     [ValidateRange(0, 200)]
     [int]$TextScalePercent = 0,
+    [string]$Culture = "",
     [string]$RenderDirectory = ""
 )
 

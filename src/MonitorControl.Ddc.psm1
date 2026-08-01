@@ -1097,7 +1097,7 @@ function Get-Monitors {
     }
     Sync-DisplayRecoveryInventory
     if ($script:DdcAvailabilityDiagnosis -and [string]$script:DdcAvailabilityDiagnosis.Severity -ne "None") {
-        Update-Status ([string]$script:DdcAvailabilityDiagnosis.Headline)
+        Update-Status ([string]$script:DdcAvailabilityDiagnosis.Headline) -Severity ([string]$script:DdcAvailabilityDiagnosis.Severity) -Key "Status.DdcAvailability"
     }
     } finally {
         if (-not [MonitorAPI]::ResumeVCPWrites()) {

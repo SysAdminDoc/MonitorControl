@@ -353,7 +353,15 @@ public static class MonitorControlVcpWriteProbe
         "Get-WcagRelativeLuminance",
         "Get-WcagContrastRatio",
         "Resolve-TextScaleFactor",
-        "Get-StatusMessageSeverity",
+        "Resolve-StatusSeverity",
+        "Resolve-UiCultureName",
+        "Get-UiCultureInfo",
+        "ConvertTo-PseudoLocalizedText",
+        "Get-UiResourceKey",
+        "Get-UiString",
+        "Get-UiRuntimeText",
+        "Format-UiNumber",
+        "Format-UiDateTime",
         "Get-NavigationShortcutTarget",
         "Get-CliExitCodes",
         "New-CliEnvelope",
@@ -3733,13 +3741,79 @@ Describe "System-aware accessibility contract" {
         $script:AccessibilitySource | Should -Match 'Get-NavigationShortcutTarget -Key'
     }
 
-    It "classifies actionable alerts and exposes stable navigation shortcuts" {
-        Get-StatusMessageSeverity -Message "Profile import failed" | Should -Be "Error"
-        Get-StatusMessageSeverity -Message "VCP write queue is busy; try again" | Should -Be "Warning"
-        Get-StatusMessageSeverity -Message "Saved profile" | Should -Be "Info"
+    It "carries alert severity as data and exposes stable navigation shortcuts" {
+        Resolve-StatusSeverity -Severity "Error" | Should -Be "Error"
+        Resolve-StatusSeverity -Severity "Warning" | Should -Be "Warning"
+        Resolve-StatusSeverity -Severity "anything else" | Should -Be "Info"
+        $script:AccessibilitySource | Should -Not -Match 'Get-StatusMessageSeverity'
+        $script:AccessibilitySource | Should -Match 'Update-Status "Invalid VCP code" -Severity Error'
         Get-NavigationShortcutTarget -Key "d" | Should -Be "Display"
         Get-NavigationShortcutTarget -Key "S" | Should -Be "System"
         Get-NavigationShortcutTarget -Key "x" | Should -Be ""
+    }
+}
+
+Describe "Culture resources and pseudo-localization" {
+    BeforeEach {
+        $script:UiCulture = "en-US"
+        $script:UiCultureResources = @{
+            "en-US" = @{ "Action.Save" = "Save"; "Status.Template" = "Saved {0} item(s)" }
+        }
+    }
+
+    It "defaults to the Windows UI culture and rejects an invalid explicit culture" {
+        Resolve-UiCultureName -WindowsCulture "fr-FR" | Should -Be "fr-FR"
+        Resolve-UiCultureName -RequestedCulture "qps-ploc" -WindowsCulture "en-US" | Should -Be "qps-ploc"
+        { Resolve-UiCultureName -RequestedCulture "not_a_culture!" } | Should -Throw "*Unknown UI culture*"
+    }
+
+    It "falls back to English by invariant key" {
+        $script:UiCulture = "fr-FR"
+        Get-UiString -Key "Action.Save" | Should -Be "Save"
+        Get-UiString -Key "Missing.Key" | Should -Be "Missing.Key"
+    }
+
+    It "produces expanded accented pseudo text without damaging format items" {
+        $pseudo = ConvertTo-PseudoLocalizedText -Text "Saved {0} item(s)"
+        $pseudo | Should -Match '^\[!! '
+        $pseudo | Should -Match '\{0\}'
+        $pseudo.Length | Should -BeGreaterThan ([int]("Saved {0} item(s)".Length * 1.2))
+        @($pseudo.ToCharArray() | Where-Object { [int]$_ -gt 127 }).Count | Should -BeGreaterThan 0
+        ConvertTo-PseudoLocalizedText -Text "MC" | Should -Be "MC"
+
+        $script:UiCulture = "qps-ploc"
+        (Get-UiString -Key "Status.Template" -ArgumentList @((Format-UiNumber -Value 3 -Format "N0"))) | Should -Match '3'
+    }
+
+    It "formats UI dates and numbers with the selected culture" {
+        $script:UiCulture = "fr-FR"
+        $culture = [System.Globalization.CultureInfo]::GetCultureInfo("fr-FR")
+        Format-UiNumber -Value 1234.5 -Format "N1" | Should -Be (([double]1234.5).ToString("N1", $culture))
+        $date = [DateTime]::new(2026, 8, 1, 13, 45, 0)
+        Format-UiDateTime -Value $date -Format "g" | Should -Be $date.ToString("g", $culture)
+    }
+
+    It "registers runtime defaults under deterministic culture-invariant keys" {
+        $first = Get-UiResourceKey -Category "Status" -DefaultText "Saved profile"
+        $second = Get-UiResourceKey -Category "Status" -DefaultText "Saved profile"
+        $first | Should -Be $second
+        $first | Should -Match '^Status\.[0-9a-f]{16}$'
+        Get-UiRuntimeText -Category "Status" -DefaultText "Saved profile" | Should -Be "Saved profile"
+        $script:UiCultureResources["en-US"].ContainsKey($first) | Should -BeTrue
+    }
+
+    It "routes the complete loaded control tree and runtime status through culture resources" {
+        $source = [System.IO.File]::ReadAllText($script:AppPath)
+        $source | Should -Match '\$windowsUiCulture = \[System\.Globalization\.CultureInfo\]::CurrentUICulture\.Name'
+        $source | Should -Match 'Register-UiControlResources -Root \$window -RootKey "Main"'
+        $source | Should -Match 'foreach \(\$propertyName in @\("Text", "Content", "Header", "ToolTip"\)\)'
+        $source | Should -Match 'Register-UiDynamicStringObserver'
+        $source | Should -Match 'AutomationProperties\]::GetName'
+        $source | Should -Match 'Get-UiRuntimeText -Category "Status"'
+        ([regex]::Matches($source, '\[System\.Windows\.MessageBox\]::Show')).Count | Should -Be 1
+        $source | Should -Match 'Show-UiMessage -Message'
+        $source | Should -Match 'Register-UiControlResources -Root \$script:TrayPopup -RootKey "Tray"'
+        $source | Should -Match 'ToolStripMenuItem\(\(Get-UiRuntimeText'
     }
 }
 
@@ -3911,8 +3985,7 @@ Describe "Named causes for unavailable DDC control" {
     BeforeAll {
         Import-MonitorControlFunctions -Name @(
             "ConvertTo-DriverVersionParts", "Compare-DisplayDriverVersion", "Test-DisplayDriverVersionInRange",
-            "Get-GpuDriverAdvisory", "Get-DisplayPathClassification", "Get-DdcAvailabilityDiagnosis",
-            "Get-StatusMessageSeverity"
+            "Get-GpuDriverAdvisory", "Get-DisplayPathClassification", "Get-DdcAvailabilityDiagnosis"
         )
 
         # Mirrors the shipped table so the tests exercise the real signatures rather than fixtures.
@@ -4048,12 +4121,11 @@ Describe "Named causes for unavailable DDC control" {
     It "raises the alert banner for both the unavailable and the partial headline" {
         $none = Get-DdcAvailabilityDiagnosis -Paths @((New-PathEntry -Name "Panel" -Kind "Direct" -HasControlChannel $false)) -GpuAdvisories @() -WmiBrightnessAvailable $false
         $none.Severity | Should -Be "Error"
-        Get-StatusMessageSeverity -Message $none.Headline | Should -Be "Error"
         $none.Headline | Should -Match "DDC Compatibility Report"
 
         $partial = Get-DdcAvailabilityDiagnosis -Paths @((New-PathEntry -Name "One"), (New-PathEntry -Name "Two" -Kind "Direct" -HasControlChannel $false)) -GpuAdvisories @() -WmiBrightnessAvailable $false
         $partial.Severity | Should -Be "Warning"
-        Get-StatusMessageSeverity -Message $partial.Headline | Should -Be "Warning"
+        ([System.IO.File]::ReadAllText($script:AppPath)) | Should -Match 'DdcAvailabilityDiagnosis\.Headline\) -Severity \(\[string\]\$script:DdcAvailabilityDiagnosis\.Severity\)'
     }
 
     It "never hands a bare $null to a string P/Invoke parameter" {

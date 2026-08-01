@@ -86,8 +86,8 @@ $windowsPowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\
 if ($LASTEXITCODE -ne 0) { throw "The deterministic Pester lane failed with exit code $LASTEXITCODE." }
 & $windowsPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot "tests\MonitorControl.WpfSmoke.ps1") -Quiet
 if ($LASTEXITCODE -ne 0) { throw "The WPF smoke lane failed with exit code $LASTEXITCODE." }
-& $windowsPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot "tests\MonitorControl.WpfSmoke.ps1") -Quiet -AppTheme HighContrast -TextScalePercent 200 -ResizeToMinimum -ExerciseValidationAlert
-if ($LASTEXITCODE -ne 0) { throw "The high-contrast and 200% text WPF smoke lane failed with exit code $LASTEXITCODE." }
+& $windowsPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot "tests\MonitorControl.WpfSmoke.ps1") -Quiet -AppTheme HighContrast -TextScalePercent 200 -UiCulture qps-ploc -ResizeToMinimum -ExerciseValidationAlert
+if ($LASTEXITCODE -ne 0) { throw "The high-contrast, pseudo-localized, and 200% text WPF smoke lane failed with exit code $LASTEXITCODE." }
 
 $verificationRoot = Join-Path ([System.IO.Path]::GetTempPath()) "MonitorControl-Verify-$([guid]::NewGuid().ToString('N'))"
 try {
@@ -103,4 +103,4 @@ try {
     Remove-ValidatedVerificationDirectory -Path $verificationRoot
 }
 
-Write-Host "Verification passed: Pester $PesterVersion, standard and accessible WPF smokes, and unsigned release build."
+Write-Host "Verification passed: Pester $PesterVersion, standard and pseudo-localized accessible WPF smokes, and unsigned release build."

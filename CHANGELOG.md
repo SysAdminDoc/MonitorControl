@@ -1,5 +1,7 @@
 # Changelog
 
+- Added: the UI now selects the Windows display language by default, resolves static, runtime, tray, dialog, and automation-accessible text through invariant resource keys with English fallback, and formats displayed values with the selected culture. A `-Culture` override and expanded/accented `qps-ploc` pseudo-locale exercise localization without requiring a translated build.
+- Changed: alert severity is explicit data instead of an English-text classifier, and the 200% high-contrast smoke lane now drives pseudo-localized navigation, validation alerts, reflow, and visible-control geometry.
 - Added: a headless `list`, `get`, `set`, `profile`, and `diagnostics` command line runs without WPF, targets stable monitor identities, supports human text or a schema-v1 JSON envelope, and terminates a hung native worker at a documented timeout.
 - Added: CLI writes share capability validation, per-identity risky-write unlocks, verified readback, and rollback with the GUI; set-if-needed, relative delta, comma-list cycling, and terse percentage-brightness/input aliases cover one-shot automation without prompts.
 - Added: profile deletion now stores the exact profile and its removed application/schedule rules in bounded local Trash; the Profiles tab can restore the newest deletion across restarts or permanently empty Trash through a separate confirmation.
