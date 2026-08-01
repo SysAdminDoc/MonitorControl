@@ -4,6 +4,7 @@ All notable changes to MonitorControl will be documented in this file.
 
 ## [Unreleased]
 
+- Fixed: the per-monitor capability retry budget and calibrated retry delay now reach the capability worker, and VCP Explorer Query/Scan use the same effective per-monitor read timing. Retries remain off the WPF dispatcher and report their actual attempt count.
 - Fixed: profile deletion now confirms the profile file is gone before removing application rules or schedules. Locked and otherwise undeletable profiles leave all state untouched with an explicit error, while a dependent metadata-save failure restores the original profile and automation state.
 - Fixed: monitor refresh and shutdown now cancel queued DDC writes, reject new queue entries during teardown, and wait for any in-flight native call to release its handle before destruction. A timeout aborts destruction with an explicit error instead of passing a freed physical-monitor handle to the background worker.
 - Fixed: DDC value observations now expire after five minutes so panel OSD changes, other DDC tools, and self-reverting monitors cannot suppress a needed write indefinitely. Direct control changes always bypass suppression, repeating automation retains write-wear protection with a read-before-write after expiry, and System now offers a selected-monitor **Re-read values** action.
