@@ -141,6 +141,13 @@ BeforeAll {
         "Resolve-VcpWriteValueForMonitor",
         "Update-VcpMaximumCache",
         "Get-ProfilePercentValue",
+        "Get-DisplayStateRestoreSettingsObject",
+        "Save-DisplayStateRestoreSettings",
+        "Import-DisplayStateRestoreSettings",
+        "Set-DisplayStateRestoreValue",
+        "Get-DisplayStateRestorePlan",
+        "Invoke-DisplayStateRestore",
+        "Test-MonitorSupportsVcp",
         "Stop-MonitorSettingsWorker",
         "Stop-CapabilitiesWorker",
         "Stop-VcpWorker",
@@ -1527,6 +1534,107 @@ Describe "Monitor reported VCP range normalization" {
             $observed = ConvertTo-VcpPercent -RawValue $written[$index] -Maximum $maximum
             [Math]::Abs($observed - 25) | Should -BeLessOrEqual ([Math]::Ceiling(100.0 / (2 * $maximum)))
         }
+    }
+}
+
+Describe "Brightness restore after launch and resume" {
+    BeforeEach {
+        Get-ChildItem -LiteralPath $TestDrive -Force | Remove-Item -Recurse -Force
+        $script:DisplayStateRestoreSettingsPath = Join-Path $TestDrive "display-restore.json"
+        $script:DisplayStateRestoreSchemaVersion = 1
+        $script:DisplayStateRestoreEnabled = $false
+        $script:DisplayStateRestoreValues = @{}
+        $script:DisplayStateRestoreGeneration = -1
+        $script:VcpScaledCodes = @(0x10, 0x12, 0x16, 0x18, 0x1A, 0x62, 0x87)
+        $script:VcpDefaultMaximum = 100
+        $script:LastStatusMessage = ""
+    }
+
+    It "writes nothing while restore is disabled" {
+        $monitors = @([PSCustomObject]@{ IdentityKey = "edid:a"; Name = "A"; DisplayLabel = "A"; Handle = [IntPtr]::new(0x11); VcpMaximums = @{}; CapabilitiesKnown = $false; SupportedVcpCodes = @{} })
+        $plan = Get-DisplayStateRestorePlan -Monitors $monitors -Remembered @{ "edid:a" = [PSCustomObject]@{ Brightness = 40 } } -Enabled $false
+        @($plan.Operations).Count | Should -Be 0
+    }
+
+    It "maps a remembered percentage onto each monitor's own range" {
+        $monitors = @(
+            [PSCustomObject]@{ IdentityKey = "edid:narrow"; Name = "N"; DisplayLabel = "N"; Handle = [IntPtr]::new(0x11); VcpMaximums = @{ 0x10 = 31 }; CapabilitiesKnown = $false; SupportedVcpCodes = @{} },
+            [PSCustomObject]@{ IdentityKey = "edid:wide"; Name = "W"; DisplayLabel = "W"; Handle = [IntPtr]::new(0x12); VcpMaximums = @{ 0x10 = 255 }; CapabilitiesKnown = $false; SupportedVcpCodes = @{} }
+        )
+        $remembered = @{
+            "edid:narrow" = [PSCustomObject]@{ Brightness = 50 }
+            "edid:wide" = [PSCustomObject]@{ Brightness = 50 }
+        }
+        $plan = Get-DisplayStateRestorePlan -Monitors $monitors -Remembered $remembered -Enabled $true
+
+        @($plan.Operations).Count | Should -Be 2
+        @($plan.Operations | Where-Object { $_.MonitorName -eq "N" }).Value | Should -Be 16
+        @($plan.Operations | Where-Object { $_.MonitorName -eq "W" }).Value | Should -Be 128
+    }
+
+    It "skips a monitor and says why when it cannot be restored" {
+        $monitors = @(
+            [PSCustomObject]@{ IdentityKey = ""; Name = "NoIdentity"; DisplayLabel = "NoIdentity"; Handle = [IntPtr]::new(0x11); VcpMaximums = @{}; CapabilitiesKnown = $false; SupportedVcpCodes = @{} },
+            [PSCustomObject]@{ IdentityKey = "edid:unknown"; Name = "Unknown"; DisplayLabel = "Unknown"; Handle = [IntPtr]::new(0x12); VcpMaximums = @{}; CapabilitiesKnown = $false; SupportedVcpCodes = @{} },
+            [PSCustomObject]@{ IdentityKey = "edid:nohandle"; Name = "NoHandle"; DisplayLabel = "NoHandle"; Handle = [IntPtr]::Zero; VcpMaximums = @{}; CapabilitiesKnown = $false; SupportedVcpCodes = @{} },
+            [PSCustomObject]@{ IdentityKey = "edid:unsupported"; Name = "Unsupported"; DisplayLabel = "Unsupported"; Handle = [IntPtr]::new(0x14); VcpMaximums = @{}; CapabilitiesKnown = $true; SupportedVcpCodes = @{ 0x12 = @() } }
+        )
+        $remembered = @{
+            "edid:nohandle" = [PSCustomObject]@{ Brightness = 40 }
+            "edid:unsupported" = [PSCustomObject]@{ Brightness = 40 }
+        }
+        $plan = Get-DisplayStateRestorePlan -Monitors $monitors -Remembered $remembered -Enabled $true
+
+        @($plan.Operations).Count | Should -Be 0
+        @($plan.Skipped).Count | Should -Be 4
+        (@($plan.Skipped | Where-Object { $_.Monitor -eq "NoIdentity" }).Reason) | Should -Be "no stable identity"
+        (@($plan.Skipped | Where-Object { $_.Monitor -eq "Unknown" }).Reason) | Should -Be "nothing remembered"
+        (@($plan.Skipped | Where-Object { $_.Monitor -eq "NoHandle" }).Reason) | Should -Be "no DDC/CI handle"
+        (@($plan.Skipped | Where-Object { $_.Monitor -eq "Unsupported" }).Reason) | Should -Be "brightness not reported"
+    }
+
+    It "rejects an out-of-range remembered value" {
+        Set-DisplayStateRestoreValue -IdentityKey "edid:a" -BrightnessPercent 101 | Should -BeFalse
+        Set-DisplayStateRestoreValue -IdentityKey "edid:a" -BrightnessPercent -1 | Should -BeFalse
+        Set-DisplayStateRestoreValue -IdentityKey "" -BrightnessPercent 40 | Should -BeFalse
+        Set-DisplayStateRestoreValue -IdentityKey "edid:a" -BrightnessPercent 40 | Should -BeTrue
+        $script:DisplayStateRestoreValues["edid:a"].Brightness | Should -Be 40
+    }
+
+    It "round-trips remembered values through disk" {
+        $script:DisplayStateRestoreEnabled = $true
+        Set-DisplayStateRestoreValue -IdentityKey "edid:a" -BrightnessPercent 35 | Out-Null
+        Set-DisplayStateRestoreValue -IdentityKey "edid:b" -BrightnessPercent 80 | Out-Null
+        Save-DisplayStateRestoreSettings | Out-Null
+
+        $script:DisplayStateRestoreEnabled = $false
+        $script:DisplayStateRestoreValues = @{}
+        Import-DisplayStateRestoreSettings
+
+        $script:DisplayStateRestoreEnabled | Should -BeTrue
+        $script:DisplayStateRestoreValues["edid:a"].Brightness | Should -Be 35
+        $script:DisplayStateRestoreValues["edid:b"].Brightness | Should -Be 80
+    }
+
+    It "stays disabled for a settings file from a newer build" {
+        $future = [PSCustomObject]@{ SchemaVersion = 99; Enabled = $true; Monitors = @() }
+        Write-JsonFileSafely -Path $script:DisplayStateRestoreSettingsPath -Data $future -Depth 5 | Out-Null
+
+        Import-DisplayStateRestoreSettings
+
+        $script:DisplayStateRestoreEnabled | Should -BeFalse
+        $script:LastStatusMessage | Should -Match "schema v99"
+    }
+
+    It "restores at most once per recovery generation" {
+        $script:DisplayStateRestoreEnabled = $true
+        $script:DisplayStateRestoreValues = @{ "edid:a" = [PSCustomObject]@{ Brightness = 40 } }
+        $script:PhysicalMonitors = @()
+
+        # No monitors means no operations, but the generation guard must still latch.
+        Invoke-DisplayStateRestore -Generation 7 -Reason "test" | Should -BeFalse
+        $script:DisplayStateRestoreGeneration | Should -Be 7
+        Invoke-DisplayStateRestore -Generation 7 -Reason "test" | Should -BeFalse
     }
 }
 
