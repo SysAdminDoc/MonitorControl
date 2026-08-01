@@ -1186,7 +1186,6 @@ Describe "Automation bridge protected settings and routing" {
         $script:AutomationBridgeBindAddress = "127.0.0.1"
         $script:AutomationBridgePort = 34291
         $script:AutomationBridgeApiKey = "bridge-secret-0123456789abcdef"
-        $script:AutomationBridgeMqttEnabled = $false
         $script:AutomationBridgeAllowedCommands = @("list", "readBrightness", "setBrightness", "loadProfile")
         $script:AutomationBridgeNetworkExposureApproved = $false
         $script:AutomationBridgeNetworkExposureApprovedFor = ""
@@ -1204,6 +1203,23 @@ Describe "Automation bridge protected settings and routing" {
         $saved.PSObject.Properties.Name | Should -Not -Contain "ApiKey"
         $saved.ApiKeyProtected | Should -Match '^dpapi:v1:'
         Unprotect-AutomationBridgeApiKey -ProtectedApiKey $saved.ApiKeyProtected | Should -Be $script:AutomationBridgeApiKey
+    }
+
+    It "drops the legacy MQTT field from a settings document that still carries it" {
+        Set-Content -LiteralPath $script:AutomationBridgeSettingsPath -Encoding UTF8 -Value (
+            @{
+                Enabled = $false
+                BindAddress = "127.0.0.1"
+                Port = 34291
+                MqttEnabled = $true
+            } | ConvertTo-Json
+        )
+
+        { Load-AutomationBridgeSettings } | Should -Not -Throw
+        $script:AutomationBridgePort | Should -Be 34291
+        Save-AutomationBridgeSettings | Should -BeTrue
+        $saved = Get-Content -LiteralPath $script:AutomationBridgeSettingsPath -Raw | ConvertFrom-Json
+        $saved.PSObject.Properties.Name | Should -Not -Contain "MqttEnabled"
     }
 
     It "migrates a legacy plaintext key without changing it" {
@@ -2759,5 +2775,102 @@ Describe "Per-monitor DDC timing and null-message semantics" {
         Update-DdcTimingCalibration -IdentityKey "edid:a" -Attempts 4 -Success $true | Out-Null
         (Get-DdcTimingProfile -IdentityKey "edid:b").SleepMultiplier | Should -Be 1.0
         (Get-DdcTimingProfile -IdentityKey "edid:a").SleepMultiplier | Should -Be 4.0
+    }
+}
+
+Describe "Ambient light hysteresis" {
+    BeforeAll {
+        Import-MonitorControlFunctions -Name @("Get-AmbientLevelIndex", "Get-AmbientBrightnessDecision")
+        $appText = [System.IO.File]::ReadAllText($script:AppPath)
+        $start = $appText.IndexOf('$script:AmbientLuxLadder = @(')
+        $end = $appText.IndexOf('$script:AmbientMaxStepPercent')
+        if ($start -lt 0 -or $end -lt $start) { throw "Ambient ladder not found" }
+        . ([scriptblock]::Create($appText.Substring($start, $end - $start)))
+        $script:Ladder = @($script:AmbientLuxLadder)
+        $script:AmbientMaxStepPercent = 10
+        $script:AmbientMinWriteIntervalSeconds = 20
+    }
+
+    It "floors the darkest level well above zero so the screen stays readable" {
+        @($script:Ladder)[0].Brightness | Should -BeGreaterThan 10
+    }
+
+    It "uses overlapping buckets, so every level leaves lower than it enters" {
+        for ($i = 1; $i -lt @($script:Ladder).Count; $i++) {
+            [double]@($script:Ladder)[$i].FallBelow | Should -BeLessThan ([double]@($script:Ladder)[$i].RiseAbove)
+        }
+    }
+
+    It "picks a level from the plain ladder when there is no previous reading" -ForEach @(
+        @{ Lux = 0.0; Expected = 0 }
+        @{ Lux = 9.0; Expected = 0 }
+        @{ Lux = 10.0; Expected = 1 }
+        @{ Lux = 250.0; Expected = 3 }
+        @{ Lux = 99999.0; Expected = 6 }
+    ) {
+        Get-AmbientLevelIndex -CurrentIndex -1 -Lux $Lux -Ladder $script:Ladder | Should -Be $Expected
+    }
+
+    It "holds the level while a reading oscillates across a boundary" {
+        # 50 lx is the rise threshold into level 2 and 30 lx is the fall threshold out of it, so
+        # a reading bouncing between them must not move in either direction.
+        Get-AmbientLevelIndex -CurrentIndex 2 -Lux 49.0 -Ladder $script:Ladder | Should -Be 2
+        Get-AmbientLevelIndex -CurrentIndex 2 -Lux 31.0 -Ladder $script:Ladder | Should -Be 2
+        Get-AmbientLevelIndex -CurrentIndex 1 -Lux 49.0 -Ladder $script:Ladder | Should -Be 1
+        # Only clearing the far side of the band moves the level.
+        Get-AmbientLevelIndex -CurrentIndex 1 -Lux 50.0 -Ladder $script:Ladder | Should -Be 2
+        Get-AmbientLevelIndex -CurrentIndex 2 -Lux 29.0 -Ladder $script:Ladder | Should -Be 1
+    }
+
+    It "goes straight to the target on the first reading" {
+        $decision = Get-AmbientBrightnessDecision -Lux 250.0 -CurrentIndex -1 -CurrentBrightness -1 -Ladder $script:Ladder
+        $decision.ShouldWrite | Should -BeTrue
+        $decision.NextBrightness | Should -Be $decision.TargetBrightness
+        $decision.Reason | Should -Be "first reading"
+    }
+
+    It "writes nothing once it is sitting at the target for the level" {
+        $decision = Get-AmbientBrightnessDecision -Lux 250.0 -CurrentIndex 3 -CurrentBrightness 55 -LastWriteUtc ([DateTime]::MinValue) -NowUtc ([DateTime]::UtcNow) -Ladder $script:Ladder
+        $decision.ShouldWrite | Should -BeFalse
+        $decision.NextBrightness | Should -Be 55
+    }
+
+    It "rate limits a change that arrives too soon after the last write" {
+        $now = [DateTime]::UtcNow
+        $decision = Get-AmbientBrightnessDecision -Lux 700.0 -CurrentIndex 3 -CurrentBrightness 55 -LastWriteUtc $now.AddSeconds(-5) -NowUtc $now -MinIntervalSeconds 20 -Ladder $script:Ladder
+        $decision.ShouldWrite | Should -BeFalse
+        $decision.Reason | Should -Be "rate limited"
+    }
+
+    It "ramps toward a distant target instead of stepping to it" {
+        $now = [DateTime]::UtcNow
+        $decision = Get-AmbientBrightnessDecision -Lux 99999.0 -CurrentIndex 0 -CurrentBrightness 15 -LastWriteUtc $now.AddMinutes(-5) -NowUtc $now -MaxStep 10 -Ladder $script:Ladder
+        $decision.TargetBrightness | Should -Be 100
+        $decision.NextBrightness | Should -Be 25
+        $decision.ShouldWrite | Should -BeTrue
+    }
+
+    It "makes exactly one write for an oscillating lux series" {
+        # The first reading enters level 2 (50 lx and up), then the series bounces across the
+        # 30-50 lx hysteresis band below it. Leaving level 2 needs a reading under 30, which
+        # never arrives, so after the first tick there must be no further writes at all.
+        $series = @(60.0, 49.0, 31.0, 48.0, 32.0, 49.9, 30.1, 45.0, 35.0, 49.0, 31.0)
+        $index = -1
+        $brightness = -1
+        $lastWrite = [DateTime]::MinValue
+        $now = [DateTime]::UtcNow
+        $writes = 0
+        foreach ($lux in $series) {
+            $now = $now.AddSeconds(30)
+            $decision = Get-AmbientBrightnessDecision -Lux $lux -CurrentIndex $index -CurrentBrightness $brightness -LastWriteUtc $lastWrite -NowUtc $now -Ladder $script:Ladder
+            $index = [int]$decision.LevelIndex
+            if ([bool]$decision.ShouldWrite) {
+                $writes++
+                $brightness = [int]$decision.NextBrightness
+                $lastWrite = $now
+            }
+        }
+        $writes | Should -Be 1
+        $brightness | Should -Be 40
     }
 }
