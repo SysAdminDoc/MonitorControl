@@ -503,6 +503,55 @@ public sealed class MonitorControlLiveRegionProbe : IDisposable
         $navigated.Add($name)
     }
 
+    # The input-source editor is the only place a vendor-specific 0x60 value can be entered, so
+    # drive its controls rather than assert the XAML declares them.
+    $monitorTab = Get-TabByName -Root $root -Name (Get-SmokeUiText -Text "Monitor")
+    $monitorTabPattern = $null
+    if ($monitorTab.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$monitorTabPattern)) {
+        ([System.Windows.Automation.SelectionItemPattern]$monitorTabPattern).Select()
+        Start-Sleep -Milliseconds 150
+        $inputEditor = Get-ControlByName -Root $root -Name (Get-SmokeUiText -Text "Edit input values") -ControlType ([System.Windows.Automation.ControlType]::Group)
+        if ($null -eq $inputEditor) { throw "The input-source editor was not exposed through UI Automation." }
+        $inputEditorPattern = $null
+        if (-not $inputEditor.TryGetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern, [ref]$inputEditorPattern)) {
+            throw "The input-source editor does not expose ExpandCollapsePattern."
+        }
+        $inputEditorExpand = [System.Windows.Automation.ExpandCollapsePattern]$inputEditorPattern
+        if ($inputEditorExpand.Current.ExpandCollapseState -ne [System.Windows.Automation.ExpandCollapseState]::Collapsed) {
+            throw "The input-source editor must start collapsed so the input picker stays the primary control."
+        }
+        $inputEditorExpand.Expand()
+        Start-Sleep -Milliseconds 200
+        if ($inputEditorExpand.Current.ExpandCollapseState -ne [System.Windows.Automation.ExpandCollapseState]::Expanded) {
+            throw "The input-source editor did not expand."
+        }
+        foreach ($editName in @("Input value", "Input label")) {
+            $editBox = Get-ControlByName -Root $root -Name (Get-SmokeUiText -Text $editName) -ControlType ([System.Windows.Automation.ControlType]::Edit)
+            if ($null -eq $editBox) { throw "The input-source editor field '$editName' was not exposed through UI Automation." }
+        }
+        $customInputList = Get-ControlByName -Root $root -Name (Get-SmokeUiText -Text "Custom input values") -ControlType ([System.Windows.Automation.ControlType]::List)
+        if ($null -eq $customInputList) { throw "The custom input value list was not exposed through UI Automation." }
+        if (@($customInputList.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)).Count -eq 0) {
+            throw "The custom input value list rendered no entries; the built-in table should populate it."
+        }
+        $singleByte = Get-ControlByName -Root $root -Name (Get-SmokeUiText -Text "Single-byte input select") -ControlType ([System.Windows.Automation.ControlType]::CheckBox)
+        if ($null -eq $singleByte) { throw "The single-byte input select control was not exposed through UI Automation." }
+        $singleBytePattern = $null
+        if (-not $singleByte.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern, [ref]$singleBytePattern)) {
+            throw "The single-byte input select control does not expose TogglePattern."
+        }
+        if (([System.Windows.Automation.TogglePattern]$singleBytePattern).Current.ToggleState -ne [System.Windows.Automation.ToggleState]::Off) {
+            throw "Single-byte input select must default to off; it is a per-monitor workaround, not a default encoding."
+        }
+        foreach ($buttonName in @("Add / Update", "Remove", "Use Defaults", "Save Input Mapping")) {
+            if ($null -eq (Get-ControlByName -Root $root -Name (Get-SmokeUiText -Text $buttonName) -ControlType ([System.Windows.Automation.ControlType]::Button))) {
+                throw "The input-source editor button '$buttonName' was not exposed through UI Automation."
+            }
+        }
+        $inputEditorExpand.Collapse()
+        Start-Sleep -Milliseconds 150
+    }
+
     # Multi-monitor capture and the apply preview are the two halves of one contract: the
     # checkbox decides how many records get written, the preview says how those records land
     # on what is connected. Drive both rather than assert the XAML contains them.

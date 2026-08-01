@@ -716,6 +716,147 @@ function Close-UnregisteredPhysicalMonitorHandle {
     }
 }
 
+# The MCCS-standard 0x60 values, used only when a monitor advertises nothing and the user has
+# not supplied a table. Vendor-specific values (LG's 0xD0 family, for example) are common enough
+# that this table is a default, never a constraint.
+function Get-DefaultInputSourceMap {
+    return @(
+        [PSCustomObject]@{ Value = 0x11; Label = "HDMI 1" },
+        [PSCustomObject]@{ Value = 0x12; Label = "HDMI 2" },
+        [PSCustomObject]@{ Value = 0x0F; Label = "DisplayPort 1" },
+        [PSCustomObject]@{ Value = 0x10; Label = "DisplayPort 2" },
+        [PSCustomObject]@{ Value = 0x13; Label = "USB-C" },
+        [PSCustomObject]@{ Value = 0x03; Label = "DVI" },
+        [PSCustomObject]@{ Value = 0x01; Label = "VGA" }
+    )
+}
+
+function Get-InputSourceLabelForValue {
+    param([int]$Value)
+    $description = Get-VcpValueDescription -Code 0x60 -Value $Value
+    if ($description -like "Value *") { return "Input 0x{0:X2}" -f $Value }
+    return $description
+}
+
+# One validation gate for user input, imported JSON, and capability discovery alike. A 0x60
+# value is a single byte on the wire, so anything outside 0-255 is not a legal input value
+# whatever produced it; duplicates collapse to the first occurrence so the picker cannot show
+# two entries that write the same thing.
+function ConvertTo-InputSourceRecords {
+    param($Records)
+    $seen = New-Object System.Collections.Generic.HashSet[int]
+    $result = @()
+    foreach ($record in @($Records)) {
+        if ($null -eq $record) { continue }
+        $parsedValue = 0
+        $rawValue = if ($record.PSObject.Properties.Name -contains "Value") { $record.Value } else { $null }
+        if ($null -eq $rawValue -or -not [int]::TryParse([string]$rawValue, [ref]$parsedValue)) { continue }
+        if ($parsedValue -lt 0 -or $parsedValue -gt 255) { continue }
+        if (-not $seen.Add($parsedValue)) { continue }
+        $label = if ($record.PSObject.Properties.Name -contains "Label") { [string]$record.Label } else { "" }
+        $label = $label.Trim()
+        if ($label.Length -gt 64) { $label = $label.Substring(0, 64) }
+        if ([string]::IsNullOrWhiteSpace($label)) { $label = Get-InputSourceLabelForValue -Value $parsedValue }
+        $result += [PSCustomObject]@{ Value = [int]$parsedValue; Label = $label }
+        if ($result.Count -ge 32) { break }
+    }
+    return @($result)
+}
+
+function Get-InputSourceOverride {
+    param([string]$IdentityKey)
+    if ([string]::IsNullOrWhiteSpace($IdentityKey)) { return $null }
+    if (-not $script:InputSourceOverrides.ContainsKey($IdentityKey)) { return $null }
+    return $script:InputSourceOverrides[$IdentityKey]
+}
+
+# Resolution order: what the user set, then what the panel advertised in its capability string,
+# then the MCCS table. Each entry carries where it came from so the DDC report can say which.
+function Get-MonitorInputSourceMap {
+    param($Monitor)
+    $override = if ($null -eq $Monitor) { $null } else { Get-InputSourceOverride -IdentityKey ([string]$Monitor.IdentityKey) }
+    if ($null -ne $override -and @($override.Sources).Count -gt 0) {
+        return @(@($override.Sources) | ForEach-Object { [PSCustomObject]@{ Value = [int]$_.Value; Label = [string]$_.Label; Source = "Custom" } })
+    }
+    $advertised = @()
+    if ($null -ne $Monitor -and [bool]$Monitor.CapabilitiesKnown -and
+        $null -ne $Monitor.PSObject.Properties["SupportedVcpCodes"] -and $null -ne $Monitor.SupportedVcpCodes -and
+        $Monitor.SupportedVcpCodes.ContainsKey(0x60)) {
+        $advertised = @($Monitor.SupportedVcpCodes[0x60] | Where-Object { $null -ne $_ } | Sort-Object -Unique)
+    }
+    if ($advertised.Count -gt 0) {
+        $records = ConvertTo-InputSourceRecords -Records @($advertised | ForEach-Object { [PSCustomObject]@{ Value = [int]$_; Label = "" } })
+        return @($records | ForEach-Object { [PSCustomObject]@{ Value = [int]$_.Value; Label = [string]$_.Label; Source = "Capability" } })
+    }
+    return @(Get-DefaultInputSourceMap | ForEach-Object { [PSCustomObject]@{ Value = [int]$_.Value; Label = [string]$_.Label; Source = "Default" } })
+}
+
+function Test-MonitorInputSourceSingleByte {
+    param($Monitor)
+    $override = if ($null -eq $Monitor) { $null } else { Get-InputSourceOverride -IdentityKey ([string]$Monitor.IdentityKey) }
+    if ($null -eq $override) { return $false }
+    return [bool]$override.SingleByteWrite
+}
+
+# Some panels report the current input with a non-zero high byte (0x1100 rather than 0x0011) and
+# then reject a write of that same number. ControlMyMonitor calls the workaround "Input Select -
+# Use Only One Byte"; here it masks both the value written and the value matched on readback, so
+# the picker still highlights the active input on a monitor that answers in the high byte.
+function Resolve-InputSourceWriteValue {
+    param([int]$Value, [bool]$SingleByte)
+    if ($SingleByte) { return [int]($Value -band 0xFF) }
+    return [int]$Value
+}
+
+function Resolve-InputSourceReadValue {
+    param([int]$Value, [bool]$SingleByte)
+    if ($SingleByte) { return [int]($Value -band 0xFF) }
+    return [int]$Value
+}
+
+function Set-MonitorInputSourceSettings {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute("PSUseShouldProcessForStateChangingFunctions", "", Justification = "The calling UI owns the explicit save action and this helper only persists that choice.")]
+    param($Monitor, $Sources, [bool]$SingleByte, [switch]$ClearSources)
+    if ($null -eq $Monitor) { return $false }
+    $identityKey = [string]$Monitor.IdentityKey
+    if ([string]::IsNullOrWhiteSpace($identityKey) -or $identityKey.Length -gt 512) { return $false }
+    $records = if ($ClearSources) { @() } else { @(ConvertTo-InputSourceRecords -Records $Sources) }
+    if ($records.Count -eq 0 -and -not $SingleByte) {
+        $null = $script:InputSourceOverrides.Remove($identityKey)
+    } else {
+        $script:InputSourceOverrides[$identityKey] = [PSCustomObject]@{
+            IdentityKey = $identityKey
+            SingleByteWrite = [bool]$SingleByte
+            Sources = @($records)
+        }
+    }
+    return (Save-InputSourceSettings)
+}
+
+# A custom input label is text the user typed, so it can name a person, a machine, or a room.
+# It is redacted with the same switch that redacts monitor friendly names; the value itself is
+# the diagnostic content and is always kept.
+function Get-InputSourceReportLabel {
+    param($Entry, [int]$Ordinal, [bool]$IncludeRawNames)
+    if ($IncludeRawNames -or [string]$Entry.Source -ne "Custom") { return [string]$Entry.Label }
+    return "[input-label-$Ordinal]"
+}
+
+function Get-InputSourceMappingReportLines {
+    param($Map, [bool]$SingleByte, [switch]$IncludeRawNames)
+    $entries = @($Map)
+    $origin = if ($entries.Count -eq 0) { "None" } else { [string]$entries[0].Source }
+    $lines = @("  Input source mapping: $origin ($($entries.Count) value(s)); single-byte write: $(if ($SingleByte) { 'On' } else { 'Off' })")
+    $ordinal = 0
+    foreach ($entry in $entries) {
+        $ordinal++
+        $written = Resolve-InputSourceWriteValue -Value ([int]$entry.Value) -SingleByte $SingleByte
+        $label = Get-InputSourceReportLabel -Entry $entry -Ordinal $ordinal -IncludeRawNames ([bool]$IncludeRawNames)
+        $lines += "    0x{0:X2} {1} (writes 0x{2:X2})" -f [int]$entry.Value, $label, [int]$written
+    }
+    return @($lines)
+}
+
 function Test-VcpWriteRequiresSafetyConsent {
     param([int]$Code, [switch]$Arbitrary)
     if ($Arbitrary) { return $true }
@@ -1976,6 +2117,8 @@ function Get-DdcReportTargets {
             SkippedProbeCodes = [object[]]$skippedCodes
             StopOnNullResponse = [bool](Get-DdcTimingProfile -IdentityKey ([string]$mon.IdentityKey)).NullMeansUnsupported
             RiskyWritesEnabled = Test-VcpWriteEnabledForMonitor -Monitor $mon
+            InputSourceMap = [object[]]@(Get-MonitorInputSourceMap -Monitor $mon)
+            InputSourceSingleByte = [bool](Test-MonitorInputSourceSingleByte -Monitor $mon)
             RecoveryState = if ($mon.PSObject.Properties.Name -contains "RecoveryState") { [string]$mon.RecoveryState } else { "Stale" }
             RecoveryLastSuccessUtc = if ($mon.PSObject.Properties.Name -contains "RecoveryLastSuccessUtc") { $mon.RecoveryLastSuccessUtc } else { $null }
             DdcLastProbeUtc = if ($mon.PSObject.Properties.Name -contains "DdcLastProbeUtc") { $mon.DdcLastProbeUtc } else { $null }
@@ -2218,6 +2361,7 @@ function New-DdcCompatibilityReport {
         $livenessAttempt = if ($null -ne $target.DdcLastProbeUtc) { ([DateTime]$target.DdcLastProbeUtc).ToString("o") } else { "never" }
         [void]$sb.AppendLine("  Liveness probe: last success=$livenessSuccess, last attempt=$livenessAttempt")
         [void]$sb.AppendLine("  Risky VCP writes: $(if ([bool]$target.RiskyWritesEnabled) { 'identity unlocked; direct confirmation still required' } else { 'disabled' })")
+        foreach ($line in @(Get-InputSourceMappingReportLines -Map $target.InputSourceMap -SingleByte ([bool]$target.InputSourceSingleByte) -IncludeRawNames:$IncludeRawNames)) { [void]$sb.AppendLine($line) }
         if (@($target.SkippedProbeCodes).Count -gt 0) {
             [void]$sb.AppendLine("  Common probes skipped by capabilities: $(Format-DdcReportCodeList -Codes $target.SkippedProbeCodes)")
         }
@@ -2286,6 +2430,19 @@ function New-DdcCompatibilityReportJson {
             Primary = [bool]$target.Primary
             CapabilityStatus = [string]$target.CapabilityStatus
             SupportedVcpCodes = @($target.SupportedCodes | ForEach-Object { [int]$_ })
+            InputSourceSingleByteWrite = [bool]$target.InputSourceSingleByte
+            InputSources = @(
+                $inputOrdinal = 0
+                foreach ($inputEntry in @($target.InputSourceMap)) {
+                    $inputOrdinal++
+                    [ordered]@{
+                        Value = [int]$inputEntry.Value
+                        Label = [string](Get-InputSourceReportLabel -Entry $inputEntry -Ordinal $inputOrdinal -IncludeRawNames ([bool]$IncludeRawNames))
+                        Origin = [string]$inputEntry.Source
+                        WrittenValue = [int](Resolve-InputSourceWriteValue -Value ([int]$inputEntry.Value) -SingleByte ([bool]$target.InputSourceSingleByte))
+                    }
+                }
+            )
             RecoveryState = [string]$target.RecoveryState
             Probes = @($ProbeResults | Where-Object { [int]$_.TargetIndex -eq [int]$target.Index } | Sort-Object ProbeIndex | ForEach-Object {
                 [ordered]@{

@@ -415,6 +415,26 @@ The VCP Explorer tab allows you to query and set any DDC/CI VCP code. Common cod
 | `0x12` | HDMI 2 |
 | `0x13` | USB-C |
 
+These are the MCCS-standard values and only a starting point. A monitor is free to use any
+single-byte value for `0x60`, and vendor-specific values are common - which is the usual reason
+input switching appears not to work.
+
+**Monitor > Input source > Edit input values** replaces the list for the selected display. Enter
+a value as hex (`0xD0`) or decimal (`208`) with a label, choose **Add / Update**, then **Save
+Input Mapping**. **Use Defaults** discards the custom table. Values a monitor advertised in its
+capability string pre-populate the editor; a custom value you add is written even when the
+capability string never mentioned it, since adding one is your assertion that the panel accepts
+it. Mappings are stored per stable monitor identity in
+`%APPDATA%\MonitorControlPro\input-sources.json`.
+
+**Single-byte input select** is a per-monitor workaround for panels that report the current input
+in the high byte (`0x1100` rather than `0x0011`) and then reject a write of that same number. With
+it on, only the low byte is written and only the low byte is compared on readback. Leave it off
+unless input switching fails on a monitor whose reported input value looks too large.
+
+The DDC compatibility report lists the effective mapping for every monitor, including where each
+value came from and the value that will actually be written.
+
 ### PiP / PbP Vendor Values
 | Code | Value | Meaning |
 |------|-------|---------|

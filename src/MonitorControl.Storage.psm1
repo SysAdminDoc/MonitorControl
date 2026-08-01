@@ -249,6 +249,7 @@ function Initialize-MonitorControlSettingsDocumentRegistry {
         [PSCustomObject]@{ Name = "DisplayRestore"; FileName = "display-restore.json"; CurrentVersion = 1; LegacyVersion = 0; MigrationHandler = "Import-DisplayStateRestoreSettings" }
         [PSCustomObject]@{ Name = "CapabilitiesCache"; FileName = "capabilities-cache.json"; CurrentVersion = 1; LegacyVersion = 0; MigrationHandler = "Import-CapabilitiesCache" }
         [PSCustomObject]@{ Name = "DdcTiming"; FileName = "ddc-timing.json"; CurrentVersion = 3; LegacyVersion = 1; MigrationHandler = "Import-DdcTimingSettings" }
+        [PSCustomObject]@{ Name = "InputSources"; FileName = "input-sources.json"; CurrentVersion = 1; LegacyVersion = 0; MigrationHandler = "Import-InputSourceSettings" }
         [PSCustomObject]@{ Name = "ProfileTrash"; FileName = "trash/<record>.json"; CurrentVersion = 1; LegacyVersion = 1; MigrationHandler = "Restore-ProfileFromTrash" }
     ))
 }
@@ -295,6 +296,7 @@ function Update-MonitorIdentityKeyedState {
         CapabilitiesCache = $false
         DdcTiming = $false
         DisplayStateRestore = $false
+        InputSources = $false
         AnyChanged = $false
     }
     if ([string]::IsNullOrWhiteSpace($OldKey) -or [string]::IsNullOrWhiteSpace($NewKey) -or $OldKey -eq $NewKey) {
@@ -354,6 +356,16 @@ function Update-MonitorIdentityKeyedState {
         $changed.DisplayStateRestore = $true
     }
 
+    if ($script:InputSourceOverrides.ContainsKey($OldKey)) {
+        if (-not $script:InputSourceOverrides.ContainsKey($NewKey)) {
+            $override = $script:InputSourceOverrides[$OldKey]
+            $override | Add-Member -NotePropertyName IdentityKey -NotePropertyValue $NewKey -Force
+            $script:InputSourceOverrides[$NewKey] = $override
+        }
+        $null = $script:InputSourceOverrides.Remove($OldKey)
+        $changed.InputSources = $true
+    }
+
     $changed.AnyChanged = @($changed.Values | Where-Object { [bool]$_ }).Count -gt 0
     return [PSCustomObject]$changed
 }
@@ -368,6 +380,7 @@ function Save-MonitorIdentityKeyedStateMigration {
     if ([bool]$Migration.CapabilitiesCache -and -not (Save-CapabilitiesCache)) { $success = $false }
     if ([bool]$Migration.DdcTiming -and -not (Save-DdcTimingSettings)) { $success = $false }
     if ([bool]$Migration.DisplayStateRestore -and -not (Save-DisplayStateRestoreSettings)) { $success = $false }
+    if ([bool]$Migration.InputSources -and -not (Save-InputSourceSettings)) { $success = $false }
     return $success
 }
 
@@ -444,6 +457,60 @@ function Import-CapabilitySafetyState {
             Set-DeferredStatus "Capability discovery disabled after an unreadable probe sentinel"
         }
         Write-CapabilitySafetyState | Out-Null
+    }
+}
+
+# Per-identity input-source overrides. Vendor-specific 0x60 values are the largest class of
+# "input switching does not work" reports, so the shipped table is a starting point the user
+# can replace rather than a fixed truth.
+function Get-InputSourceSettingsObject {
+    $entries = @(foreach ($identityKey in @($script:InputSourceOverrides.Keys | Sort-Object)) {
+        $override = $script:InputSourceOverrides[$identityKey]
+        [PSCustomObject]@{
+            IdentityKey = [string]$identityKey
+            SingleByteWrite = [bool]$override.SingleByteWrite
+            Sources = @(@($override.Sources) | ForEach-Object { [PSCustomObject]@{ Value = [int]$_.Value; Label = [string]$_.Label } })
+        }
+    })
+    return [PSCustomObject]@{
+        SchemaVersion = [int]$script:InputSourceSchemaVersion
+        UpdatedAt = (Get-Date).ToString("o")
+        Monitors = @($entries)
+    }
+}
+
+function Save-InputSourceSettings {
+    if (-not (Test-ProfileStorageWriteAllowed -Operation "input source changes")) { return $false }
+    return (Write-JsonFileSafely -Path $script:InputSourceSettingsPath -Data (Get-InputSourceSettingsObject) -Depth 5)
+}
+
+function Import-InputSourceSettings {
+    $script:InputSourceOverrides = @{}
+    if ([string]::IsNullOrWhiteSpace([string]$script:InputSourceSettingsPath)) { return }
+    if (-not (Test-Path -LiteralPath $script:InputSourceSettingsPath)) { return }
+    try {
+        $data = Read-JsonFileSafely -Path $script:InputSourceSettingsPath -Label "Input sources" -ReadOnly:$script:ProfileStorageOffline
+        if ($null -eq $data) { return }
+        if (-not (Test-SettingsDocumentSupported -Name "InputSources" -Document $data -Label "Input sources")) { return }
+        foreach ($entry in @($data.Monitors)) {
+            if ($null -eq $entry) { continue }
+            $identityKey = [string]$entry.IdentityKey
+            if ([string]::IsNullOrWhiteSpace($identityKey) -or $identityKey.Length -gt 512) { continue }
+            $sources = @(ConvertTo-InputSourceRecords -Records @($entry.Sources))
+            $singleByte = $false
+            if ($entry.PSObject.Properties.Name -contains "SingleByteWrite") { $singleByte = [bool]$entry.SingleByteWrite }
+            # A record with neither a custom table nor the encoding flag is indistinguishable
+            # from having no override at all; do not resurrect it as an empty input list.
+            if ($sources.Count -eq 0 -and -not $singleByte) { continue }
+            $script:InputSourceOverrides[$identityKey] = [PSCustomObject]@{
+                IdentityKey = $identityKey
+                SingleByteWrite = $singleByte
+                Sources = @($sources)
+            }
+        }
+    } catch {
+        $script:InputSourceOverrides = @{}
+        Set-DeferredStatus "Input source settings were invalid; the built-in input table is in use"
     }
 }
 
