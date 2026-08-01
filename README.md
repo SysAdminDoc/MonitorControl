@@ -169,6 +169,7 @@ This is the same pinned lane used by CI. It gates a pure-ASCII check across ever
 ### Tray Mode
 - Minimize the window to keep MonitorControl running from the notification area
 - Click the tray icon to open the compact brightness popup
+- Enable **System > Automation > Run at login** to create a per-user Startup-folder shortcut that launches directly into tray mode; disabling it removes the shortcut
 - Double-click the tray icon or use **Next Profile** in the tray menu to cycle saved profiles
 - Use **Link Monitors** in the tray popup or menu to apply brightness changes to every detected monitor
 
