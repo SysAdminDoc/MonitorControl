@@ -121,6 +121,12 @@ BeforeAll {
         "Resolve-VcpWriteValueForMonitor",
         "Update-VcpMaximumCache",
         "Get-ProfilePercentValue",
+        "Get-ThemeBrushMap",
+        "ConvertTo-ThemeBrush",
+        "Register-DetachedThemedWindow",
+        "Unregister-DetachedThemedWindow",
+        "Update-DetachedWindowTheme",
+        "Update-DetachedWindowThemes",
         "Invoke-ManualVcpWrite",
         "Get-MonitorDisplayLabel",
         "Wait-DdcWriteQueueIdle",
@@ -1497,6 +1503,76 @@ Describe "Monitor reported VCP range normalization" {
             $observed = ConvertTo-VcpPercent -RawValue $written[$index] -Maximum $maximum
             [Math]::Abs($observed - 25) | Should -BeLessOrEqual ([Math]::Ceiling(100.0 / (2 * $maximum)))
         }
+    }
+}
+
+Describe "Theme palette single source" {
+    BeforeAll {
+        $script:AppText = [System.IO.File]::ReadAllText($script:AppPath)
+        $script:XamlBrushes = @{}
+        foreach ($match in [regex]::Matches($script:AppText, '<SolidColorBrush\s+x:Key="(?<key>\w+)"\s+Color="(?<color>#[0-9a-fA-F]{6})"\s*/>')) {
+            $script:XamlBrushes[$match.Groups["key"].Value] = $match.Groups["color"].Value.ToUpperInvariant()
+        }
+    }
+
+    It "declares a static brush for every palette entry" {
+        $palette = Get-AccessibilityThemePalette
+        $script:XamlBrushes.Count | Should -Be $palette.Keys.Count
+        foreach ($key in $palette.Keys) {
+            $script:XamlBrushes.ContainsKey("$($key)Brush") | Should -BeTrue
+        }
+    }
+
+    It "keeps the static XAML brushes byte-identical to the palette function" {
+        $palette = Get-AccessibilityThemePalette
+        foreach ($key in $palette.Keys) {
+            $script:XamlBrushes["$($key)Brush"] | Should -Be ([string]$palette[$key]).ToUpperInvariant()
+        }
+    }
+
+    It "leaves no hardcoded colour outside the palette in the tray popup" {
+        $start = $script:AppText.IndexOf('[xml]$trayPopupXaml = @"')
+        $start | Should -BeGreaterThan 0
+        $end = $script:AppText.IndexOf('"@', $start)
+        $markup = $script:AppText.Substring($start, $end - $start)
+
+        @([regex]::Matches($markup, '#[0-9a-fA-F]{6}')).Count | Should -Be 0
+        $markup | Should -Match "DynamicResource SurfaceBrush"
+        $markup | Should -Match "DynamicResource TextBrush"
+    }
+
+    It "copies resolved brushes into a detached window" {
+        Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
+        $script:IsHighContrastTheme = $false
+        $script:DetachedThemedWindows = New-Object System.Collections.ArrayList
+        $window = $null
+        $detached = New-Object System.Windows.Window
+        try {
+            Register-DetachedThemedWindow -Target $detached
+
+            $detached.Resources.Contains("SurfaceBrush") | Should -BeTrue
+            $detached.Resources.Contains("TextBrush") | Should -BeTrue
+            $detached.Resources["SurfaceBrush"] | Should -BeOfType [System.Windows.Media.SolidColorBrush]
+
+            $palette = Get-AccessibilityThemePalette
+            $detached.Resources["SurfaceBrush"].Color.ToString().ToUpperInvariant() |
+                Should -Be ("#FF" + $palette.Surface.Substring(1).ToUpperInvariant())
+
+            # A later theme change has to reach windows that already exist.
+            Update-DetachedWindowThemes
+            $detached.Resources.Contains("AccentBrush") | Should -BeTrue
+
+            Unregister-DetachedThemedWindow -Target $detached
+            $script:DetachedThemedWindows.Contains($detached) | Should -BeFalse
+        } finally {
+            try { $detached.Close() } catch {}
+        }
+    }
+
+    It "builds overlays and markers from theme brushes rather than literals" {
+        $script:AppText | Should -Not -Match "\[System\.Windows\.Media\.Brushes\]::White"
+        $script:AppText | Should -Not -Match "Color\]::FromArgb\(230"
+        $script:AppText | Should -Not -Match "Color\]::FromRgb\(118, 185, 0\)"
     }
 }
 
