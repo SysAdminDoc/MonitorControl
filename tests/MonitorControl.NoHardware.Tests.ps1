@@ -40,6 +40,17 @@ BeforeAll {
 
     function Update-ProfilesList {}
 
+    function global:New-CapMonitor {
+        param([string]$IdentityKey = "edid:a", [string]$Manufacturer = "DEL", [string]$Model = "A123", [bool]$HasHandle = $true)
+        return [PSCustomObject]@{
+            IdentityKey = $IdentityKey
+            Manufacturer = $Manufacturer
+            EdidModel = $Model
+            Name = "Test monitor"
+            Handle = if ($HasHandle) { [IntPtr]::new(0x9001) } else { [IntPtr]::Zero }
+        }
+    }
+
     function global:New-FakeWorker {
         $worker = [PSCustomObject]@{ Name = "worker" }
         $worker | Add-Member -MemberType ScriptMethod -Name Stop -Value { [void]$script:StoppedWorkers.Add("worker") }
@@ -141,6 +152,15 @@ BeforeAll {
         "Resolve-VcpWriteValueForMonitor",
         "Update-VcpMaximumCache",
         "Get-ProfilePercentValue",
+        "Get-MonitorEdidModelId",
+        "Get-CapabilitiesBlocklistEntry",
+        "Get-CapabilitiesCacheKey",
+        "Save-CapabilitiesCache",
+        "Import-CapabilitiesCache",
+        "Set-CapabilitiesCacheEntry",
+        "Get-CapabilitiesCacheEntry",
+        "Clear-CapabilitiesCache",
+        "Get-CapabilityProbeDecision",
         "Get-DisplayStateRestoreSettingsObject",
         "Save-DisplayStateRestoreSettings",
         "Import-DisplayStateRestoreSettings",
@@ -1534,6 +1554,111 @@ Describe "Monitor reported VCP range normalization" {
             $observed = ConvertTo-VcpPercent -RawValue $written[$index] -Maximum $maximum
             [Math]::Abs($observed - 25) | Should -BeLessOrEqual ([Math]::Ceiling(100.0 / (2 * $maximum)))
         }
+    }
+}
+
+Describe "Capability cache and known-bad monitor list" {
+    BeforeEach {
+        Get-ChildItem -LiteralPath $TestDrive -Force | Remove-Item -Recurse -Force
+        $script:CapabilitiesCachePath = Join-Path $TestDrive "capabilities-cache.json"
+        $script:CapabilitiesCacheSchemaVersion = 1
+        $script:CapabilitiesCache = @{}
+        $script:CapabilitiesDiscoveryEnabled = $true
+        $script:CapabilitiesMaximumCompatibility = $false
+        $script:CapabilitiesExcludedIdentityKeys = @{}
+        $script:CapabilitiesKnownBadModels = @(
+            [PSCustomObject]@{ EdidId = "LTM2C02"; Note = "Counterfeit-EDID LG 27MR400" }
+            [PSCustomObject]@{ EdidId = "GSM7714"; Note = "LG UltraWide HDR WFHD" }
+        )
+        $script:LastStatusMessage = ""
+    }
+
+    It "builds an EDID model id from the manufacturer and product code" {
+        Get-MonitorEdidModelId -Monitor (New-CapMonitor -Manufacturer "ltm" -Model "2c02") | Should -Be "LTM2C02"
+        Get-MonitorEdidModelId -Monitor (New-CapMonitor -Manufacturer "" -Model "2C02") | Should -Be ""
+        Get-MonitorEdidModelId -Monitor $null | Should -Be ""
+    }
+
+    It "refuses to probe a model documented to fault the kernel" {
+        $decision = Get-CapabilityProbeDecision -Monitor (New-CapMonitor -Manufacturer "LTM" -Model "2C02")
+        $decision.Action | Should -Be "Blocked"
+        $decision.Reason | Should -Match "LTM2C02"
+
+        $decision = Get-CapabilityProbeDecision -Monitor (New-CapMonitor -Manufacturer "GSM" -Model "7714")
+        $decision.Action | Should -Be "Blocked"
+    }
+
+    It "probes a model that is not on the list" {
+        (Get-CapabilityProbeDecision -Monitor (New-CapMonitor)).Action | Should -Be "Probe"
+    }
+
+    It "replays a cached capability string instead of probing again" {
+        $monitor = New-CapMonitor
+        Set-CapabilitiesCacheEntry -Monitor $monitor -Capabilities "(vcp(10 12))" | Should -BeTrue
+
+        $decision = Get-CapabilityProbeDecision -Monitor $monitor
+        $decision.Action | Should -Be "Cached"
+        $decision.Capabilities | Should -Be "(vcp(10 12))"
+    }
+
+    It "keeps every existing safety gate ahead of the cache" {
+        $monitor = New-CapMonitor
+        Set-CapabilitiesCacheEntry -Monitor $monitor -Capabilities "(vcp(10))" | Out-Null
+
+        $script:CapabilitiesDiscoveryEnabled = $false
+        (Get-CapabilityProbeDecision -Monitor $monitor).Action | Should -Be "Skip"
+
+        $script:CapabilitiesDiscoveryEnabled = $true
+        $script:CapabilitiesMaximumCompatibility = $true
+        (Get-CapabilityProbeDecision -Monitor $monitor).Action | Should -Be "Skip"
+
+        $script:CapabilitiesMaximumCompatibility = $false
+        $script:CapabilitiesExcludedIdentityKeys = @{ "edid:a" = $true }
+        (Get-CapabilityProbeDecision -Monitor $monitor).Action | Should -Be "Skip"
+
+        $script:CapabilitiesExcludedIdentityKeys = @{}
+        (Get-CapabilityProbeDecision -Monitor (New-CapMonitor -HasHandle $false)).Action | Should -Be "Skip"
+    }
+
+    It "does not cache a monitor without a stable identity or an empty string" {
+        Set-CapabilitiesCacheEntry -Monitor (New-CapMonitor -IdentityKey "") -Capabilities "(vcp(10))" | Should -BeFalse
+        Set-CapabilitiesCacheEntry -Monitor (New-CapMonitor) -Capabilities "" | Should -BeFalse
+        $script:CapabilitiesCache.Count | Should -Be 0
+    }
+
+    It "round-trips the cache through disk" {
+        Set-CapabilitiesCacheEntry -Monitor (New-CapMonitor -IdentityKey "edid:a") -Capabilities "(vcp(10 12))" | Out-Null
+        Set-CapabilitiesCacheEntry -Monitor (New-CapMonitor -IdentityKey "edid:b") -Capabilities "(vcp(10 60))" | Out-Null
+        Save-CapabilitiesCache | Out-Null
+
+        $script:CapabilitiesCache = @{}
+        Import-CapabilitiesCache
+
+        $script:CapabilitiesCache.Count | Should -Be 2
+        $script:CapabilitiesCache["edid:a"].Capabilities | Should -Be "(vcp(10 12))"
+        $script:CapabilitiesCache["edid:b"].EdidId | Should -Be "DELA123"
+    }
+
+    It "ignores a cache written by a newer build" {
+        $future = [PSCustomObject]@{ SchemaVersion = 99; Monitors = @() }
+        Write-JsonFileSafely -Path $script:CapabilitiesCachePath -Data $future -Depth 5 | Out-Null
+
+        Import-CapabilitiesCache
+
+        $script:CapabilitiesCache.Count | Should -Be 0
+        $script:LastStatusMessage | Should -Match "schema v99"
+    }
+
+    It "clears the cache so the next launch reads again" {
+        Set-CapabilitiesCacheEntry -Monitor (New-CapMonitor) -Capabilities "(vcp(10))" | Out-Null
+        Save-CapabilitiesCache | Out-Null
+
+        Clear-CapabilitiesCache
+
+        $script:CapabilitiesCache.Count | Should -Be 0
+        Import-CapabilitiesCache
+        $script:CapabilitiesCache.Count | Should -Be 0
+        (Get-CapabilityProbeDecision -Monitor (New-CapMonitor)).Action | Should -Be "Probe"
     }
 }
 

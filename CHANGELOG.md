@@ -2,6 +2,10 @@
 
 All notable changes to MonitorControl will be documented in this file.
 
+## [Unreleased]
+
+- Security: monitor capability strings are cached per stable monitor identity and replayed on later launches, so the one native call Microsoft documents as able to fault the Windows kernel now runs once per monitor instead of on every refresh. A shipped list of EDID model ids known to trigger that fault is consulted before any probe, and those monitors are skipped and reported rather than asked. **Clear cache** in System forces a re-read.
+
 ## [v3.35.0] - 2026-07-31
 
 - Added: an opt-in "Restore brightness at launch and after resume" setting in System. Monitors commonly reset themselves to full brightness after a power or sleep cycle; when enabled, the last brightness set for each stable monitor identity is written back once per detected display change through the verified write path. Displays without a stable identity, without a DDC/CI handle, or that do not report brightness are skipped with a stated reason.

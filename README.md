@@ -57,6 +57,7 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 - **Capabilities-Aware Controls** — Parses monitor `vcp(...)` capabilities, disables controls that are known unsupported, and can scan either reported capabilities or the full probe table
 - **Monitor-Reported Value Ranges** — Brightness, contrast, RGB gain, volume, and sharpness honour each monitor's own reported maximum. Profiles, schedules, idle dim, battery targets, ambient mode, the tray popup, and the automation bridge all speak percentages, which are converted to each display's raw range at the moment of writing, so linking monitors with different ranges produces the same perceived level rather than the same raw number
 - **Crash-Safe Capability Discovery** — Requires explicit consent, persists a per-probe crash sentinel, automatically excludes an interrupted monitor identity, and offers a maximum-compatibility mode that never requests capability strings
+- **Capability Caching and a Known-Bad Model List** — A successful capability read is cached against the monitor's stable identity and replayed on later launches, so the riskiest native call runs once per monitor rather than on every refresh. Monitor models documented upstream as faulting the Windows kernel during that call are skipped before any probe and reported in diagnostics
 - **Stable Monitor Identity** — Stores EDID/device-path backed monitor identities, supports custom display labels, and targets saved profiles by identity after reordering
 - **System-Aware Accessibility** — Follows Windows high contrast live across the main window, the tray popup, and the identify and FPS overlays, supports 100–200% text scaling with independently scrollable content and navigation, exposes visible keyboard focus and UI Automation names, and raises native live-region events for inline errors
 - **Portable Release ZIP** — Local release builds package the script, icon, README, LICENSE, signature status, and SHA256 checksums
@@ -236,6 +237,8 @@ otherwise load or execute from the folder it was extracted into, so both are **o
 - Before each enabled request, the app persists the selected monitor identity in a crash sentinel and clears it only after the native call returns
 - If the app or Windows exits during a request, discovery is disabled on the next launch and that monitor identity is excluded
 - Use **Exclude selected** or **Clear exclusions** in **System** to manage the per-monitor exclusion list
+- A successful read is cached in `%APPDATA%\MonitorControlPro\capabilities-cache.json` and replayed on later launches; use **Clear cache** to force a re-read
+- Monitor models known upstream to fault the Windows kernel during a capability read are skipped before any probe, with the reason shown in the DDC compatibility report
 
 ### Risky VCP Write Safety
 - Risky controls start disabled. Select a display, open **System**, and explicitly enable risky VCP writes for that stable monitor identity

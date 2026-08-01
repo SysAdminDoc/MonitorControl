@@ -932,6 +932,16 @@ $script:DefaultProfilesPath = "$env:APPDATA\MonitorControlPro"
 $script:ProfileStorageSettingsPath = Join-Path $script:DefaultProfilesPath "profile-storage.json"
 $script:AutomationBridgeSettingsPath = Join-Path $script:DefaultProfilesPath "automation-bridge.json"
 $script:AutomationBridgeWriteLogPath = Join-Path $script:DefaultProfilesPath "automation-bridge-writes.jsonl"
+$script:CapabilitiesCachePath = Join-Path $script:DefaultProfilesPath "capabilities-cache.json"
+$script:CapabilitiesCacheSchemaVersion = 1
+$script:CapabilitiesCache = @{}
+# Reading a capability string is the one call Microsoft documents as able to bring down
+# Windows on a monitor with a malformed EDID, so a model known to do that is never asked.
+# Keyed on the EDID manufacturer + product code. Entries cite the upstream report.
+$script:CapabilitiesKnownBadModels = @(
+    [PSCustomObject]@{ EdidId = "LTM2C02"; Note = "Counterfeit-EDID LG 27MR400; kernel fault in win32kfull (PowerToys 47556)" }
+    [PSCustomObject]@{ EdidId = "GSM7714"; Note = "LG UltraWide HDR WFHD; kernel fault in win32kfull (PowerToys 47968)" }
+)
 $script:DisplayStateRestoreSettingsPath = Join-Path $script:DefaultProfilesPath "display-restore.json"
 $script:DisplayStateRestoreSchemaVersion = 1
 # Monitors commonly reset themselves to full brightness after a power cycle or a sleep
@@ -998,7 +1008,7 @@ $script:ProfileBundleMaxTotalBytes = 10485760
 $script:ProfileBundleMaxCompressionRatio = 100
 $script:ProfileBundleMaxMonitorSettings = 32
 $script:ProfileExportsPath = Join-Path $script:ProfilesPath "exports"
-$script:ProfileMetadataFiles = @("app-profile-rules.json", "profile-schedules.json", "idle-dim.json", "battery-profile.json", "profile-storage.json", "monitor-identities.json", "automation-bridge.json", "capabilities-safety.json", "capabilities-probe-pending.json", "vcp-write-safety.json", "optional-helpers.json", "display-restore.json")
+$script:ProfileMetadataFiles = @("app-profile-rules.json", "profile-schedules.json", "idle-dim.json", "battery-profile.json", "profile-storage.json", "monitor-identities.json", "automation-bridge.json", "capabilities-safety.json", "capabilities-probe-pending.json", "vcp-write-safety.json", "optional-helpers.json", "display-restore.json", "capabilities-cache.json")
 $script:MonitorIdentityRecords = @{}
 $script:UpdatingMonitorLabelUI = $false
 $script:UiCulture = "en-US"
@@ -1062,6 +1072,7 @@ $script:UiStrings = @{
     "A11y.VcpResults" = "VCP results"
     "A11y.Capabilities" = "Monitor capabilities"
     "A11y.CapabilitiesDiscovery" = "Allow monitor capability discovery"
+    "A11y.ClearCapabilityCache" = "Clear cached monitor capabilities"
     "A11y.DisplayRestore" = "Restore brightness at launch and after resume"
     "A11y.CpuMonitorHelper" = "Load CPU temperature library"
     "A11y.PresentMonHelper" = "Run PresentMon for the FPS overlay"
@@ -2326,6 +2337,7 @@ function Initialize-LocalizationAndAccessibility {
     Set-AccessibleName -Control $vcpResultBox -Key "A11y.VcpResults"
     Set-AccessibleName -Control $capabilitiesBox -Key "A11y.Capabilities"
     Set-AccessibleName -Control $capabilitiesDiscoveryEnabledCheckbox -Key "A11y.CapabilitiesDiscovery"
+    Set-AccessibleName -Control $capabilitiesClearCacheBtn -Key "A11y.ClearCapabilityCache"
     Set-AccessibleName -Control $displayRestoreEnabledCheckbox -Key "A11y.DisplayRestore"
     Set-AccessibleName -Control $cpuMonitorEnabledCheckbox -Key "A11y.CpuMonitorHelper"
     Set-AccessibleName -Control $presentMonEnabledCheckbox -Key "A11y.PresentMonHelper"
@@ -2388,7 +2400,7 @@ function Initialize-LocalizationAndAccessibility {
         $idleDimEnabledCheckbox,$idleDimMinutesBox,$idleDimBrightnessBox,$idleDimRestoreCheckbox,$idleDimSaveBtn,
         $batteryProfileEnabledCheckbox,$batteryBrightnessBox,$acBrightnessBox,$batteryProfileSaveBtn,
         $displaySettingsBtn,$colorMgmtBtn,$gpuControlPanelBtn,$gammaRedSlider,$gammaGreenSlider,$gammaBlueSlider,$resetGammaBtn,$capabilitiesBox,
-        $displayRestoreEnabledCheckbox,$cpuMonitorEnabledCheckbox,$presentMonEnabledCheckbox,$optionalHelperStatusBox,$capabilitiesDiscoveryEnabledCheckbox,$capabilitiesMaximumCompatibilityCheckbox,$capabilitiesExcludeCurrentBtn,$capabilitiesClearExclusionsBtn,$riskyVcpEnabledCheckbox,
+        $capabilitiesClearCacheBtn,$displayRestoreEnabledCheckbox,$cpuMonitorEnabledCheckbox,$presentMonEnabledCheckbox,$optionalHelperStatusBox,$capabilitiesDiscoveryEnabledCheckbox,$capabilitiesMaximumCompatibilityCheckbox,$capabilitiesExcludeCurrentBtn,$capabilitiesClearExclusionsBtn,$riskyVcpEnabledCheckbox,
         $automationBridgeEnabledCheckbox,$automationBridgeBindBox,$automationBridgePortBox,$automationBridgeKeyBox,$automationBridgeSaveBtn,
         $ddcReportGenerateBtn,$ddcReportCopyBtn,$ddcReportBox
     )
@@ -2598,6 +2610,128 @@ Allow risky writes for this automation rule?
     return $result -eq [System.Windows.MessageBoxResult]::Yes
 }
 
+function Get-MonitorEdidModelId {
+    param($Monitor)
+    if ($null -eq $Monitor) { return "" }
+    $manufacturer = [string]$Monitor.Manufacturer
+    $model = [string]$Monitor.EdidModel
+    if ([string]::IsNullOrWhiteSpace($manufacturer) -or [string]::IsNullOrWhiteSpace($model)) { return "" }
+    return ($manufacturer + $model).ToUpperInvariant()
+}
+
+function Get-CapabilitiesBlocklistEntry {
+    param($Monitor)
+    $edidId = Get-MonitorEdidModelId -Monitor $Monitor
+    if ([string]::IsNullOrWhiteSpace($edidId)) { return $null }
+    foreach ($entry in @($script:CapabilitiesKnownBadModels)) {
+        if ([string]$entry.EdidId -eq $edidId) { return $entry }
+    }
+    return $null
+}
+
+function Get-CapabilitiesCacheKey {
+    param($Monitor)
+    if ($null -eq $Monitor) { return "" }
+    $identityKey = [string]$Monitor.IdentityKey
+    if ([string]::IsNullOrWhiteSpace($identityKey)) { return "" }
+    return $identityKey
+}
+
+function Save-CapabilitiesCache {
+    $records = @()
+    foreach ($key in @($script:CapabilitiesCache.Keys)) {
+        $entry = $script:CapabilitiesCache[$key]
+        if ($null -eq $entry) { continue }
+        $records += [PSCustomObject]@{
+            IdentityKey = [string]$key
+            EdidId = [string]$entry.EdidId
+            Capabilities = [string]$entry.Capabilities
+            ReadAt = [string]$entry.ReadAt
+        }
+    }
+    $document = [PSCustomObject]@{
+        SchemaVersion = [int]$script:CapabilitiesCacheSchemaVersion
+        Monitors = @($records)
+    }
+    return (Write-JsonFileSafely -Path $script:CapabilitiesCachePath -Data $document -Depth 5)
+}
+
+function Import-CapabilitiesCache {
+    $script:CapabilitiesCache = @{}
+    if (-not (Test-Path -LiteralPath $script:CapabilitiesCachePath)) { return }
+    $data = Read-JsonFileSafely -Path $script:CapabilitiesCachePath -Label "Capability cache"
+    if ($null -eq $data) { return }
+    $schema = if ($data.PSObject.Properties.Name -contains "SchemaVersion") { [int]$data.SchemaVersion } else { 1 }
+    if ($schema -gt $script:CapabilitiesCacheSchemaVersion) {
+        Update-Status "Capability cache uses schema v$schema; it will be re-read instead"
+        return
+    }
+    foreach ($record in @((Get-ProfilePropertyValue -Object $data -Property "Monitors" -Default @()))) {
+        if ($null -eq $record) { continue }
+        $identityKey = [string](Get-ProfilePropertyValue -Object $record -Property "IdentityKey" -Default "")
+        $capabilities = [string](Get-ProfilePropertyValue -Object $record -Property "Capabilities" -Default "")
+        if ([string]::IsNullOrWhiteSpace($identityKey) -or [string]::IsNullOrWhiteSpace($capabilities)) { continue }
+        $script:CapabilitiesCache[$identityKey] = [PSCustomObject]@{
+            EdidId = [string](Get-ProfilePropertyValue -Object $record -Property "EdidId" -Default "")
+            Capabilities = $capabilities
+            ReadAt = [string](Get-ProfilePropertyValue -Object $record -Property "ReadAt" -Default "")
+        }
+    }
+}
+
+function Set-CapabilitiesCacheEntry {
+    param($Monitor, [string]$Capabilities, [string]$ReadAt = "")
+    $key = Get-CapabilitiesCacheKey -Monitor $Monitor
+    if ([string]::IsNullOrWhiteSpace($key) -or [string]::IsNullOrWhiteSpace($Capabilities)) { return $false }
+    if ([string]::IsNullOrWhiteSpace($ReadAt)) { $ReadAt = (Get-Date).ToString("o") }
+    $script:CapabilitiesCache[$key] = [PSCustomObject]@{
+        EdidId = Get-MonitorEdidModelId -Monitor $Monitor
+        Capabilities = [string]$Capabilities
+        ReadAt = [string]$ReadAt
+    }
+    return $true
+}
+
+function Get-CapabilitiesCacheEntry {
+    param($Monitor)
+    $key = Get-CapabilitiesCacheKey -Monitor $Monitor
+    if ([string]::IsNullOrWhiteSpace($key)) { return $null }
+    if (-not $script:CapabilitiesCache.ContainsKey($key)) { return $null }
+    return $script:CapabilitiesCache[$key]
+}
+
+function Clear-CapabilitiesCache {
+    $script:CapabilitiesCache = @{}
+    Save-CapabilitiesCache | Out-Null
+    Update-Status "Capability cache cleared; capabilities will be read again"
+}
+
+function Get-CapabilityProbeDecision {
+    param($Monitor)
+    if ($null -eq $Monitor -or $Monitor.Handle -eq [IntPtr]::Zero) {
+        return [PSCustomObject]@{ Action = "Skip"; Reason = "no DDC/CI handle" }
+    }
+    if (-not $script:CapabilitiesDiscoveryEnabled) {
+        return [PSCustomObject]@{ Action = "Skip"; Reason = "discovery disabled" }
+    }
+    if ($script:CapabilitiesMaximumCompatibility) {
+        return [PSCustomObject]@{ Action = "Skip"; Reason = "maximum compatibility" }
+    }
+    $identityKey = [string]$Monitor.IdentityKey
+    if (-not [string]::IsNullOrWhiteSpace($identityKey) -and $script:CapabilitiesExcludedIdentityKeys.ContainsKey($identityKey)) {
+        return [PSCustomObject]@{ Action = "Skip"; Reason = "excluded after an interrupted probe" }
+    }
+    $blocked = Get-CapabilitiesBlocklistEntry -Monitor $Monitor
+    if ($null -ne $blocked) {
+        return [PSCustomObject]@{ Action = "Blocked"; Reason = "known-bad model $($blocked.EdidId): $($blocked.Note)" }
+    }
+    $cached = Get-CapabilitiesCacheEntry -Monitor $Monitor
+    if ($null -ne $cached) {
+        return [PSCustomObject]@{ Action = "Cached"; Reason = "cached from $($cached.ReadAt)"; Capabilities = [string]$cached.Capabilities }
+    }
+    return [PSCustomObject]@{ Action = "Probe"; Reason = "not cached" }
+}
+
 function Test-CapabilityProbeAllowed {
     param($Monitor)
     if ($null -eq $Monitor -or $Monitor.Handle -eq [IntPtr]::Zero) { return $false }
@@ -2687,6 +2821,7 @@ function Update-CapabilitiesWorkerOutput {
     $validResults = @($script:CapabilitiesWorkerOutput | Where-Object {
         Test-DisplayWorkerResultCurrent -Result $_ -CurrentGeneration $script:DisplayRecoveryGeneration -Monitors $script:PhysicalMonitors
     })
+    $cacheDirty = $false
     foreach ($result in $validResults) {
         $index = [int]$result.MonitorIndex
         $mon = $script:PhysicalMonitors[$index]
@@ -2702,8 +2837,12 @@ function Update-CapabilitiesWorkerOutput {
         }
         if ([bool]$result.Success) {
             Set-DisplayRecoveryOutcome -IdentityKey ([string]$result.IdentityKey) -Outcome "Success" -Generation $script:DisplayRecoveryGeneration | Out-Null
+            if (-not [string]::IsNullOrWhiteSpace([string]$result.Capabilities)) {
+                if (Set-CapabilitiesCacheEntry -Monitor $mon -Capabilities ([string]$result.Capabilities)) { $cacheDirty = $true }
+            }
         }
     }
+    if ($cacheDirty) { Save-CapabilitiesCache | Out-Null }
     if ($workerGeneration -eq $script:DisplayRecoveryGeneration -and $script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) {
         $selected = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
         Update-CapabilitiesBox -Monitor $selected
@@ -2728,7 +2867,24 @@ function Start-CapabilitiesWorker {
         $mon = $script:PhysicalMonitors[$i]
         $mon.CapabilitiesPending = $false
         $mon.CapabilitiesExcluded = (-not [string]::IsNullOrWhiteSpace([string]$mon.IdentityKey) -and $script:CapabilitiesExcludedIdentityKeys.ContainsKey([string]$mon.IdentityKey))
-        if (Test-CapabilityProbeAllowed -Monitor $mon) {
+        $decision = Get-CapabilityProbeDecision -Monitor $mon
+        if ($decision.Action -eq "Cached") {
+            # A capability string does not change for a given panel, so replay it instead of
+            # re-issuing the one native call that can fault the kernel.
+            $cachedInfo = ConvertFrom-MonitorCapabilities -Capabilities ([string]$decision.Capabilities)
+            $mon.Capabilities = [string]$decision.Capabilities
+            $mon.CapabilitiesKnown = [bool]$cachedInfo.Known
+            $mon.SupportedVcpCodes = $cachedInfo.Codes
+            $mon.CapabilitiesSafetyError = ""
+            continue
+        }
+        if ($decision.Action -eq "Blocked") {
+            $mon.CapabilitiesExcluded = $true
+            $mon.CapabilitiesSafetyError = [string]$decision.Reason
+            Update-Status "Skipped capability read: $($decision.Reason)"
+            continue
+        }
+        if ($decision.Action -eq "Probe") {
             $mon.CapabilitiesPending = $true
             $targets += [PSCustomObject]@{
                 Index = [int]$i
@@ -3600,6 +3756,7 @@ function New-DdcCompatibilityReport {
     [void]$sb.AppendLine("OS: $($system.OS)")
     [void]$sb.AppendLine("PowerShell: $($system.PowerShell)")
     [void]$sb.AppendLine("Probe safety: read-only probes only; risky codes are never written automatically and power, input, reset, PiP/PbP, OSD, and arbitrary codes are not queried")
+    [void]$sb.AppendLine("Capability cache entries: $($script:CapabilitiesCache.Count); shipped known-bad models: $(@($script:CapabilitiesKnownBadModels).Count)")
     [void]$sb.AppendLine("Redundant writes suppressed this session: $(Get-SuppressedDdcWriteCount)")
     [void]$sb.AppendLine("")
     [void]$sb.AppendLine("GPU drivers:")
@@ -6397,10 +6554,11 @@ try {
                     <Grid><CheckBox x:Name="CapabilitiesDiscoveryEnabledCheckbox" Content="Allow capability discovery" VerticalAlignment="Center"/>
                         <TextBlock x:Name="CapabilitiesSafetyStatusText" Text="Discovery off" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/></Grid>
                     <CheckBox x:Name="CapabilitiesMaximumCompatibilityCheckbox" Grid.Row="2" Content="Maximum compatibility (never request capability strings)" Foreground="{DynamicResource MutedTextBrush}"/>
-                    <Grid Grid.Row="4"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <Grid Grid.Row="4"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                         <TextBlock Text="A pending probe is recorded before every firmware call." Foreground="{DynamicResource MutedTextBrush}" FontSize="12" VerticalAlignment="Center"/>
                         <Button x:Name="CapabilitiesExcludeCurrentBtn" Grid.Column="2" Content="Exclude selected" Style="{StaticResource Btn}" Padding="10,4" FontSize="12"/>
                         <Button x:Name="CapabilitiesClearExclusionsBtn" Grid.Column="4" Content="Clear exclusions" Style="{StaticResource Btn}" Padding="10,4" FontSize="12"/>
+                        <Button x:Name="CapabilitiesClearCacheBtn" Grid.Column="6" Content="Clear cache" Style="{StaticResource Btn}" Padding="10,4" FontSize="12"/>
                     </Grid>
                 </Grid></Border>
                 <Border Grid.Row="8" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource WarningBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
@@ -6538,6 +6696,7 @@ $gammaBlueSlider = $window.FindName("GammaBlueSlider"); $gammaBlueValue = $windo
 $capabilitiesBox = $window.FindName("CapabilitiesBox"); $ddcReportBox = $window.FindName("DdcReportBox")
 $displayRestoreEnabledCheckbox = $window.FindName("DisplayRestoreEnabledCheckbox"); $displayRestoreStatusText = $window.FindName("DisplayRestoreStatusText")
 $cpuMonitorEnabledCheckbox = $window.FindName("CpuMonitorEnabledCheckbox"); $presentMonEnabledCheckbox = $window.FindName("PresentMonEnabledCheckbox"); $optionalHelperStatusBox = $window.FindName("OptionalHelperStatusBox")
+$capabilitiesClearCacheBtn = $window.FindName("CapabilitiesClearCacheBtn")
 $capabilitiesDiscoveryEnabledCheckbox = $window.FindName("CapabilitiesDiscoveryEnabledCheckbox"); $capabilitiesMaximumCompatibilityCheckbox = $window.FindName("CapabilitiesMaximumCompatibilityCheckbox")
 $capabilitiesSafetyStatusText = $window.FindName("CapabilitiesSafetyStatusText"); $capabilitiesExcludeCurrentBtn = $window.FindName("CapabilitiesExcludeCurrentBtn"); $capabilitiesClearExclusionsBtn = $window.FindName("CapabilitiesClearExclusionsBtn")
 $riskyVcpEnabledCheckbox = $window.FindName("RiskyVcpEnabledCheckbox"); $riskyVcpStatusText = $window.FindName("RiskyVcpStatusText")
@@ -9962,6 +10121,7 @@ $batteryProfileSaveBtn.Add_Click({
 
 $displaySettingsBtn.Add_Click({ Start-Process "ms-settings:display" }); $colorMgmtBtn.Add_Click({ Start-Process "colorcpl.exe" })
 $gpuControlPanelBtn.Add_Click({ if ($script:HasNvidia) { Start-Process "nvidia-settings" -ErrorAction SilentlyContinue } else { Start-Process "ms-settings:display" } })
+$capabilitiesClearCacheBtn.Add_Click({ Clear-CapabilitiesCache; Start-CapabilitiesWorker })
 $displayRestoreEnabledCheckbox.Add_Checked({
     if ($script:UpdatingDisplayStateRestoreUI) { return }
     Set-DisplayStateRestoreEnabled -Enabled $true
@@ -10184,7 +10344,7 @@ function Update-GpuStats {
 }
 
 # Initialize
-Initialize-WmiBrightness; Load-MonitorIdentitySettings; Import-CapabilitySafetyState; Import-VcpWriteSafetyState; Import-OptionalHelperSettings; Import-DisplayStateRestoreSettings; Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList
+Initialize-WmiBrightness; Load-MonitorIdentitySettings; Import-CapabilitySafetyState; Import-VcpWriteSafetyState; Import-OptionalHelperSettings; Import-DisplayStateRestoreSettings; Import-CapabilitiesCache; Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList
 Load-AppProfileRules; Update-AppProfileControls; Start-AppProfileWatcher
 Load-ProfileSchedules; Update-ScheduleControls; Start-ProfileScheduleWatcher
 Load-IdleDimSettings; Update-IdleDimControls; Start-IdleDimWatcher
