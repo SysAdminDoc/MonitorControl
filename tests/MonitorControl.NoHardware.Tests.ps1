@@ -143,6 +143,7 @@ public static class MonitorControlVcpWriteProbe
         "Resolve-ProfileStorageRootState",
         "Get-SafeProfileName",
         "Get-UserProfileFiles",
+        "Remove-ProfileAndDependencies",
         "Get-ProfilePropertyValue",
         "Get-ProfileIntValue",
         "ConvertTo-CurrentProfileSchema",
@@ -519,6 +520,73 @@ Describe "Profile filename validation" {
         Get-SafeProfileName -Name "CON.json" | Should -Be ""
         Get-SafeProfileName -Name "automation-bridge.json" | Should -Be ""
         Get-SafeProfileName -Name "vcp-write-safety.json" | Should -Be ""
+    }
+}
+
+Describe "Atomic profile deletion" {
+    BeforeEach {
+        $script:ProfilesPath = Join-Path $TestDrive "profiles"
+        New-Item -ItemType Directory -Path $script:ProfilesPath -Force | Out-Null
+        $script:ProfileMetadataFiles = @("app-profile-rules.json", "profile-schedules.json")
+        $script:ProfileStorageOffline = $false
+        $script:AppProfileRules = @(
+            [PSCustomObject]@{ Exe = "locked.exe"; Profile = "Locked"; AllowRiskyVcp = $false },
+            [PSCustomObject]@{ Exe = "other.exe"; Profile = "Other"; AllowRiskyVcp = $false }
+        )
+        $script:ProfileSchedules = @(
+            [PSCustomObject]@{ Time = "08:00"; Profile = "Locked"; AllowRiskyVcp = $false },
+            [PSCustomObject]@{ Time = "18:00"; Profile = "Other"; AllowRiskyVcp = $false }
+        )
+        $script:ProfilePathUnderTest = Join-Path $script:ProfilesPath "Locked.json"
+        [System.IO.File]::WriteAllText($script:ProfilePathUnderTest, '{"Name":"Locked"}')
+        $script:AppRuleSaveCalls = 0
+        $script:ScheduleSaveCalls = 0
+    }
+
+    It "leaves the profile and every dependent rule untouched when deletion fails" {
+        $beforeAppRules = $script:AppProfileRules | ConvertTo-Json -Depth 4 -Compress
+        $beforeSchedules = $script:ProfileSchedules | ConvertTo-Json -Depth 4 -Compress
+        $lock = [System.IO.File]::Open($script:ProfilePathUnderTest, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        try {
+            $deleted = Remove-ProfileAndDependencies -Name "Locked" `
+                -SaveAppRulesAction { $script:AppRuleSaveCalls++; return $true } `
+                -SaveSchedulesAction { $script:ScheduleSaveCalls++; return $true }
+        } finally {
+            $lock.Dispose()
+        }
+
+        $deleted | Should -BeFalse
+        Test-Path -LiteralPath $script:ProfilePathUnderTest | Should -BeTrue
+        ($script:AppProfileRules | ConvertTo-Json -Depth 4 -Compress) | Should -Be $beforeAppRules
+        ($script:ProfileSchedules | ConvertTo-Json -Depth 4 -Compress) | Should -Be $beforeSchedules
+        $script:AppRuleSaveCalls | Should -Be 0
+        $script:ScheduleSaveCalls | Should -Be 0
+        $script:LastStatusMessage | Should -Match "^Profile 'Locked' could not be deleted; application rules and schedules were not changed:"
+    }
+
+    It "prunes dependencies only after the profile is confirmed gone" {
+        Remove-ProfileAndDependencies -Name "Locked" `
+            -SaveAppRulesAction { $script:AppRuleSaveCalls++; return $true } `
+            -SaveSchedulesAction { $script:ScheduleSaveCalls++; return $true } | Should -BeTrue
+
+        Test-Path -LiteralPath $script:ProfilePathUnderTest | Should -BeFalse
+        @($script:AppProfileRules.Profile) | Should -Be @("Other")
+        @($script:ProfileSchedules.Profile) | Should -Be @("Other")
+        $script:AppRuleSaveCalls | Should -Be 1
+        $script:ScheduleSaveCalls | Should -Be 1
+    }
+
+    It "restores the profile and automation when dependent persistence fails" {
+        Remove-ProfileAndDependencies -Name "Locked" `
+            -SaveAppRulesAction { $script:AppRuleSaveCalls++; return $true } `
+            -SaveSchedulesAction { $script:ScheduleSaveCalls++; return $false } | Should -BeFalse
+
+        Test-Path -LiteralPath $script:ProfilePathUnderTest | Should -BeTrue
+        @($script:AppProfileRules.Profile) | Should -Be @("Locked", "Other")
+        @($script:ProfileSchedules.Profile) | Should -Be @("Locked", "Other")
+        $script:AppRuleSaveCalls | Should -Be 2
+        $script:ScheduleSaveCalls | Should -Be 1
+        $script:LastStatusMessage | Should -Match "and its automation were restored$"
     }
 }
 

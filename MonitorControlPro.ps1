@@ -8174,6 +8174,80 @@ function Update-ProfilesList {
     Update-AppProfileProfileCombo
 }
 
+function Remove-ProfileAndDependencies {
+    param(
+        [string]$Name,
+        [scriptblock]$DeleteProfileFile,
+        [scriptblock]$SaveAppRulesAction,
+        [scriptblock]$SaveSchedulesAction
+    )
+    if (-not (Test-ProfileStorageWriteAllowed -Operation "profile deletion")) { return $false }
+    $safeName = Get-SafeProfileName -Name $Name
+    if ([string]::IsNullOrWhiteSpace($safeName)) {
+        Update-Status "Profile deletion failed: '$Name' is not a valid profile name"
+        return $false
+    }
+    $profilePath = Join-Path $script:ProfilesPath "$safeName.json"
+    if (-not (Test-Path -LiteralPath $profilePath -PathType Leaf)) {
+        Update-Status "Profile '$Name' was not found; application rules and schedules were not changed"
+        return $false
+    }
+    try {
+        $profileBytes = [System.IO.File]::ReadAllBytes($profilePath)
+    } catch {
+        Update-Status "Profile '$Name' could not be read before deletion; application rules and schedules were not changed: $($_.Exception.Message)"
+        return $false
+    }
+    if ($null -eq $DeleteProfileFile) {
+        $DeleteProfileFile = { param([string]$Path) Remove-Item -LiteralPath $Path -ErrorAction Stop }
+    }
+    $deleteError = $null
+    try { & $DeleteProfileFile $profilePath } catch { $deleteError = $_.Exception }
+    if (Test-Path -LiteralPath $profilePath) {
+        $detail = if ($null -ne $deleteError) { $deleteError.Message } else { "the file still exists after the delete operation" }
+        Update-Status "Profile '$Name' could not be deleted; application rules and schedules were not changed: $detail"
+        return $false
+    }
+
+    $originalAppRules = @($script:AppProfileRules)
+    $originalSchedules = @($script:ProfileSchedules)
+    $script:AppProfileRules = @($originalAppRules | Where-Object { $_.Profile -ne $Name })
+    $script:ProfileSchedules = @($originalSchedules | Where-Object { $_.Profile -ne $Name })
+    if ($null -eq $SaveAppRulesAction) { $SaveAppRulesAction = { Save-AppProfileRules } }
+    if ($null -eq $SaveSchedulesAction) { $SaveSchedulesAction = { Save-ProfileSchedules } }
+    $appRulesSaved = $false
+    $schedulesSaved = $false
+    $saveFailure = ""
+    try {
+        $appRulesSaved = [bool](& $SaveAppRulesAction)
+        if (-not $appRulesSaved) { throw "application rules could not be saved" }
+        $schedulesSaved = [bool](& $SaveSchedulesAction)
+        if (-not $schedulesSaved) { throw "profile schedules could not be saved" }
+    } catch {
+        $saveFailure = $_.Exception.Message
+    }
+    if (-not $appRulesSaved -or -not $schedulesSaved) {
+        $script:AppProfileRules = $originalAppRules
+        $script:ProfileSchedules = $originalSchedules
+        $rollbackFailures = New-Object System.Collections.Generic.List[string]
+        try { [System.IO.File]::WriteAllBytes($profilePath, $profileBytes) } catch { $rollbackFailures.Add("profile file: $($_.Exception.Message)") }
+        if ($appRulesSaved) {
+            try { if (-not [bool](& $SaveAppRulesAction)) { $rollbackFailures.Add("application rules") } } catch { $rollbackFailures.Add("application rules: $($_.Exception.Message)") }
+        }
+        if ($schedulesSaved) {
+            try { if (-not [bool](& $SaveSchedulesAction)) { $rollbackFailures.Add("profile schedules") } } catch { $rollbackFailures.Add("profile schedules: $($_.Exception.Message)") }
+        }
+        if ($rollbackFailures.Count -eq 0) {
+            Update-Status "Profile deletion failed while saving dependencies ($saveFailure); '$Name' and its automation were restored"
+        } else {
+            Update-Status "Profile deletion failed and rollback was incomplete ($saveFailure): $($rollbackFailures -join '; ')"
+        }
+        return $false
+    }
+    Update-Status "Deleted '$Name' and removed dependent automation"
+    return $true
+}
+
 function Get-ProfilePropertyValue {
     param($Object, [string]$Property, $Default = $null)
     if ($null -ne $Object -and $Object.PSObject.Properties.Name -contains $Property -and $null -ne $Object.$Property) { return $Object.$Property }
@@ -10876,17 +10950,11 @@ $deleteProfileBtn.Add_Click({
     if (-not (Test-ProfileStorageWriteAllowed -Operation "profile deletion")) { return }
     if ($profilesList.SelectedItem -ne $null -and [System.Windows.MessageBox]::Show("Delete '$($profilesList.SelectedItem)'?", "Delete", "YesNo", "Question") -eq "Yes") {
         $deletedProfile = [string]$profilesList.SelectedItem
-        $safeDeletedProfile = Get-SafeProfileName -Name $deletedProfile
-        if ($safeDeletedProfile) {
-            Remove-Item -LiteralPath (Join-Path $script:ProfilesPath "$safeDeletedProfile.json") -ErrorAction SilentlyContinue
+        if (Remove-ProfileAndDependencies -Name $deletedProfile) {
+            Update-ProfilesList
+            Update-AppProfileControls
+            Update-ScheduleControls
         }
-        $script:AppProfileRules = @($script:AppProfileRules | Where-Object { $_.Profile -ne $deletedProfile })
-        $script:ProfileSchedules = @($script:ProfileSchedules | Where-Object { $_.Profile -ne $deletedProfile })
-        Save-AppProfileRules
-        Save-ProfileSchedules
-        Update-ProfilesList
-        Update-AppProfileControls
-        Update-ScheduleControls
     }
 })
 $exportProfilesBtn.Add_Click({
