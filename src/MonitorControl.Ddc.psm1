@@ -35,11 +35,7 @@ function ConvertFrom-MonitorCapabilities {
         if ($i -ge $section.Length) { break }
         $start = $i
         while ($i -lt $section.Length -and $section[$i] -match '[0-9A-Fa-fxX]') { $i++ }
-        if ($i -eq $start) { $i++; continue }
-        $token = $section.Substring($start, $i - $start)
-        if ($token.StartsWith("0x", [StringComparison]::OrdinalIgnoreCase)) { $token = $token.Substring(2) }
-        if ($token -notmatch '^[0-9A-Fa-f]{1,2}$') { continue }
-        $code = [Convert]::ToInt32($token, 16)
+        $token = if ($i -gt $start) { $section.Substring($start, $i - $start) } else { "" }
         while ($i -lt $section.Length -and [char]::IsWhiteSpace($section[$i])) { $i++ }
         $values = @()
         if ($i -lt $section.Length -and $section[$i] -eq '(') {
@@ -55,6 +51,13 @@ function ConvertFrom-MonitorCapabilities {
             $values = Get-HexTokens -Text $valueText
             if ($i -lt $section.Length -and $section[$i] -eq ')') { $i++ }
         }
+        if ([string]::IsNullOrEmpty($token)) {
+            if ($i -eq $start) { $i++ }
+            continue
+        }
+        if ($token.StartsWith("0x", [StringComparison]::OrdinalIgnoreCase)) { $token = $token.Substring(2) }
+        if ($token -notmatch '^[0-9A-Fa-f]{1,2}$') { continue }
+        $code = [Convert]::ToInt32($token, 16)
         $map[$code] = @($values)
     }
     return [PSCustomObject]@{ Known = $true; Codes = $map; Count = $map.Count }
@@ -655,6 +658,23 @@ function Clear-PhysicalMonitorHandles {
     return $true
 }
 
+function Close-UnregisteredPhysicalMonitorHandle {
+    param([IntPtr]$Handle, [bool]$Registered, [scriptblock]$DestroyHandle)
+    if ($Registered -or $Handle -eq [IntPtr]::Zero) { return $false }
+    if ($null -eq $DestroyHandle) {
+        $DestroyHandle = {
+            param([IntPtr]$NativeHandle)
+            [MonitorAPI]::DestroyPhysicalMonitor($NativeHandle) | Out-Null
+        }
+    }
+    try {
+        & $DestroyHandle $Handle
+        return $true
+    } catch {
+        return $false
+    }
+}
+
 function Test-VcpWriteRequiresSafetyConsent {
     param([int]$Code, [switch]$Arbitrary)
     if ($Arbitrary) { return $true }
@@ -968,9 +988,11 @@ function Get-Monitors {
             $physMons = New-Object MonitorAPI+PHYSICAL_MONITOR[] $numMons
             if ([MonitorAPI]::GetPhysicalMonitorsFromHMONITOR($hMonitor, $numMons, $physMons)) {
                 foreach ($pm in $physMons) {
-                    $monInfo = New-Object MonitorAPI+MONITORINFOEX
-                    $monInfo.Size = [System.Runtime.InteropServices.Marshal]::SizeOf($monInfo)
-                    if ([MonitorAPI]::GetMonitorInfo($hMonitor, [ref]$monInfo)) {
+                    $registered = $false
+                    try {
+                        $monInfo = New-Object MonitorAPI+MONITORINFOEX
+                        $monInfo.Size = [System.Runtime.InteropServices.Marshal]::SizeOf($monInfo)
+                        if ([MonitorAPI]::GetMonitorInfo($hMonitor, [ref]$monInfo)) {
                         $devMode = New-Object MonitorAPI+DEVMODE
                         $devMode.dmSize = [System.Runtime.InteropServices.Marshal]::SizeOf($devMode)
                         [MonitorAPI]::EnumDisplaySettingsEx($monInfo.DeviceName, [MonitorAPI]::ENUM_CURRENT_SETTINGS, [ref]$devMode, 0) | Out-Null
@@ -999,7 +1021,11 @@ function Get-Monitors {
                         }
                         Apply-MonitorIdentity -Monitor $monitorObject
                         $script:PhysicalMonitors += $monitorObject
+                        $registered = $true
                         $monitorIndex++
+                        }
+                    } finally {
+                        Close-UnregisteredPhysicalMonitorHandle -Handle $pm.hPhysicalMonitor -Registered $registered | Out-Null
                     }
                 }
             }
@@ -1397,11 +1423,13 @@ function Set-VCPValueWithSync {
             if (Queue-VCPValue -Handle $mon.Handle -VCPCode $VCPCode -Value $target -Key "$i`:0x$("{0:X2}" -f $VCPCode)" -MonitorName $mon.Name -ForceWrite:$UserInitiated) { $queued++ }
         }
         if ($VCPCode -eq [MonitorAPI]::VCP_BRIGHTNESS -and $script:WmiBrightnessAvailable) { Set-WmiBrightness -Value $wmiPercent | Out-Null }
-    } else {
+    } elseif ($script:CurrentMonitorIndex -ge 0 -and $script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) {
         $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
         $target = Resolve-VcpWriteValueForMonitor -Monitor $mon -Code $code -Value $Value -Percent:$Percent
         if (Queue-VCPValue -Handle $mon.Handle -VCPCode $VCPCode -Value $target -Key "$script:CurrentMonitorIndex`:0x$("{0:X2}" -f $VCPCode)" -MonitorName $mon.Name -ForceWrite:$UserInitiated) { $queued++ }
         elseif ($VCPCode -eq [MonitorAPI]::VCP_BRIGHTNESS -and $script:WmiBrightnessAvailable) { Set-WmiBrightness -Value $wmiPercent | Out-Null }
+    } elseif ($VCPCode -eq [MonitorAPI]::VCP_BRIGHTNESS -and $script:WmiBrightnessAvailable) {
+        Set-WmiBrightness -Value $wmiPercent | Out-Null
     }
     if ($queued -gt 0) { return $true }
     return ($VCPCode -eq [MonitorAPI]::VCP_BRIGHTNESS -and $script:WmiBrightnessAvailable)

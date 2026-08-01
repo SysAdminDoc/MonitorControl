@@ -507,6 +507,7 @@ function Process-AutomationBridgeRequests {
             $request.PSObject.Properties.Name -contains "ExpiresAtUtc" -and
             [DateTime]::UtcNow -ge [DateTime]$request.ExpiresAtUtc
         ) {
+            Complete-AutomationBridgeResponse -Request $request -Response $null | Out-Null
             $request = $null
             continue
         }
@@ -515,13 +516,30 @@ function Process-AutomationBridgeRequests {
         } catch {
             $response = New-AutomationBridgeResponse -Status 500 -Body @{ error = "internal_error"; code = "bridge_request_failed" }
         }
-        if (
-            -not ($request.PSObject.Properties.Name -contains "ExpiresAtUtc") -or
-            [DateTime]::UtcNow -lt [DateTime]$request.ExpiresAtUtc
-        ) {
-            $script:AutomationBridgeResponses[$request.Id] = $response
-        }
+        Complete-AutomationBridgeResponse -Request $request -Response $response | Out-Null
         $request = $null
+    }
+}
+
+function Complete-AutomationBridgeResponse {
+    param($Request, $Response, $ResponseMap = $script:AutomationBridgeResponses)
+    if ($null -eq $Request -or $null -eq $ResponseMap) { return $false }
+    $id = [string]$Request.Id
+    if ([string]::IsNullOrWhiteSpace($id)) { return $false }
+    $syncRoot = $ResponseMap.SyncRoot
+    [System.Threading.Monitor]::Enter($syncRoot)
+    try {
+        $expired = $Request.PSObject.Properties.Name -contains "ExpiresAtUtc" -and
+            [DateTime]::UtcNow -ge [DateTime]$Request.ExpiresAtUtc
+        if ($expired) {
+            $null = $ResponseMap.Remove($id)
+            return $false
+        }
+        if (-not $ResponseMap.ContainsKey($id)) { return $false }
+        $ResponseMap[$id] = $Response
+        return $true
+    } finally {
+        [System.Threading.Monitor]::Exit($syncRoot)
     }
 }
 
@@ -699,6 +717,7 @@ function Get-AutomationBridgeWorkerScript {
             }
 
             $stream = $null
+            $responseId = ""
             $requestFullyRead = $false
             try {
                 $Client.NoDelay = $true
@@ -890,6 +909,7 @@ function Get-AutomationBridgeWorkerScript {
                     $remoteScope = "unknown"
                 }
                 $id = [guid]::NewGuid().ToString("N")
+                $responseId = $id
                 $request = [PSCustomObject]@{
                     Id = $id
                     Method = $method
@@ -901,19 +921,41 @@ function Get-AutomationBridgeWorkerScript {
                     Authenticated = $true
                     ExpiresAtUtc = [DateTime]::UtcNow.AddMilliseconds([int]$Settings.RouteTimeoutMs)
                 }
+                $responseSyncRoot = $ResponseMap.SyncRoot
+                [System.Threading.Monitor]::Enter($responseSyncRoot)
+                try {
+                    $ResponseMap[$id] = $null
+                } finally {
+                    [System.Threading.Monitor]::Exit($responseSyncRoot)
+                }
                 $RequestQueue.Enqueue($request)
                 $deadline = [DateTime]$request.ExpiresAtUtc
                 $response = $null
                 while ([DateTime]::UtcNow -lt $deadline -and -not [bool]$BridgeState["Stop"]) {
-                    if ($ResponseMap.ContainsKey($id)) {
-                        $response = $ResponseMap[$id]
-                        $ResponseMap.Remove($id)
-                        break
+                    [System.Threading.Monitor]::Enter($responseSyncRoot)
+                    try {
+                        if ($ResponseMap.ContainsKey($id) -and $null -ne $ResponseMap[$id]) {
+                            $response = $ResponseMap[$id]
+                            $null = $ResponseMap.Remove($id)
+                        }
+                    } finally {
+                        [System.Threading.Monitor]::Exit($responseSyncRoot)
                     }
+                    if ($null -ne $response) { break }
                     Start-Sleep -Milliseconds 20
                 }
                 if ($null -eq $response) {
-                    $ResponseMap.Remove($id)
+                    [System.Threading.Monitor]::Enter($responseSyncRoot)
+                    try {
+                        if ($ResponseMap.ContainsKey($id)) {
+                            if ($null -ne $ResponseMap[$id]) { $response = $ResponseMap[$id] }
+                            $null = $ResponseMap.Remove($id)
+                        }
+                    } finally {
+                        [System.Threading.Monitor]::Exit($responseSyncRoot)
+                    }
+                }
+                if ($null -eq $response) {
                     Send-BridgeJson -Client $Client -Status 504 -Body @{ error = "route_timeout" } -Settings $Settings -BridgeState $BridgeState | Out-Null
                 } else {
                     Send-BridgeJson -Client $Client -Status ([int]$response.Status) -Body $response.Body -Settings $Settings -BridgeState $BridgeState | Out-Null
@@ -925,6 +967,11 @@ function Get-AutomationBridgeWorkerScript {
             } catch {
                 Send-BridgeJson -Client $Client -Status 500 -Body @{ error = "internal_error" } -Settings $Settings -BridgeState $BridgeState | Out-Null
             } finally {
+                if (-not [string]::IsNullOrWhiteSpace($responseId)) {
+                    $responseSyncRoot = $ResponseMap.SyncRoot
+                    [System.Threading.Monitor]::Enter($responseSyncRoot)
+                    try { $null = $ResponseMap.Remove($responseId) } finally { [System.Threading.Monitor]::Exit($responseSyncRoot) }
+                }
                 Close-BridgeClient -Client $Client -DrainInput (-not $requestFullyRead)
             }
         }

@@ -198,6 +198,7 @@ public static class MonitorControlVcpWriteProbe
         "Test-DisplayWorkerResultCurrent",
         "Stop-DdcWriteQueueForHandleRelease",
         "Clear-PhysicalMonitorHandles",
+        "Close-UnregisteredPhysicalMonitorHandle",
         "Test-MonitorSupportsVcp",
         "Test-MonitorSupportsVcpValue",
         "ConvertTo-VcpCode",
@@ -228,11 +229,14 @@ public static class MonitorControlVcpWriteProbe
         "Test-VcpReadbackOutOfRange",
         "Test-VcpCodeIsScaled",
         "Get-VcpMaximumForMonitor",
+        "Get-SelectedMonitorVcpMaximum",
         "Set-VcpMaximumForMonitor",
         "ConvertTo-VcpPercent",
         "ConvertTo-VcpRawValue",
         "Resolve-VcpWriteValueForMonitor",
         "Update-VcpMaximumCache",
+        "Get-SelectedBrightnessPercent",
+        "Set-BrightnessSliderFromPercent",
         "Get-ProfilePercentValue",
         "Get-MonitorEdidModelId",
         "Get-CapabilitiesBlocklistEntry",
@@ -290,6 +294,7 @@ public static class MonitorControlVcpWriteProbe
         "Get-OptionalHelperSettingsObject",
         "Save-OptionalHelperSettings",
         "Import-OptionalHelperSettings",
+        "Find-FirstExistingPath",
         "Initialize-CpuMonitor",
         "Initialize-PresentMon",
         "Invoke-VerifiedVcpTransaction",
@@ -314,6 +319,7 @@ public static class MonitorControlVcpWriteProbe
         "Initialize-AutomationBridgeAuditLog",
         "Write-AutomationBridgeWriteLog",
         "Invoke-AutomationBridgeRequest",
+        "Complete-AutomationBridgeResponse",
         "Process-AutomationBridgeRequests",
         "Get-AutomationBridgeWorkerScript",
         "Normalize-ScheduleTime",
@@ -1109,6 +1115,15 @@ Describe "Monitor capabilities parsing" {
         $parsed.Count | Should -Be 0
     }
 
+    It "discards a malformed code and its nested values as one token" {
+        $parsed = ConvertFrom-MonitorCapabilities -Capabilities "vcp(123(01 02 03) 10 60(0F 11))"
+
+        @($parsed.Codes.Keys | Sort-Object) | Should -Be @(0x10, 0x60)
+        $parsed.Codes.ContainsKey(0x01) | Should -BeFalse
+        $parsed.Codes.ContainsKey(0x02) | Should -BeFalse
+        $parsed.Codes.ContainsKey(0x03) | Should -BeFalse
+    }
+
     It "checks code and value support from parsed capabilities" {
         $parsed = ConvertFrom-MonitorCapabilities -Capabilities "vcp(10 60(0F 11 12))"
         $monitor = [pscustomobject]@{ CapabilitiesKnown = $true; SupportedVcpCodes = $parsed.Codes }
@@ -1533,6 +1548,19 @@ Describe "Physical monitor handle cleanup" {
 
         @($script:DestroyedHandleValues) | Should -Be @(101, 202)
         $script:PhysicalMonitors.Count | Should -Be 0
+    }
+
+    It "destroys an enumerated handle that could not be registered" {
+        Close-UnregisteredPhysicalMonitorHandle -Handle ([IntPtr]303) -Registered $false -DestroyHandle {
+            param([IntPtr]$Handle)
+            $script:DestroyedHandleValues += $Handle.ToInt64()
+        } | Should -BeTrue
+        Close-UnregisteredPhysicalMonitorHandle -Handle ([IntPtr]404) -Registered $true -DestroyHandle {
+            param([IntPtr]$Handle)
+            $script:DestroyedHandleValues += $Handle.ToInt64()
+        } | Should -BeFalse
+
+        @($script:DestroyedHandleValues) | Should -Be @(303)
     }
 
     It "continues zeroing handles when a native destroy call fails" {
@@ -2154,6 +2182,7 @@ Describe "Automation bridge protected settings and routing" {
         $script:AutomationBridgeRequests = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
         $script:AutomationBridgeResponses = [hashtable]::Synchronized(@{})
         $request = [PSCustomObject]@{ Id = "failure"; Method = "GET"; Path = "/api/monitors"; Query = @{}; Headers = @{}; Body = "" }
+        $script:AutomationBridgeResponses[$request.Id] = $null
         $script:AutomationBridgeRequests.Enqueue($request)
         Mock Invoke-AutomationBridgeRequest { throw "secret-key and stable-monitor-id" }
 
@@ -2163,6 +2192,19 @@ Describe "Automation bridge protected settings and routing" {
         $script:AutomationBridgeResponses["failure"].Status | Should -Be 500
         $responseJson | Should -Match "internal_error"
         $responseJson | Should -Not -Match "secret-key|stable-monitor-id"
+    }
+
+    It "does not recreate a response entry after its handler timed out" {
+        $script:AutomationBridgeRequests = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
+        $script:AutomationBridgeResponses = [hashtable]::Synchronized(@{})
+        $request = [PSCustomObject]@{ Id = "timed-out"; Method = "GET"; Path = "/api/monitors"; Query = @{}; Headers = @{}; Body = "" }
+        $script:AutomationBridgeRequests.Enqueue($request)
+        Mock Invoke-AutomationBridgeRequest { New-AutomationBridgeResponse -Status 200 -Body @{ monitors = @() } }
+
+        Process-AutomationBridgeRequests
+
+        $script:AutomationBridgeResponses.ContainsKey($request.Id) | Should -BeFalse
+        $script:AutomationBridgeResponses.Count | Should -Be 0
     }
 }
 
@@ -2411,6 +2453,39 @@ Describe "Monitor reported VCP range normalization" {
             $observed = ConvertTo-VcpPercent -RawValue $written[$index] -Maximum $maximum
             [Math]::Abs($observed - 25) | Should -BeLessOrEqual ([Math]::Ceiling(100.0 / (2 * $maximum)))
         }
+    }
+
+    It "bounds-checks a stale selected-monitor index before a single write" {
+        $script:PhysicalMonitors = @()
+        $script:CurrentMonitorIndex = 4
+        $script:ApplyToAll = $false
+        $script:WmiBrightnessAvailable = $false
+        $script:RiskyVcpCodes = @()
+
+        { Set-VCPValueWithSync -VCPCode ([byte]0x12) -Value ([uint32]50) } | Should -Not -Throw
+        Set-VCPValueWithSync -VCPCode ([byte]0x12) -Value ([uint32]50) | Should -BeFalse
+    }
+
+    It "updates the selected brightness range before publishing its raw value" {
+        $monitor = New-RangeTestMonitor -IdentityKey "wide" -BrightnessMaximum 255
+        $script:PhysicalMonitors = @($monitor)
+        $script:CurrentMonitorIndex = 0
+        $script:brightnessSlider = [PSCustomObject]@{ Maximum = 100.0; Value = 0.0 }
+        $script:brightnessValue = [PSCustomObject]@{ Text = "" }
+
+        Set-BrightnessSliderFromPercent -Percent 80 | Should -Be 204
+
+        $script:brightnessSlider.Maximum | Should -Be 255
+        $script:brightnessSlider.Value | Should -Be 204
+        Get-SelectedBrightnessPercent | Should -Be 80
+    }
+}
+
+Describe "GPU helper discovery" {
+    It "keeps the first matching helper path" {
+        $found = Find-FirstExistingPath -CandidatePaths @("preferred.exe", "fallback.exe") -PathExists { param($Path) return $true }
+
+        $found | Should -Be "preferred.exe"
     }
 }
 

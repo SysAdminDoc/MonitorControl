@@ -168,12 +168,24 @@ function Reset-AmbientBrightnessState {
     $script:AmbientLastWriteUtc = [DateTime]::MinValue
 }
 
+function Find-FirstExistingPath {
+    param([string[]]$CandidatePaths, [scriptblock]$PathExists)
+    if ($null -eq $PathExists) { $PathExists = { param([string]$Path) Test-Path -LiteralPath $Path } }
+    foreach ($candidate in @($CandidatePaths)) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate) -and (& $PathExists $candidate)) { return $candidate }
+    }
+    return ""
+}
+
 function Initialize-GPU {
     $gpus = Get-CimInstance -ClassName Win32_VideoController -ErrorAction SilentlyContinue
     foreach ($gpu in $gpus) {
         if ($gpu.Name -match "NVIDIA") {
             $script:HasNvidia = $true
-            @("${env:ProgramFiles}\NVIDIA Corporation\NVSMI\nvidia-smi.exe", "${env:SystemRoot}\System32\nvidia-smi.exe") | ForEach-Object { if (Test-Path $_) { $script:NvidiaSmiPath = $_; return } }
+            $script:NvidiaSmiPath = Find-FirstExistingPath -CandidatePaths @(
+                "${env:ProgramFiles}\NVIDIA Corporation\NVSMI\nvidia-smi.exe",
+                "${env:SystemRoot}\System32\nvidia-smi.exe"
+            )
         }
         if ($gpu.Name -match "AMD|Radeon") {
             $script:HasAmd = $true
