@@ -437,8 +437,7 @@ function Set-AutomationBridgeBrightness {
             $script:UpdatingUI = $true
             try {
                 $rawValue = ConvertTo-SelectedRawValue -Percent $value -Code ([int][MonitorAPI]::VCP_BRIGHTNESS)
-                $brightnessSlider.Value = $rawValue
-                $brightnessValue.Text = ([int]$rawValue).ToString()
+                Update-AutomationBridgeBrightnessUi -RawValue $rawValue
             } finally { $script:UpdatingUI = $false }
         }
     }

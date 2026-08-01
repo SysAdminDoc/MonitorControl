@@ -179,6 +179,8 @@ public static class MonitorControlVcpWriteProbe
         "ConvertFrom-MonitorCapabilities",
         "Get-DisplayRecoveryBackoffDelay",
         "Get-DisplayRecoveryReadRetryCount",
+        "Get-DdcLivenessRecoveryDecision",
+        "Invoke-DdcLivenessRecovery",
         "Get-DisplayRecoveryTransition",
         "Test-DisplayWorkerResultCurrent",
         "Stop-DdcWriteQueueForHandleRelease",
@@ -233,6 +235,10 @@ public static class MonitorControlVcpWriteProbe
         "Stop-CapabilitiesWorker",
         "Stop-VcpWorker",
         "Stop-DdcReportWorker",
+        "Set-VcpWorkerUiIdle",
+        "Set-VcpWorkerResultText",
+        "Set-DdcReportWorkerUiIdle",
+        "Update-AutomationBridgeBrightnessUi",
         "Get-ThemeBrushMap",
         "ConvertTo-ThemeBrush",
         "Register-DetachedThemedWindow",
@@ -535,9 +541,30 @@ Describe "Build-time source composition" {
     }
 
     It "keeps WPF globals out of the testable source modules" {
+        $appText = [System.IO.File]::ReadAllText((Join-Path $script:RepoRoot "src\MonitorControl.App.ps1"))
+        $uiVariableNames = @([regex]::Matches(
+            $appText,
+            '(?m)\$([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\$window\.FindName\('
+        ) | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+
         foreach ($modulePath in Get-ChildItem -LiteralPath (Join-Path $script:RepoRoot "src") -Filter "*.psm1") {
             $text = [System.IO.File]::ReadAllText($modulePath.FullName)
             $text | Should -Not -Match 'System\.Windows\.|Windows\.Forms|AutomationProperties|DispatcherTimer|UIAutomation|XamlReader|FindName\('
+
+            $tokens = $null
+            $errors = $null
+            $moduleAst = [System.Management.Automation.Language.Parser]::ParseFile(
+                $modulePath.FullName,
+                [ref]$tokens,
+                [ref]$errors
+            )
+            @($errors).Count | Should -Be 0
+            $referencedVariables = @($moduleAst.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.VariableExpressionAst]
+            }, $true) | ForEach-Object { $_.VariablePath.UserPath } | Sort-Object -Unique)
+            $leakedUiVariables = @($referencedVariables | Where-Object { $_ -cin $uiVariableNames })
+            ($leakedUiVariables -join ", ") | Should -BeNullOrEmpty
         }
     }
 
@@ -1098,6 +1125,67 @@ Describe "Display recovery generation and identity safety" {
         $state.Status | Should -Be "Fresh"
         $state.ConsecutiveFailures | Should -Be 0
         $state.LastSuccessUtc | Should -Be $clock.AddSeconds(10)
+    }
+
+    It "requests one handle reacquisition per generation when only part of the DDC inventory fails" {
+        $results = @(
+            [PSCustomObject]@{ Generation = 7; IdentityKey = "edid:a"; Success = $true },
+            [PSCustomObject]@{ Generation = 7; IdentityKey = "edid:b"; Success = $false },
+            [PSCustomObject]@{ Generation = 6; IdentityKey = "edid:stale"; Success = $false }
+        )
+        $script:DdcLivenessLastRecoveryGeneration = 0
+        $script:LivenessRecoveryRequests = 0
+        $script:LivenessFailedIdentities = @()
+        $requestRecovery = {
+            param([object[]]$FailedIdentities)
+            $script:LivenessRecoveryRequests++
+            $script:LivenessFailedIdentities = @($FailedIdentities)
+        }
+
+        $first = Invoke-DdcLivenessRecovery -Results $results -CurrentGeneration 7 -RequestRecovery $requestRecovery
+        $second = Invoke-DdcLivenessRecovery -Results $results -CurrentGeneration 7 -RequestRecovery $requestRecovery
+
+        $first.MixedOutcome | Should -BeTrue
+        $first.RecoveryRequested | Should -BeTrue
+        $second.AlreadyRecovered | Should -BeTrue
+        $second.RecoveryRequested | Should -BeFalse
+        $script:LivenessRecoveryRequests | Should -Be 1
+        $script:LivenessFailedIdentities | Should -Be @("edid:b")
+    }
+
+    It "does not reacquire handles for a global DDC outage or a fully healthy probe" {
+        $allFailed = @(
+            [PSCustomObject]@{ Generation = 8; IdentityKey = "edid:a"; Success = $false },
+            [PSCustomObject]@{ Generation = 8; IdentityKey = "edid:b"; Success = $false }
+        )
+        $allHealthy = @(
+            [PSCustomObject]@{ Generation = 8; IdentityKey = "edid:a"; Success = $true },
+            [PSCustomObject]@{ Generation = 8; IdentityKey = "edid:b"; Success = $true }
+        )
+
+        (Get-DdcLivenessRecoveryDecision -Results $allFailed -CurrentGeneration 8 -LastRecoveryGeneration 0).ShouldRecover | Should -BeFalse
+        (Get-DdcLivenessRecoveryDecision -Results $allHealthy -CurrentGeneration 8 -LastRecoveryGeneration 0).ShouldRecover | Should -BeFalse
+    }
+
+    It "keeps the periodic liveness worker read-only and reports its last successful probe" {
+        $source = Get-Content -LiteralPath $script:AppPath -Raw
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$errors)
+        @($errors).Count | Should -Be 0
+        $probeFunction = @($ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq "Start-DdcLivenessProbe"
+        }, $true))[0]
+        $probeText = $probeFunction.Extent.Text
+
+        $source | Should -Match '\$script:DdcLivenessProbeIntervalSeconds = 60'
+        $probeText | Should -Match 'ReadVCPWithRetry'
+        $probeText | Should -Not -Match 'SetVCPFeature|Queue-VCPValue|WriteVCPWithRetry'
+        $source | Should -Match 'Request-DisplayRecoveryRefresh -Reason "ddc-liveness"'
+        $source | Should -Match 'DDC liveness: one read-only VCP query per monitor every \$livenessInterval seconds; this probe never writes to a display'
+        $source | Should -Match 'Liveness probe: last success=\$livenessSuccess, last attempt=\$livenessAttempt'
     }
 
     It "rejects obsolete workers and same-slot results from a different display" {
