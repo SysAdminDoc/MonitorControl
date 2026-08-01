@@ -3260,9 +3260,11 @@ function Get-SelectedBrightnessPercent {
 
 function Set-BrightnessSliderFromPercent {
     param([int]$Percent)
-    $raw = ConvertTo-VcpRawValue -Percent ([double]$Percent) -Maximum (Get-SelectedMonitorVcpMaximum -Code ([int][MonitorAPI]::VCP_BRIGHTNESS))
+    $maximum = Get-SelectedMonitorVcpMaximum -Code ([int][MonitorAPI]::VCP_BRIGHTNESS)
+    $raw = ConvertTo-VcpRawValue -Percent ([double]$Percent) -Maximum $maximum
     $script:UpdatingUI = $true
     try {
+        $brightnessSlider.Maximum = $maximum
         $brightnessSlider.Value = $raw
         $brightnessValue.Text = ([int]$raw).ToString()
     } finally {
