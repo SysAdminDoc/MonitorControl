@@ -292,6 +292,10 @@ These controls are under **System > Display & DDC**.
 - The app reads each supported value back according to the selected monitor's verification policy
   and distinguishes **verified**, **verified after re-read**, **mismatched**, **unreliable
   readback**, **verification off**, and **readback unavailable** outcomes
+- Profile loads, direct VCP commands, and brightness restore execute as one verified background
+  transaction, so multi-display operations do not block the window. The footer shows operation and
+  rollback progress and offers **Cancel**; cancellation is cooperative, restores every readable
+  value already applied in reverse order, and reports when a restore could only be partial
 - A direct command that fails or reads back mismatched restores the readable prior value, and the status line reports whether that restore was complete or partial
 - Profile loads snapshot every readable prior DDC/WMI value and restore those values in reverse order when a write fails or reads back incorrectly
 - Automatic compatibility reports omit risky VCP codes; VCP Explorer reads remain explicitly user initiated

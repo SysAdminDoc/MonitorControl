@@ -868,6 +868,18 @@ $script:MonitorSettingsWorkerLastOutputCount = 0
 $script:MonitorSettingsWorkerGeneration = -1
 $script:MonitorSettingsWorkerTotalReads = 0
 $script:MonitorSettingsWorkerTargets = @()
+$script:VerifiedTransactionWorker = $null
+$script:VerifiedTransactionWorkerInput = $null
+$script:VerifiedTransactionWorkerOutput = $null
+$script:VerifiedTransactionWorkerAsyncResult = $null
+$script:VerifiedTransactionWorkerTimer = $null
+$script:VerifiedTransactionWorkerLastOutputCount = 0
+$script:VerifiedTransactionWorkerGeneration = -1
+$script:VerifiedTransactionWorkerTargets = @()
+$script:VerifiedTransactionWorkerCancelState = $null
+$script:VerifiedTransactionWorkerCompletionAction = $null
+$script:VerifiedTransactionWorkerActionLabel = ""
+$script:VerifiedTransactionWorkerTotalOperations = 0
 $script:CapabilitiesWorker = $null
 $script:CapabilitiesWorkerInput = $null
 $script:CapabilitiesWorkerOutput = $null
@@ -2158,6 +2170,7 @@ function Update-CapabilitiesWorkerOutput {
 }
 
 function Start-CapabilitiesWorker {
+    if (Test-VerifiedVcpTransactionWorkerActive) { return }
     Stop-CapabilitiesWorker -Cancel
     $targets = @()
     for ($i = 0; $i -lt $script:PhysicalMonitors.Count; $i++) {
@@ -2386,6 +2399,274 @@ function Start-DdcWriteResultTimer {
 
 
 
+function Test-VerifiedVcpTransactionWorkerActive {
+    return $null -ne $script:VerifiedTransactionWorkerAsyncResult -and -not [bool]$script:VerifiedTransactionWorkerAsyncResult.IsCompleted
+}
+
+function New-VerifiedVcpWorkerOperation {
+    param($Operation, [int]$Generation)
+    if ($null -eq $Operation) { return $null }
+    $monitorIndex = -1
+    for ($index = 0; $index -lt $script:PhysicalMonitors.Count; $index++) {
+        $monitor = $script:PhysicalMonitors[$index]
+        if ($null -eq $monitor) { continue }
+        if ([string]$monitor.IdentityKey -eq [string]$Operation.IdentityKey -and
+            [int64]$monitor.Handle.ToInt64() -eq [int64]$Operation.Handle.ToInt64()) {
+            $monitorIndex = $index
+            break
+        }
+    }
+    if ($monitorIndex -lt 0) { return $null }
+    $timingProfile = Get-DdcTimingProfile -IdentityKey ([string]$Operation.IdentityKey)
+    $timing = Get-DdcEffectiveTiming -TimingProfile $timingProfile
+    return [PSCustomObject]@{
+        MonitorName = [string]$Operation.MonitorName
+        IdentityKey = [string]$Operation.IdentityKey
+        MonitorIndex = [int]$monitorIndex
+        Generation = [int]$Generation
+        Handle = [IntPtr]$Operation.Handle
+        HandleValue = [int64]$Operation.Handle.ToInt64()
+        Code = [int]$Operation.Code
+        Value = [uint32]$Operation.Value
+        Backend = [string]$Operation.Backend
+        ReportedMaximum = [uint32]$Operation.ReportedMaximum
+        VerifyPolicy = [string]$timing.VerifyPolicy
+        VerificationDelayMilliseconds = [int]$timing.VerificationDelayMilliseconds
+        LenientVerificationDelayMilliseconds = [int]$timing.LenientVerificationDelayMilliseconds
+        ReadRetries = [int]$timing.ReadRetries
+        WriteRetries = [int]$timing.WriteRetries
+        DelayMilliseconds = [int]$timing.DelayMilliseconds
+        StopOnNullResponse = $timingProfile.PSObject.Properties.Name -contains "NullMeansUnsupported" -and [bool]$timingProfile.NullMeansUnsupported
+    }
+}
+
+function Test-VerifiedVcpTransactionTargetsCurrent {
+    param([object[]]$Targets, [int]$Generation)
+    $items = @($Targets)
+    if ($items.Count -eq 0 -or $Generation -ne $script:DisplayRecoveryGeneration) { return $false }
+    foreach ($target in $items) {
+        if (-not (Test-DisplayWorkerResultCurrent -Result $target -CurrentGeneration $script:DisplayRecoveryGeneration -Monitors $script:PhysicalMonitors)) { return $false }
+    }
+    return $true
+}
+
+function Request-VerifiedVcpTransactionCancel {
+    param([string]$Reason = "user request")
+    if (-not (Test-VerifiedVcpTransactionWorkerActive) -or $null -eq $script:VerifiedTransactionWorkerCancelState) { return $false }
+    $script:VerifiedTransactionWorkerCancelState.Cancel = $true
+    $script:VerifiedTransactionWorkerCancelState.Reason = $Reason
+    if ($transactionProgressText) { $transactionProgressText.Text = "Cancelling and restoring..." }
+    if ($transactionCancelBtn) { $transactionCancelBtn.IsEnabled = $false }
+    Update-Status "Cancelling $script:VerifiedTransactionWorkerActionLabel; restoring applied values..."
+    return $true
+}
+
+function Stop-VerifiedVcpTransactionWorker {
+    param([switch]$Cancel, [switch]$WaitForCompletion, [int]$TimeoutMs = 5000)
+    if ($Cancel -and $script:VerifiedTransactionWorkerCancelState) {
+        $script:VerifiedTransactionWorkerCancelState.Cancel = $true
+        $script:VerifiedTransactionWorkerCancelState.Reason = "worker teardown"
+    }
+    if ($WaitForCompletion -and $script:VerifiedTransactionWorkerAsyncResult -and -not $script:VerifiedTransactionWorkerAsyncResult.IsCompleted) {
+        try { $null = $script:VerifiedTransactionWorkerAsyncResult.AsyncWaitHandle.WaitOne([Math]::Max(0, $TimeoutMs)) } catch {}
+    }
+    if ($script:VerifiedTransactionWorkerTimer) { $script:VerifiedTransactionWorkerTimer.Stop() }
+    if ($script:VerifiedTransactionWorker) {
+        if ($Cancel -and $script:VerifiedTransactionWorkerAsyncResult -and -not $script:VerifiedTransactionWorkerAsyncResult.IsCompleted) {
+            try { $script:VerifiedTransactionWorker.Stop() } catch {}
+        }
+        try { $script:VerifiedTransactionWorker.Dispose() } catch {}
+    }
+    if ($script:VerifiedTransactionWorkerInput) { try { $script:VerifiedTransactionWorkerInput.Dispose() } catch {} }
+    if ($script:VerifiedTransactionWorkerOutput) { try { $script:VerifiedTransactionWorkerOutput.Dispose() } catch {} }
+    $script:VerifiedTransactionWorker = $null
+    $script:VerifiedTransactionWorkerInput = $null
+    $script:VerifiedTransactionWorkerOutput = $null
+    $script:VerifiedTransactionWorkerAsyncResult = $null
+    $script:VerifiedTransactionWorkerLastOutputCount = 0
+    $script:VerifiedTransactionWorkerGeneration = -1
+    $script:VerifiedTransactionWorkerTargets = @()
+    $script:VerifiedTransactionWorkerCancelState = $null
+    $script:VerifiedTransactionWorkerCompletionAction = $null
+    $script:VerifiedTransactionWorkerActionLabel = ""
+    $script:VerifiedTransactionWorkerTotalOperations = 0
+    if ($transactionProgressPanel) { $transactionProgressPanel.Visibility = [System.Windows.Visibility]::Collapsed }
+    if ($transactionCancelBtn) { $transactionCancelBtn.IsEnabled = $true }
+}
+
+function Update-VerifiedVcpTransactionWorkerOutput {
+    if (-not $script:VerifiedTransactionWorker -or -not $script:VerifiedTransactionWorkerOutput -or -not $script:VerifiedTransactionWorkerAsyncResult) { return }
+    if ($script:VerifiedTransactionWorkerGeneration -ne $script:DisplayRecoveryGeneration -and $script:VerifiedTransactionWorkerCancelState) {
+        $script:VerifiedTransactionWorkerCancelState.Cancel = $true
+        $script:VerifiedTransactionWorkerCancelState.Reason = "display generation changed"
+    }
+    $count = $script:VerifiedTransactionWorkerOutput.Count
+    if ($count -gt $script:VerifiedTransactionWorkerLastOutputCount) {
+        $newItems = @($script:VerifiedTransactionWorkerOutput | Select-Object -Skip $script:VerifiedTransactionWorkerLastOutputCount)
+        $script:VerifiedTransactionWorkerLastOutputCount = $count
+        foreach ($item in @($newItems | Where-Object { [string]$_.Kind -eq "Progress" })) {
+            if (-not (Test-DisplayWorkerResultCurrent -Result $item -CurrentGeneration $script:DisplayRecoveryGeneration -Monitors $script:PhysicalMonitors)) { continue }
+            $phase = [string]$item.Phase
+            $completed = [int]$item.Completed
+            $total = [Math]::Max(1, [int]$item.Total)
+            if ($transactionProgressBar) { $transactionProgressBar.Maximum = $total; $transactionProgressBar.Value = [Math]::Min($total, $completed) }
+            if ($transactionProgressText) { $transactionProgressText.Text = "$phase $completed/$total" }
+            Update-Status "$script:VerifiedTransactionWorkerActionLabel - $phase $completed/$total"
+        }
+    }
+    if (-not [bool]$script:VerifiedTransactionWorkerAsyncResult.IsCompleted) { return }
+    $completionAction = $script:VerifiedTransactionWorkerCompletionAction
+    $actionLabel = $script:VerifiedTransactionWorkerActionLabel
+    $targets = @($script:VerifiedTransactionWorkerTargets)
+    $generation = [int]$script:VerifiedTransactionWorkerGeneration
+    $workerError = ""
+    try { $script:VerifiedTransactionWorker.EndInvoke($script:VerifiedTransactionWorkerAsyncResult) } catch { $workerError = $_.Exception.Message }
+    $transaction = @($script:VerifiedTransactionWorkerOutput | Where-Object {
+        $_.PSObject.Properties.Name -contains "Outcome" -and $_.PSObject.Properties.Name -contains "Results"
+    } | Select-Object -Last 1)
+    if ($transaction.Count -eq 0) {
+        $transaction = @([PSCustomObject]@{ Success = $false; Outcome = "WorkerFailed"; Results = @(); Rollback = "Partial"; Error = $workerError })
+    }
+    $result = $transaction[0]
+    $isCurrent = Test-VerifiedVcpTransactionTargetsCurrent -Targets $targets -Generation $generation
+    Stop-VerifiedVcpTransactionWorker
+    if (-not $isCurrent) {
+        Update-Status "$actionLabel result discarded after the display configuration changed"
+        return
+    }
+    if ($completionAction) {
+        try { & $completionAction $result } catch { Update-Status "$actionLabel completion failed: $($_.Exception.Message)" }
+    } elseif ([bool]$result.Success) {
+        Update-Status "$actionLabel complete ($($result.Outcome))"
+    } else {
+        Update-Status "$actionLabel ended $($result.Outcome); rollback: $($result.Rollback)"
+    }
+}
+
+function Start-VerifiedVcpTransactionWorker {
+    param(
+        [object[]]$Operations,
+        [string]$ActionLabel = "DDC transaction",
+        [scriptblock]$CompletionAction,
+        [int]$QueueWaitTimeoutMs = 2000
+    )
+    if (Test-VerifiedVcpTransactionWorkerActive) {
+        Update-Status "$ActionLabel could not start because another verified transaction is running"
+        return $false
+    }
+    if ($script:VerifiedTransactionWorker) { Stop-VerifiedVcpTransactionWorker }
+    $generation = [int]$script:DisplayRecoveryGeneration
+    $targets = @($Operations | ForEach-Object { New-VerifiedVcpWorkerOperation -Operation $_ -Generation $generation } | Where-Object { $null -ne $_ })
+    if ($targets.Count -ne @($Operations).Count -or $targets.Count -eq 0) {
+        Update-Status "$ActionLabel has no current monitor target"
+        return $false
+    }
+    Stop-MonitorSettingsWorker -Cancel
+    Stop-VcpWorker -Cancel
+    Stop-CapabilitiesWorker -Cancel
+    Stop-DdcReportWorker -Cancel
+    Stop-DdcLivenessWorker -Cancel
+    $cancelState = [hashtable]::Synchronized(@{ Cancel = $false; Reason = "" })
+    $settingsDefinition = "function Get-DdcTransactionVerificationSettings {" + (Get-Command Get-DdcTransactionVerificationSettings).Definition + "}"
+    $rangeDefinition = "function Test-VcpReadbackOutOfRange {" + (Get-Command Test-VcpReadbackOutOfRange).Definition + "}"
+    $transactionDefinition = "function Invoke-VerifiedVcpTransaction {" + (Get-Command Invoke-VerifiedVcpTransaction).Definition + "}"
+    $workerScript = {
+        param(
+            [object[]]$Targets,
+            [hashtable]$CancelState,
+            [int]$QueueTimeoutMs,
+            [string]$SettingsDefinition,
+            [string]$RangeDefinition,
+            [string]$TransactionDefinition
+        )
+        . ([scriptblock]::Create($SettingsDefinition))
+        . ([scriptblock]::Create($RangeDefinition))
+        . ([scriptblock]::Create($TransactionDefinition))
+        $deadline = [DateTime]::UtcNow.AddMilliseconds([Math]::Max(0, $QueueTimeoutMs))
+        while (-not [bool]$CancelState.Cancel -and
+            ([MonitorAPI]::IsVCPWriteWorkerActive() -or [MonitorAPI]::GetPendingVCPWriteCount() -gt 0) -and
+            [DateTime]::UtcNow -lt $deadline) {
+            [Threading.Thread]::Sleep(50)
+        }
+        if ([bool]$CancelState.Cancel) {
+            [PSCustomObject]@{ Success = $false; Outcome = "Canceled"; Results = @(); Rollback = "NotNeeded" }
+            return
+        }
+        if ([MonitorAPI]::IsVCPWriteWorkerActive() -or [MonitorAPI]::GetPendingVCPWriteCount() -gt 0) {
+            [PSCustomObject]@{ Success = $false; Outcome = "Busy"; Results = @(); Rollback = "NotNeeded" }
+            return
+        }
+        $readValue = {
+            param($Operation)
+            if ([string]$Operation.Backend -eq "WMI") {
+                try {
+                    $level = Get-CimInstance -Namespace root/WMI -ClassName WmiMonitorBrightness -ErrorAction Stop | Select-Object -First 1
+                    $current = if ($level -and $null -ne $level.CurrentBrightness) { [uint32]$level.CurrentBrightness } else { [uint32]0 }
+                    return [PSCustomObject]@{ Success = $null -ne $level; Current = $current; Maximum = [uint32]100 }
+                } catch { return [PSCustomObject]@{ Success = $false; Current = [uint32]0; Maximum = [uint32]100 } }
+            }
+            $vct = [uint32]0; $current = [uint32]0; $maximum = [uint32]0; $lastError = [int]0; $attempts = [int]0
+            $ok = [MonitorAPI]::ReadVCPWithRetry([IntPtr]$Operation.Handle, [byte]$Operation.Code, [int]$Operation.ReadRetries, [int]$Operation.DelayMilliseconds, [bool]$Operation.StopOnNullResponse, [ref]$vct, [ref]$current, [ref]$maximum, [ref]$lastError, [ref]$attempts)
+            return [PSCustomObject]@{ Success = [bool]$ok; Current = $current; Maximum = $maximum; LastError = $lastError; Attempts = $attempts }
+        }
+        $writeValue = {
+            param($Operation, [uint32]$TargetValue)
+            if ([string]$Operation.Backend -eq "WMI") {
+                try {
+                    $methods = Get-CimInstance -Namespace root/WMI -ClassName WmiMonitorBrightnessMethods -ErrorAction Stop
+                    foreach ($method in $methods) { Invoke-CimMethod -InputObject $method -MethodName WmiSetBrightness -Arguments @{ Timeout = 1; Brightness = [byte][Math]::Max(0, [Math]::Min(100, [int]$TargetValue)) } -ErrorAction Stop | Out-Null }
+                    return $true
+                } catch { return $false }
+            }
+            $lastError = [int]0; $attempts = [int]0
+            return [bool][MonitorAPI]::SetVCPWithRetry([IntPtr]$Operation.Handle, [byte]$Operation.Code, $TargetValue, [int]$Operation.WriteRetries, [int]$Operation.DelayMilliseconds, [ref]$lastError, [ref]$attempts)
+        }
+        $delayAction = { param([int]$Milliseconds) if ($Milliseconds -gt 0) { [Threading.Thread]::Sleep($Milliseconds) } }
+        $cancellationRequested = { return [bool]$CancelState.Cancel }
+        $progressAction = {
+            param([int]$Completed, [int]$Total, [string]$Phase, $Record)
+            $operation = $Record.Operation
+            [PSCustomObject]@{
+                Kind = "Progress"
+                Completed = $Completed
+                Total = $Total
+                Phase = $Phase
+                Verification = [string]$Record.Verification
+                Generation = [int]$operation.Generation
+                MonitorIndex = [int]$operation.MonitorIndex
+                IdentityKey = [string]$operation.IdentityKey
+                HandleValue = [int64]$operation.HandleValue
+            }
+        }
+        Invoke-VerifiedVcpTransaction -Operations $Targets -ReadValue $readValue -WriteValue $writeValue -RollbackOnFailure -DelayAction $delayAction -ProgressAction $progressAction -CancellationRequested $cancellationRequested
+    }
+    $script:VerifiedTransactionWorkerGeneration = $generation
+    $script:VerifiedTransactionWorkerTargets = $targets
+    $script:VerifiedTransactionWorkerCancelState = $cancelState
+    $script:VerifiedTransactionWorkerCompletionAction = if ($CompletionAction) { $CompletionAction.GetNewClosure() } else { $null }
+    $script:VerifiedTransactionWorkerActionLabel = $ActionLabel
+    $script:VerifiedTransactionWorkerTotalOperations = $targets.Count
+    $script:VerifiedTransactionWorkerInput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
+    $script:VerifiedTransactionWorkerInput.Complete()
+    $script:VerifiedTransactionWorkerOutput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
+    $script:VerifiedTransactionWorker = [PowerShell]::Create()
+    $script:VerifiedTransactionWorker.AddScript($workerScript.ToString()).AddArgument($targets).AddArgument($cancelState).AddArgument($QueueWaitTimeoutMs).AddArgument($settingsDefinition).AddArgument($rangeDefinition).AddArgument($transactionDefinition) | Out-Null
+    $script:VerifiedTransactionWorkerAsyncResult = $script:VerifiedTransactionWorker.BeginInvoke($script:VerifiedTransactionWorkerInput, $script:VerifiedTransactionWorkerOutput)
+    $script:VerifiedTransactionWorkerLastOutputCount = 0
+    if (-not $script:VerifiedTransactionWorkerTimer) {
+        $script:VerifiedTransactionWorkerTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:VerifiedTransactionWorkerTimer.Interval = [TimeSpan]::FromMilliseconds(100)
+        $script:VerifiedTransactionWorkerTimer.Add_Tick({ Update-VerifiedVcpTransactionWorkerOutput })
+    }
+    if ($transactionProgressPanel) { $transactionProgressPanel.Visibility = [System.Windows.Visibility]::Visible }
+    if ($transactionProgressBar) { $transactionProgressBar.Minimum = 0; $transactionProgressBar.Maximum = $targets.Count; $transactionProgressBar.Value = 0 }
+    if ($transactionProgressText) { $transactionProgressText.Text = "Apply 0/$($targets.Count)" }
+    if ($transactionCancelBtn) { $transactionCancelBtn.IsEnabled = $true }
+    Update-Status "$ActionLabel - Apply 0/$($targets.Count)"
+    $script:VerifiedTransactionWorkerTimer.Start()
+    return $true
+}
+
 function Invoke-ManualVcpWrite {
     param(
         [int]$Code,
@@ -2405,15 +2686,6 @@ function Invoke-ManualVcpWrite {
                 [System.Windows.MessageBoxButton]::YesNo,
                 [System.Windows.MessageBoxImage]::Warning
             ) -eq [System.Windows.MessageBoxResult]::Yes)
-        }
-    }
-    if ($null -eq $Transaction) {
-        $Transaction = {
-            param([object[]]$Operations)
-            # Manual writes get the same recovery guarantee as profile and automation writes:
-            # a failed or mismatched command restores the readable prior value instead of
-            # leaving the monitor in a state the user did not ask for.
-            return (Invoke-VerifiedVcpTransaction -Operations $Operations -RollbackOnFailure)
         }
     }
     $monitors = if ($AllMonitors) {
@@ -2444,12 +2716,32 @@ function Invoke-ManualVcpWrite {
         Update-Status "VCP write canceled"
         return [PSCustomObject]@{ Success = $false; Outcome = "Canceled"; Results = @() }
     }
-    if (-not (Wait-DdcWriteQueueIdle -TimeoutMs 2000)) {
-        Update-Status "VCP write queue is busy; try again"
-        return [PSCustomObject]@{ Success = $false; Outcome = "Busy"; Results = @() }
+    $codeText = "0x{0:X2} = {1}" -f $Code, $Value
+    if ($null -eq $Transaction) {
+        $completionCode = [int]$Code
+        $completion = {
+            param($result)
+            $rollback = [string]$result.Rollback
+            switch ([string]$result.Outcome) {
+                "Verified" { Update-Status "Verified VCP $codeText" }
+                "VerifiedAfterRetry" { Update-Status "Verified VCP $codeText after a delayed re-read" }
+                "Unverified" { Update-Status "VCP $codeText applied; readback unavailable" }
+                "UnreliableReadback" { Update-Status "VCP $codeText applied; monitor returned an out-of-range readback" }
+                "VerificationOff" { Update-Status "VCP $codeText applied; readback verification is off" }
+                "Mismatched" { Update-Status "VCP $codeText mismatched its readback; restore: $rollback" }
+                "Canceled" { Update-Status "VCP $codeText canceled; restore: $rollback" }
+                default { Update-Status "VCP $codeText failed; restore: $rollback" }
+            }
+            if (-not [bool]$result.Success -and $completionCode -eq [int][MonitorAPI]::VCP_INPUT_SOURCE) { Load-MonitorSettings }
+            if ([bool]$result.Success -and $completionCode -eq [int][MonitorAPI]::VCP_RESTORE_FACTORY_COLOR) { Invoke-DelayedMonitorSettingsRefresh -DelayMs 700 }
+            if ([bool]$result.Success -and $completionCode -eq [int][MonitorAPI]::VCP_RESTORE_FACTORY_DEFAULTS) { Invoke-DelayedMonitorSettingsRefresh -DelayMs 1500 }
+        }.GetNewClosure()
+        if (-not (Start-VerifiedVcpTransactionWorker -Operations $operations -ActionLabel $ActionLabel -CompletionAction $completion)) {
+            return [PSCustomObject]@{ Success = $false; Outcome = "Busy"; Results = @(); Rollback = "NotNeeded" }
+        }
+        return [PSCustomObject]@{ Success = $true; Outcome = "Started"; Results = @(); Rollback = "NotNeeded" }
     }
     $result = & $Transaction $operations
-    $codeText = "0x{0:X2} = {1}" -f $Code, $Value
     $rollback = [string]$result.Rollback
     switch ($result.Outcome) {
         "Verified" { Update-Status "Verified VCP $codeText" }
@@ -2482,6 +2774,7 @@ function Start-VcpReadWorker {
         [string]$IdentityKey = "",
         [int]$MonitorIndex = -1
     )
+    if (Test-VerifiedVcpTransactionWorkerActive) { Update-Status "Wait for the verified DDC transaction to finish"; return }
     Stop-VcpWorker -Cancel
     if ($Handle -eq [IntPtr]::Zero -or $Codes.Count -eq 0) { return }
     if ($MonitorIndex -lt 0 -and $script:CurrentMonitorIndex -ge 0 -and $script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) {
@@ -2635,6 +2928,7 @@ function Update-DdcReportWorkerOutput {
 }
 
 function Start-DdcReportWorker {
+    if (Test-VerifiedVcpTransactionWorkerActive) { Update-Status "Wait for the verified DDC transaction to finish"; return }
     Stop-DdcReportWorker -Cancel
     Stop-VcpWorker -Cancel
     Stop-MonitorSettingsWorker -Cancel
@@ -3088,6 +3382,7 @@ function Update-MonitorSettingsWorkerOutput {
 
 function Start-MonitorSettingsWorker {
     param([IntPtr]$Handle, [int]$MonitorIndex, [string]$MonitorName)
+    if (Test-VerifiedVcpTransactionWorkerActive) { return }
     Stop-MonitorSettingsWorker -Cancel
     if ($Handle -ne [IntPtr]::Zero -and $MonitorIndex -ge 0 -and $MonitorIndex -lt $script:PhysicalMonitors.Count) {
         if ($script:PhysicalMonitors[$MonitorIndex].Handle.ToInt64() -ne $Handle.ToInt64()) { return }
@@ -4248,12 +4543,18 @@ try {
         </TabItem>
     </TabControl>
     <Border Grid.Row="3" Grid.ColumnSpan="2" Background="{DynamicResource FooterBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="18,0"><Grid>
-        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+        <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
             <Ellipse Width="7" Height="7" Fill="{DynamicResource SuccessBrush}" Margin="0,0,8,0"/>
             <TextBlock x:Name="StatusText" Text="Ready" FontSize="12" Foreground="{DynamicResource MutedTextBrush}"
                        AutomationProperties.Name="Status: Ready" AutomationProperties.LiveSetting="Polite"/>
         </StackPanel>
-        <TextBlock x:Name="AutoModeText" Text="" FontSize="12" Foreground="{DynamicResource WarningBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+        <StackPanel x:Name="TransactionProgressPanel" Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Visibility="Collapsed" AutomationProperties.Name="Verified DDC transaction progress">
+            <TextBlock x:Name="TransactionProgressText" Text="Apply 0/0" FontSize="12" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="0,0,10,0"/>
+            <ProgressBar x:Name="TransactionProgressBar" Width="180" Height="6" Minimum="0" Maximum="1" Value="0" Margin="0,0,10,0"/>
+            <Button x:Name="TransactionCancelBtn" Content="Cancel" Style="{StaticResource Btn}" Padding="10,4" AutomationProperties.Name="Cancel verified DDC transaction"/>
+        </StackPanel>
+        <TextBlock x:Name="AutoModeText" Grid.Column="2" Text="" FontSize="12" Foreground="{DynamicResource WarningBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
     </Grid></Border>
 </Grid>
 </ScrollViewer>
@@ -4360,6 +4661,8 @@ $automationBridgeBindBox = $window.FindName("AutomationBridgeBindBox"); $automat
 $automationBridgeKeyBox = $window.FindName("AutomationBridgeKeyBox"); $automationBridgeSaveBtn = $window.FindName("AutomationBridgeSaveBtn")
 $ddcReportGenerateBtn = $window.FindName("DdcReportGenerateBtn"); $ddcReportCopyBtn = $window.FindName("DdcReportCopyBtn")
 $statusText = $window.FindName("StatusText"); $autoModeText = $window.FindName("AutoModeText")
+$transactionProgressPanel = $window.FindName("TransactionProgressPanel"); $transactionProgressText = $window.FindName("TransactionProgressText")
+$transactionProgressBar = $window.FindName("TransactionProgressBar"); $transactionCancelBtn = $window.FindName("TransactionCancelBtn")
 
 function Update-Status {
     param([string]$Message)
@@ -4803,6 +5106,7 @@ function Request-DisplayRecoveryRefresh {
     foreach ($monitor in @($script:PhysicalMonitors)) {
         Set-DisplayRecoveryOutcome -IdentityKey ([string]$monitor.IdentityKey) -Outcome "Stale" -Generation $generation | Out-Null
     }
+    Request-VerifiedVcpTransactionCancel -Reason "display configuration changed" | Out-Null
     Stop-MonitorSettingsWorker -Cancel
     Stop-VcpWorker -Cancel
     Stop-DdcReportWorker -Cancel
@@ -4886,6 +5190,7 @@ function Update-DdcLivenessWorkerOutput {
 }
 
 function Start-DdcLivenessProbe {
+    if (Test-VerifiedVcpTransactionWorkerActive) { return }
     if ($script:DdcLivenessWorker) { return }
     $generation = [int]$script:DisplayRecoveryGeneration
     $targets = @()
@@ -6795,6 +7100,58 @@ function Get-ProfileVcpWritePlan {
     }
 }
 
+function Complete-ProfileApply {
+    param($Transaction, $Plan, [string]$Name, [string]$Reason, [int]$TargetIndex, [bool]$TargetMissing)
+    if (-not [bool]$Transaction.Success) {
+        Update-Status "Profile '$Name' failed ($($Transaction.Outcome)); rollback: $($Transaction.Rollback)"
+        return $false
+    }
+    try {
+        $script:UpdatingUI = $true
+        $brightnessRaw = ConvertTo-SelectedRawValue -Percent $Plan.Values.Brightness -Code ([int][MonitorAPI]::VCP_BRIGHTNESS)
+        $contrastRaw = ConvertTo-SelectedRawValue -Percent $Plan.Values.Contrast -Code ([int][MonitorAPI]::VCP_CONTRAST)
+        $redRaw = ConvertTo-SelectedRawValue -Percent $Plan.Values.Red -Code ([int][MonitorAPI]::VCP_RED_GAIN)
+        $greenRaw = ConvertTo-SelectedRawValue -Percent $Plan.Values.Green -Code ([int][MonitorAPI]::VCP_GREEN_GAIN)
+        $blueRaw = ConvertTo-SelectedRawValue -Percent $Plan.Values.Blue -Code ([int][MonitorAPI]::VCP_BLUE_GAIN)
+        $brightnessSlider.Value = $brightnessRaw; $brightnessValue.Text = $brightnessRaw
+        $contrastSlider.Value = $contrastRaw; $contrastValue.Text = $contrastRaw
+        $redSlider.Value = $redRaw; $redValue.Text = $redRaw
+        $greenSlider.Value = $greenRaw; $greenValue.Text = $greenRaw
+        $blueSlider.Value = $blueRaw; $blueValue.Text = $blueRaw
+        if ($Plan.Values.Gamma) { $gammaSlider.Value = $Plan.Values.Gamma; $gammaValue.Text = ($Plan.Values.Gamma / 100).ToString("F2") }
+        if ($Plan.Values.GammaRed) {
+            $gammaRedSlider.Value = $Plan.Values.GammaRed
+            $gammaGreenSlider.Value = $Plan.Values.GammaGreen
+            $gammaBlueSlider.Value = $Plan.Values.GammaBlue
+            Set-GammaRamp -Gamma ($Plan.Values.Gamma/100) -RedMult ($Plan.Values.GammaRed/100) -GreenMult ($Plan.Values.GammaGreen/100) -BlueMult ($Plan.Values.GammaBlue/100)
+        }
+    } catch {
+        Update-Status "Profile '$Name' completed its hardware writes but the UI refresh failed"
+        return $false
+    } finally {
+        $script:UpdatingUI = $false
+    }
+    $profilesList.SelectedItem = $Name
+    $verificationSuffix = switch ([string]$Transaction.Outcome) {
+        "Unverified" { " (write applied; some readbacks unavailable)" }
+        "UnreliableReadback" { " (write applied; monitor readback is unreliable)" }
+        "VerificationOff" { " (write applied; verification off)" }
+        "VerifiedAfterRetry" { " (verified after delayed re-read)" }
+        default { " (verified)" }
+    }
+    $capabilitySuffix = if ($Plan.SkippedUnsupported -gt 0) { "; $($Plan.SkippedUnsupported) unsupported values skipped" } else { "" }
+    if ($TargetIndex -ge 0 -and $TargetIndex -lt $script:PhysicalMonitors.Count) {
+        Update-Status "$Reason '$Name' -> $(Get-MonitorDisplayLabel -Monitor $script:PhysicalMonitors[$TargetIndex])$verificationSuffix$capabilitySuffix"
+    } elseif ($TargetMissing) {
+        Update-Status "$Reason '$Name' (saved monitor missing; current monitor used)$verificationSuffix$capabilitySuffix"
+    } else {
+        Update-Status "$Reason '$Name'$verificationSuffix$capabilitySuffix"
+    }
+    Update-TrayPopupState
+    Update-TrayIconText
+    return $true
+}
+
 function Apply-ProfileByName {
     param(
         [string]$Name,
@@ -6845,59 +7202,16 @@ function Apply-ProfileByName {
         Update-Status "Profile '$Name' has no compatible hardware write target"
         return $false
     }
-    if (-not (Wait-DdcWriteQueueIdle -TimeoutMs 2000)) {
-        Update-Status "Profile '$Name' is waiting for the DDC write queue"
-        return $false
-    }
-    $transaction = Invoke-VerifiedVcpTransaction -Operations $plan.Operations -RollbackOnFailure
-    if (-not $transaction.Success) {
-        Update-Status "Profile '$Name' failed ($($transaction.Outcome)); rollback: $($transaction.Rollback)"
-        return $false
-    }
-    try {
-        $script:UpdatingUI = $true
-        $brightnessRaw = ConvertTo-SelectedRawValue -Percent $plan.Values.Brightness -Code ([int][MonitorAPI]::VCP_BRIGHTNESS)
-        $contrastRaw = ConvertTo-SelectedRawValue -Percent $plan.Values.Contrast -Code ([int][MonitorAPI]::VCP_CONTRAST)
-        $redRaw = ConvertTo-SelectedRawValue -Percent $plan.Values.Red -Code ([int][MonitorAPI]::VCP_RED_GAIN)
-        $greenRaw = ConvertTo-SelectedRawValue -Percent $plan.Values.Green -Code ([int][MonitorAPI]::VCP_GREEN_GAIN)
-        $blueRaw = ConvertTo-SelectedRawValue -Percent $plan.Values.Blue -Code ([int][MonitorAPI]::VCP_BLUE_GAIN)
-        $brightnessSlider.Value = $brightnessRaw; $brightnessValue.Text = $brightnessRaw
-        $contrastSlider.Value = $contrastRaw; $contrastValue.Text = $contrastRaw
-        $redSlider.Value = $redRaw; $redValue.Text = $redRaw
-        $greenSlider.Value = $greenRaw; $greenValue.Text = $greenRaw
-        $blueSlider.Value = $blueRaw; $blueValue.Text = $blueRaw
-        if ($plan.Values.Gamma) { $gammaSlider.Value = $plan.Values.Gamma; $gammaValue.Text = ($plan.Values.Gamma / 100).ToString("F2") }
-        if ($plan.Values.GammaRed) {
-            $gammaRedSlider.Value = $plan.Values.GammaRed
-            $gammaGreenSlider.Value = $plan.Values.GammaGreen
-            $gammaBlueSlider.Value = $plan.Values.GammaBlue
-            Set-GammaRamp -Gamma ($plan.Values.Gamma/100) -RedMult ($plan.Values.GammaRed/100) -GreenMult ($plan.Values.GammaGreen/100) -BlueMult ($plan.Values.GammaBlue/100)
-        }
-    } catch {
-        Update-Status "Profile '$Name' failed"
-        return $false
-    } finally {
-        $script:UpdatingUI = $false
-    }
-    $profilesList.SelectedItem = $Name
-    $verificationSuffix = switch ([string]$transaction.Outcome) {
-        "Unverified" { " (write applied; some readbacks unavailable)" }
-        "UnreliableReadback" { " (write applied; monitor readback is unreliable)" }
-        "VerificationOff" { " (write applied; verification off)" }
-        "VerifiedAfterRetry" { " (verified after delayed re-read)" }
-        default { " (verified)" }
-    }
-    $capabilitySuffix = if ($plan.SkippedUnsupported -gt 0) { "; $($plan.SkippedUnsupported) unsupported values skipped" } else { "" }
-    if ($targetIndex -ge 0) {
-        Update-Status "$Reason '$Name' -> $(Get-MonitorDisplayLabel -Monitor $script:PhysicalMonitors[$targetIndex])$verificationSuffix$capabilitySuffix"
-    } elseif ($targetMissing) {
-        Update-Status "$Reason '$Name' (saved monitor missing; current monitor used)$verificationSuffix$capabilitySuffix"
-    } else {
-        Update-Status "$Reason '$Name'$verificationSuffix$capabilitySuffix"
-    }
-    Update-TrayPopupState
-    Update-TrayIconText
-    return $true
+    $completionPlan = $plan
+    $completionName = $Name
+    $completionReason = $Reason
+    $completionTargetIndex = $targetIndex
+    $completionTargetMissing = $targetMissing
+    $completion = {
+        param($transaction)
+        Complete-ProfileApply -Transaction $transaction -Plan $completionPlan -Name $completionName -Reason $completionReason -TargetIndex $completionTargetIndex -TargetMissing $completionTargetMissing | Out-Null
+    }.GetNewClosure()
+    return (Start-VerifiedVcpTransactionWorker -Operations $plan.Operations -ActionLabel "Apply profile '$Name'" -CompletionAction $completion)
 }
 
 function Invoke-AppProfileCheck {
@@ -7835,8 +8149,7 @@ $presetReset.Add_Click({ $script:AutoModeEnabled = $false; $script:AmbientLightE
 
 $inputSourceCombo.Add_SelectionChanged({
     if ($script:UpdatingUI -or $inputSourceCombo.SelectedItem -eq $null) { return }
-    $result = Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_INPUT_SOURCE) -Value ([uint32]$inputSourceCombo.SelectedItem.Tag) -ActionLabel "Change monitor input to $($inputSourceCombo.SelectedItem.Content)"
-    if (-not $result.Success) { Load-MonitorSettings }
+    Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_INPUT_SOURCE) -Value ([uint32]$inputSourceCombo.SelectedItem.Tag) -ActionLabel "Change monitor input to $($inputSourceCombo.SelectedItem.Content)" | Out-Null
 })
 $powerOffBtn.Add_Click({ Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_POWER_MODE) -Value ([MonitorAPI]::POWER_OFF) -ActionLabel "Power off the selected monitor" | Out-Null })
 $powerStandbyBtn.Add_Click({ Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_POWER_MODE) -Value ([MonitorAPI]::POWER_STANDBY) -ActionLabel "Put the selected monitor in standby" | Out-Null })
@@ -7848,16 +8161,10 @@ $pipSecondaryDpBtn.Add_Click({ Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_PI
 $pipSecondaryHdmi1Btn.Add_Click({ Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_PIP_SECONDARY_SOURCE) -Value ([MonitorAPI]::PIP_SECONDARY_HDMI1) -ActionLabel "Set the PiP/PbP secondary input to HDMI 1" | Out-Null })
 $pipSecondaryHdmi2Btn.Add_Click({ Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_PIP_SECONDARY_SOURCE) -Value ([MonitorAPI]::PIP_SECONDARY_HDMI2) -ActionLabel "Set the PiP/PbP secondary input to HDMI 2" | Out-Null })
 $resetColorBtn.Add_Click({
-    $result = Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_RESTORE_FACTORY_COLOR) -Value 1 -ActionLabel "Reset the selected monitor's color settings"
-    if ($result.Success) {
-        Invoke-DelayedMonitorSettingsRefresh -DelayMs 700
-    }
+    Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_RESTORE_FACTORY_COLOR) -Value 1 -ActionLabel "Reset the selected monitor's color settings" | Out-Null
 })
 $factoryResetBtn.Add_Click({
-    $result = Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_RESTORE_FACTORY_DEFAULTS) -Value 1 -ActionLabel "Restore the selected monitor to factory defaults"
-    if ($result.Success) {
-        Invoke-DelayedMonitorSettingsRefresh -DelayMs 1500
-    }
+    Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_RESTORE_FACTORY_DEFAULTS) -Value 1 -ActionLabel "Restore the selected monitor to factory defaults" | Out-Null
 })
 $allMonitorsStandbyBtn.Add_Click({ Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_POWER_MODE) -Value ([MonitorAPI]::POWER_STANDBY) -ActionLabel "Put every DDC/CI monitor in standby" -AllMonitors | Out-Null })
 
@@ -8108,6 +8415,7 @@ $batteryProfileSaveBtn.Add_Click({
     Update-Status "Battery profile settings saved"
 })
 
+$transactionCancelBtn.Add_Click({ Request-VerifiedVcpTransactionCancel -Reason "user request" | Out-Null })
 $displaySettingsBtn.Add_Click({ Start-Process "ms-settings:display" }); $colorMgmtBtn.Add_Click({ Start-Process "colorcpl.exe" })
 $gpuControlPanelBtn.Add_Click({ if ($script:HasNvidia) { Start-Process "nvidia-settings" -ErrorAction SilentlyContinue } else { Start-Process "ms-settings:display" } })
 $capabilitiesClearCacheBtn.Add_Click({ Clear-CapabilitiesCache; Start-CapabilitiesWorker })
@@ -8521,7 +8829,7 @@ $window.Add_StateChanged({
     if ($window.WindowState -eq [System.Windows.WindowState]::Minimized) { Hide-MainWindowToTray }
 })
 
-$window.Add_Closed({ Stop-SystemAccessibility; if ($script:NavigationRenderTimer) { $script:NavigationRenderTimer.Stop() }; if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AmbientLightTimer) { $script:AmbientLightTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }; if ($script:ProfileScheduleTimer) { $script:ProfileScheduleTimer.Stop() }; if ($script:IdleDimTimer) { $script:IdleDimTimer.Stop() }; if ($script:BatteryProfileTimer) { $script:BatteryProfileTimer.Stop() }; if ($script:FpsOverlayTimer) { $script:FpsOverlayTimer.Stop() }; if ($script:DdcWriteResultTimer) { $script:DdcWriteResultTimer.Stop() }; foreach ($timer in @($script:DeferredRefreshTimers)) { try { $timer.Stop() } catch {} }; $script:DeferredRefreshTimers = @(); Stop-DisplayRecoveryEventPipeline; Stop-AutomationBridge; Stop-VcpWorker -Cancel; Stop-MonitorSettingsWorker -Cancel; Stop-CapabilitiesWorker -Cancel; Stop-DdcReportWorker -Cancel
+$window.Add_Closed({ Stop-SystemAccessibility; if ($script:NavigationRenderTimer) { $script:NavigationRenderTimer.Stop() }; if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AmbientLightTimer) { $script:AmbientLightTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }; if ($script:ProfileScheduleTimer) { $script:ProfileScheduleTimer.Stop() }; if ($script:IdleDimTimer) { $script:IdleDimTimer.Stop() }; if ($script:BatteryProfileTimer) { $script:BatteryProfileTimer.Stop() }; if ($script:FpsOverlayTimer) { $script:FpsOverlayTimer.Stop() }; if ($script:DdcWriteResultTimer) { $script:DdcWriteResultTimer.Stop() }; foreach ($timer in @($script:DeferredRefreshTimers)) { try { $timer.Stop() } catch {} }; $script:DeferredRefreshTimers = @(); Stop-DisplayRecoveryEventPipeline; Stop-AutomationBridge; Stop-VerifiedVcpTransactionWorker -Cancel -WaitForCompletion; Stop-VcpWorker -Cancel; Stop-MonitorSettingsWorker -Cancel; Stop-CapabilitiesWorker -Cancel; Stop-DdcReportWorker -Cancel
     if ($script:FpsOverlayWindow) { try { $script:FpsOverlayWindow.Close() } catch {} }
     if ($script:HardwareMonitorComputer) { try { $script:HardwareMonitorComputer.Close() } catch {} }
     Dispose-TrayMode
