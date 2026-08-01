@@ -3,6 +3,22 @@ BeforeAll {
     $script:RepoRoot = Split-Path -Parent $PSScriptRoot
     $script:AppPath = Join-Path $script:RepoRoot "MonitorControlPro.ps1"
 
+    # The value cache and its suppression predicate live in the inline C# layer, so the suite
+    # compiles that block on its own. No P/Invoke is called from these tests; only the managed
+    # cache helpers are exercised, with synthetic handle values that never reach a driver.
+    function Import-MonitorControlNativeType {
+        if ("MonitorAPI" -as [type]) { return }
+        $text = [System.IO.File]::ReadAllText($script:AppPath)
+        $start = $text.IndexOf('$nativeCode = @"')
+        if ($start -lt 0) { throw "Native code block not found" }
+        $start = $text.IndexOf("`n", $start) + 1
+        $end = $text.IndexOf("`n`"@", $start)
+        if ($end -lt 0) { throw "Native code block is unterminated" }
+        Add-Type -TypeDefinition $text.Substring($start, $end - $start) -ErrorAction Stop
+    }
+
+    Import-MonitorControlNativeType
+
     function Import-MonitorControlFunctions {
         param([string[]]$Name)
         $tokens = $null
@@ -1464,6 +1480,107 @@ Describe "Monitor reported VCP range normalization" {
             $observed = ConvertTo-VcpPercent -RawValue $written[$index] -Maximum $maximum
             [Math]::Abs($observed - 25) | Should -BeLessOrEqual ([Math]::Ceiling(100.0 / (2 * $maximum)))
         }
+    }
+}
+
+Describe "Redundant DDC write suppression" {
+    BeforeEach {
+        [MonitorAPI]::InvalidateVcpValueCache()
+        $script:FakeHandleA = [IntPtr]::new(0x5101)
+        $script:FakeHandleB = [IntPtr]::new(0x5102)
+    }
+
+    AfterAll {
+        [MonitorAPI]::InvalidateVcpValueCache()
+    }
+
+    It "reports no cached value before anything is observed" {
+        $value = [uint32]0
+        [MonitorAPI]::TryGetVcpValue($script:FakeHandleA, [byte]0x10, [ref]$value) | Should -BeFalse
+    }
+
+    It "remembers a recorded value per handle and code" {
+        [MonitorAPI]::RecordVcpValue($script:FakeHandleA, [byte]0x10, [uint32]40)
+        [MonitorAPI]::RecordVcpValue($script:FakeHandleB, [byte]0x10, [uint32]70)
+        [MonitorAPI]::RecordVcpValue($script:FakeHandleA, [byte]0x12, [uint32]55)
+
+        $value = [uint32]0
+        [MonitorAPI]::TryGetVcpValue($script:FakeHandleA, [byte]0x10, [ref]$value) | Should -BeTrue
+        $value | Should -Be 40
+        [MonitorAPI]::TryGetVcpValue($script:FakeHandleB, [byte]0x10, [ref]$value) | Should -BeTrue
+        $value | Should -Be 70
+        [MonitorAPI]::TryGetVcpValue($script:FakeHandleA, [byte]0x12, [ref]$value) | Should -BeTrue
+        $value | Should -Be 55
+    }
+
+    It "forgets a value so the next attempt is not suppressed" {
+        [MonitorAPI]::RecordVcpValue($script:FakeHandleA, [byte]0x10, [uint32]40)
+        [MonitorAPI]::ForgetVcpValue($script:FakeHandleA, [byte]0x10)
+        $value = [uint32]0
+        [MonitorAPI]::TryGetVcpValue($script:FakeHandleA, [byte]0x10, [ref]$value) | Should -BeFalse
+    }
+
+    It "drops every cached value when the topology changes" {
+        [MonitorAPI]::RecordVcpValue($script:FakeHandleA, [byte]0x10, [uint32]40)
+        [MonitorAPI]::RecordVcpValue($script:FakeHandleB, [byte]0x10, [uint32]70)
+        [MonitorAPI]::InvalidateVcpValueCache()
+        $value = [uint32]0
+        [MonitorAPI]::TryGetVcpValue($script:FakeHandleA, [byte]0x10, [ref]$value) | Should -BeFalse
+        [MonitorAPI]::TryGetVcpValue($script:FakeHandleB, [byte]0x10, [ref]$value) | Should -BeFalse
+    }
+
+    It "clears the cache when physical monitor handles are released" {
+        $script:PhysicalMonitors = @([PSCustomObject]@{ Handle = $script:FakeHandleA; IdentityKey = "a" })
+        [MonitorAPI]::RecordVcpValue($script:FakeHandleA, [byte]0x10, [uint32]40)
+        Clear-PhysicalMonitorHandles -ClearList -DestroyHandle { param([IntPtr]$Handle) }
+
+        $value = [uint32]0
+        [MonitorAPI]::TryGetVcpValue($script:FakeHandleA, [byte]0x10, [ref]$value) | Should -BeFalse
+    }
+
+    It "suppresses a write that matches the last known value" {
+        [MonitorAPI]::RecordVcpValue($script:FakeHandleA, [byte]0x10, [uint32]40)
+        [MonitorAPI]::ShouldSuppressVcpWrite($script:FakeHandleA, [byte]0x10, [uint32]40, $false) | Should -BeTrue
+    }
+
+    It "does not suppress a write when the value differs" {
+        [MonitorAPI]::RecordVcpValue($script:FakeHandleA, [byte]0x10, [uint32]40)
+        [MonitorAPI]::ShouldSuppressVcpWrite($script:FakeHandleA, [byte]0x10, [uint32]41, $false) | Should -BeFalse
+    }
+
+    It "does not suppress a write for a different monitor or code" {
+        [MonitorAPI]::RecordVcpValue($script:FakeHandleA, [byte]0x10, [uint32]40)
+        [MonitorAPI]::ShouldSuppressVcpWrite($script:FakeHandleB, [byte]0x10, [uint32]40, $false) | Should -BeFalse
+        [MonitorAPI]::ShouldSuppressVcpWrite($script:FakeHandleA, [byte]0x12, [uint32]40, $false) | Should -BeFalse
+    }
+
+    It "honours an explicit force even when the value is unchanged" {
+        [MonitorAPI]::RecordVcpValue($script:FakeHandleA, [byte]0x10, [uint32]40)
+        [MonitorAPI]::ShouldSuppressVcpWrite($script:FakeHandleA, [byte]0x10, [uint32]40, $true) | Should -BeFalse
+    }
+
+    It "issues one write for a repeated ambient target and none after" {
+        $handle = $script:FakeHandleA
+        $writes = 0
+        foreach ($tick in 1..10) {
+            $value = [uint32]40
+            if ([MonitorAPI]::ShouldSuppressVcpWrite($handle, [byte]0x10, $value, $false)) { continue }
+            $writes++
+            # Stand in for the queue worker completing the write.
+            [MonitorAPI]::RecordVcpValue($handle, [byte]0x10, $value)
+        }
+
+        $writes | Should -Be 1
+    }
+
+    It "resumes writing after a failed write forgets the cached value" {
+        [MonitorAPI]::RecordVcpValue($script:FakeHandleA, [byte]0x10, [uint32]40)
+        [MonitorAPI]::ForgetVcpValue($script:FakeHandleA, [byte]0x10)
+        [MonitorAPI]::ShouldSuppressVcpWrite($script:FakeHandleA, [byte]0x10, [uint32]40, $false) | Should -BeFalse
+    }
+
+    It "never suppresses a write to a null handle" {
+        [MonitorAPI]::ShouldSuppressVcpWrite([IntPtr]::Zero, [byte]0x10, [uint32]40, $false) | Should -BeFalse
     }
 }
 

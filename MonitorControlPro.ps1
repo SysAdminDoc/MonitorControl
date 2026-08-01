@@ -123,6 +123,49 @@ public class MonitorAPI
         public DateTime TimestampUtc;
     }
 
+    // Last value known to be on the panel for a given handle+code, seeded by successful reads
+    // and updated by successful writes. Monitors commonly store these in EEPROM with a limited
+    // write endurance, so an unchanged value must not be pushed to the hardware again.
+    private static readonly object VcpValueCacheLock = new object();
+    private static readonly Dictionary<string, uint> VcpValueCache = new Dictionary<string, uint>();
+    private static long SuppressedVcpWrites = 0;
+
+    private static string VcpCacheKey(IntPtr hMonitor, byte bVCPCode)
+    {
+        return hMonitor.ToInt64().ToString("X") + ":" + bVCPCode.ToString("X2");
+    }
+
+    public static void RecordVcpValue(IntPtr hMonitor, byte bVCPCode, uint value)
+    {
+        if (hMonitor == IntPtr.Zero) { return; }
+        lock (VcpValueCacheLock) { VcpValueCache[VcpCacheKey(hMonitor, bVCPCode)] = value; }
+    }
+
+    public static void ForgetVcpValue(IntPtr hMonitor, byte bVCPCode)
+    {
+        if (hMonitor == IntPtr.Zero) { return; }
+        lock (VcpValueCacheLock) { VcpValueCache.Remove(VcpCacheKey(hMonitor, bVCPCode)); }
+    }
+
+    public static bool TryGetVcpValue(IntPtr hMonitor, byte bVCPCode, out uint value)
+    {
+        value = 0;
+        if (hMonitor == IntPtr.Zero) { return false; }
+        lock (VcpValueCacheLock) { return VcpValueCache.TryGetValue(VcpCacheKey(hMonitor, bVCPCode), out value); }
+    }
+
+    // Handles are destroyed and reissued on every re-enumeration, so a stale entry could be
+    // matched against an unrelated monitor. Any topology change must drop the whole cache.
+    public static void InvalidateVcpValueCache()
+    {
+        lock (VcpValueCacheLock) { VcpValueCache.Clear(); }
+    }
+
+    public static long GetSuppressedVcpWriteCount()
+    {
+        return Interlocked.Read(ref SuppressedVcpWrites);
+    }
+
     private static readonly object VcpWriteQueueLock = new object();
     private static readonly Dictionary<string, QueuedVcpWrite> QueuedVcpWrites = new Dictionary<string, QueuedVcpWrite>();
     private static readonly object VcpWriteResultsLock = new object();
@@ -134,7 +177,25 @@ public class MonitorAPI
 
     public static void QueueVCPWrite(IntPtr hMonitor, byte bVCPCode, uint dwNewValue, string coalesceKey, string monitorName)
     {
+        QueueVCPWrite(hMonitor, bVCPCode, dwNewValue, coalesceKey, monitorName, false);
+    }
+
+    // Pure predicate so the decision can be exercised without touching hardware.
+    public static bool ShouldSuppressVcpWrite(IntPtr hMonitor, byte bVCPCode, uint dwNewValue, bool force)
+    {
+        if (force || hMonitor == IntPtr.Zero) { return false; }
+        uint known;
+        return TryGetVcpValue(hMonitor, bVCPCode, out known) && known == dwNewValue;
+    }
+
+    public static void QueueVCPWrite(IntPtr hMonitor, byte bVCPCode, uint dwNewValue, string coalesceKey, string monitorName, bool force)
+    {
         if (hMonitor == IntPtr.Zero) { return; }
+        if (ShouldSuppressVcpWrite(hMonitor, bVCPCode, dwNewValue, force))
+        {
+            Interlocked.Increment(ref SuppressedVcpWrites);
+            return;
+        }
         string key = String.IsNullOrEmpty(coalesceKey) ? hMonitor.ToInt64().ToString("X") + ":" + bVCPCode.ToString("X2") : coalesceKey;
         lock (VcpWriteQueueLock)
         {
@@ -162,6 +223,7 @@ public class MonitorAPI
             if (ok)
             {
                 lastError = 0;
+                RecordVcpValue(hMonitor, bVCPCode, pdwCurrentValue);
                 return true;
             }
             lastError = Marshal.GetLastWin32Error();
@@ -182,11 +244,13 @@ public class MonitorAPI
             if (ok)
             {
                 lastError = 0;
+                RecordVcpValue(hMonitor, bVCPCode, dwNewValue);
                 return true;
             }
             lastError = Marshal.GetLastWin32Error();
             if (retry < maxRetries) { Thread.Sleep(VcpRetryDelayMilliseconds); }
         }
+        ForgetVcpValue(hMonitor, bVCPCode);
         return false;
     }
 
@@ -2277,6 +2341,7 @@ function Clear-PhysicalMonitorHandles {
         }
         try { $mon.Handle = [IntPtr]::Zero } catch {}
     }
+    try { [MonitorAPI]::InvalidateVcpValueCache() } catch {}
     if ($ClearList) { $script:PhysicalMonitors = @() }
 }
 
@@ -2830,10 +2895,14 @@ function Set-VCPValue {
 }
 
 function Queue-VCPValue {
-    param([IntPtr]$Handle, [byte]$VCPCode, [uint32]$Value, [string]$Key, [string]$MonitorName = "")
+    param([IntPtr]$Handle, [byte]$VCPCode, [uint32]$Value, [string]$Key, [string]$MonitorName = "", [switch]$ForceWrite)
     if ($Handle -eq [IntPtr]::Zero) { return $false }
-    [MonitorAPI]::QueueVCPWrite($Handle, $VCPCode, $Value, $Key, $MonitorName)
+    [MonitorAPI]::QueueVCPWrite($Handle, $VCPCode, $Value, $Key, $MonitorName, [bool]$ForceWrite)
     return $true
+}
+
+function Get-SuppressedDdcWriteCount {
+    try { return [int64][MonitorAPI]::GetSuppressedVcpWriteCount() } catch { return [int64]0 }
 }
 
 function Resolve-VcpWriteValueForMonitor {
@@ -3412,6 +3481,7 @@ function New-DdcCompatibilityReport {
     [void]$sb.AppendLine("OS: $($system.OS)")
     [void]$sb.AppendLine("PowerShell: $($system.PowerShell)")
     [void]$sb.AppendLine("Probe safety: power, input, reset, PiP/PbP, and arbitrary VCP codes are not automatically queried")
+    [void]$sb.AppendLine("Redundant writes suppressed this session: $(Get-SuppressedDdcWriteCount)")
     [void]$sb.AppendLine("")
     [void]$sb.AppendLine("GPU drivers:")
     foreach ($gpu in @($system.GPUs)) { [void]$sb.AppendLine("- $gpu") }
