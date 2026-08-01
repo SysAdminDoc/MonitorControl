@@ -205,6 +205,92 @@ function Save-MonitorIdentitySettings {
     return (Write-JsonFileSafely -Path $script:MonitorIdentitySettingsPath -Data $payload -Depth 5)
 }
 
+function Update-MonitorIdentityKeyedState {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Migrates already-loaded in-memory settings from a legacy monitor identity to its WinRT identity.')]
+    param([string]$OldKey, [string]$NewKey)
+    $changed = [ordered]@{
+        MonitorIdentity = $false
+        CapabilitySafety = $false
+        VcpWriteSafety = $false
+        CapabilitiesCache = $false
+        DdcTiming = $false
+        DisplayStateRestore = $false
+        AnyChanged = $false
+    }
+    if ([string]::IsNullOrWhiteSpace($OldKey) -or [string]::IsNullOrWhiteSpace($NewKey) -or $OldKey -eq $NewKey) {
+        return [PSCustomObject]$changed
+    }
+
+    if ($script:MonitorIdentityRecords.ContainsKey($OldKey)) {
+        $legacyRecord = $script:MonitorIdentityRecords[$OldKey]
+        if (-not $script:MonitorIdentityRecords.ContainsKey($NewKey)) {
+            $legacyRecord | Add-Member -NotePropertyName Key -NotePropertyValue $NewKey -Force
+            $script:MonitorIdentityRecords[$NewKey] = $legacyRecord
+        } else {
+            $currentRecord = $script:MonitorIdentityRecords[$NewKey]
+            if ([string]::IsNullOrWhiteSpace([string]$currentRecord.Label) -and -not [string]::IsNullOrWhiteSpace([string]$legacyRecord.Label)) {
+                $currentRecord | Add-Member -NotePropertyName Label -NotePropertyValue ([string]$legacyRecord.Label) -Force
+            }
+        }
+        $null = $script:MonitorIdentityRecords.Remove($OldKey)
+        $changed.MonitorIdentity = $true
+    }
+
+    if ($script:CapabilitiesExcludedIdentityKeys.ContainsKey($OldKey)) {
+        $script:CapabilitiesExcludedIdentityKeys[$NewKey] = [bool]$script:CapabilitiesExcludedIdentityKeys[$OldKey]
+        $null = $script:CapabilitiesExcludedIdentityKeys.Remove($OldKey)
+        $changed.CapabilitySafety = $true
+    }
+    if ([string]$script:CapabilitiesLastIncidentIdentityKey -eq $OldKey) {
+        $script:CapabilitiesLastIncidentIdentityKey = $NewKey
+        $changed.CapabilitySafety = $true
+    }
+
+    if ($script:RiskyVcpEnabledIdentityKeys.ContainsKey($OldKey)) {
+        $script:RiskyVcpEnabledIdentityKeys[$NewKey] = [bool]$script:RiskyVcpEnabledIdentityKeys[$OldKey]
+        $null = $script:RiskyVcpEnabledIdentityKeys.Remove($OldKey)
+        $changed.VcpWriteSafety = $true
+    }
+
+    if ($script:CapabilitiesCache.ContainsKey($OldKey)) {
+        if (-not $script:CapabilitiesCache.ContainsKey($NewKey)) { $script:CapabilitiesCache[$NewKey] = $script:CapabilitiesCache[$OldKey] }
+        $null = $script:CapabilitiesCache.Remove($OldKey)
+        $changed.CapabilitiesCache = $true
+    }
+
+    if ($script:DdcTimingProfiles.ContainsKey($OldKey)) {
+        if (-not $script:DdcTimingProfiles.ContainsKey($NewKey)) {
+            $timingProfile = $script:DdcTimingProfiles[$OldKey]
+            $timingProfile | Add-Member -NotePropertyName IdentityKey -NotePropertyValue $NewKey -Force
+            $script:DdcTimingProfiles[$NewKey] = $timingProfile
+        }
+        $null = $script:DdcTimingProfiles.Remove($OldKey)
+        $changed.DdcTiming = $true
+    }
+
+    if ($script:DisplayStateRestoreValues.ContainsKey($OldKey)) {
+        if (-not $script:DisplayStateRestoreValues.ContainsKey($NewKey)) { $script:DisplayStateRestoreValues[$NewKey] = $script:DisplayStateRestoreValues[$OldKey] }
+        $null = $script:DisplayStateRestoreValues.Remove($OldKey)
+        $changed.DisplayStateRestore = $true
+    }
+
+    $changed.AnyChanged = @($changed.Values | Where-Object { [bool]$_ }).Count -gt 0
+    return [PSCustomObject]$changed
+}
+
+function Save-MonitorIdentityKeyedStateMigration {
+    param($Migration)
+    if ($null -eq $Migration -or -not [bool]$Migration.AnyChanged -or [bool]$script:ProfileStorageOffline) { return $false }
+    $success = $true
+    if ([bool]$Migration.MonitorIdentity -and -not (Save-MonitorIdentitySettings)) { $success = $false }
+    if ([bool]$Migration.CapabilitySafety -and -not (Write-CapabilitySafetyState)) { $success = $false }
+    if ([bool]$Migration.VcpWriteSafety -and -not (Write-VcpWriteSafetyState)) { $success = $false }
+    if ([bool]$Migration.CapabilitiesCache -and -not (Save-CapabilitiesCache)) { $success = $false }
+    if ([bool]$Migration.DdcTiming -and -not (Save-DdcTimingSettings)) { $success = $false }
+    if ([bool]$Migration.DisplayStateRestore -and -not (Save-DisplayStateRestoreSettings)) { $success = $false }
+    return $success
+}
+
 function Get-CapabilitiesSafetySettingsObject {
     return [PSCustomObject]@{
         SchemaVersion = [int]$script:CapabilitiesSafetySchemaVersion

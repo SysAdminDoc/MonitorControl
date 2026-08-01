@@ -177,6 +177,19 @@ public static class MonitorControlVcpWriteProbe
         "Get-CapabilitiesSection",
         "Get-HexTokens",
         "ConvertFrom-MonitorCapabilities",
+        "Get-StableHash",
+        "Convert-EdidManufacturerId",
+        "Get-EdidTextDescriptor",
+        "ConvertTo-MonitorDeviceToken",
+        "ConvertFrom-MonitorEdid",
+        "Read-MonitorEdidFromDeviceId",
+        "Get-WinRtDisplayMonitorInventory",
+        "New-MonitorIdentity",
+        "Find-MonitorIndexByIdentity",
+        "Resolve-MonitorIdentityKey",
+        "Update-MonitorIdentityKeyedState",
+        "Resolve-ProfileMonitorReference",
+        "Test-ProfileIdentityMigrationRequired",
         "Get-DisplayRecoveryBackoffDelay",
         "Get-DisplayRecoveryReadRetryCount",
         "Get-DdcLivenessRecoveryDecision",
@@ -1087,6 +1100,141 @@ Describe "Monitor capabilities parsing" {
         Test-MonitorSupportsVcp -Monitor $monitor -Code 0xD6 | Should -BeFalse
         Test-MonitorSupportsVcpValue -Monitor $monitor -Code 0x60 -Value 0x11 | Should -BeTrue
         Test-MonitorSupportsVcpValue -Monitor $monitor -Code 0x60 -Value 0x13 | Should -BeFalse
+    }
+}
+
+Describe "WinRT monitor identity and migration" {
+    BeforeAll {
+        $script:WinRtEdid = New-Object byte[] 128
+        $script:WinRtEdid[8] = 0x10
+        $script:WinRtEdid[9] = 0xAC
+        $script:WinRtEdid[10] = 0x34
+        $script:WinRtEdid[11] = 0x12
+        $script:WinRtEdid[54] = 0
+        $script:WinRtEdid[55] = 0
+        $script:WinRtEdid[56] = 0
+        $script:WinRtEdid[57] = 0xFC
+        $script:WinRtEdid[58] = 0
+        $nameBytes = [System.Text.Encoding]::ASCII.GetBytes("WinRT Panel")
+        [Array]::Copy($nameBytes, 0, $script:WinRtEdid, 59, $nameBytes.Length)
+        $script:WinRtEdid[72] = 0
+        $script:WinRtEdid[73] = 0
+        $script:WinRtEdid[74] = 0
+        $script:WinRtEdid[75] = 0xFF
+        $script:WinRtEdid[76] = 0
+        $serialBytes = [System.Text.Encoding]::ASCII.GetBytes("SERIAL-42")
+        [Array]::Copy($serialBytes, 0, $script:WinRtEdid, 77, $serialBytes.Length)
+    }
+
+    It "normalizes legacy and WinRT monitor paths to one device token" {
+        $legacyPath = 'MONITOR\DEL1234\5&abc&0&UID1'
+        $winRtPath = '\\?\DISPLAY#DEL1234#5&abc&0&UID1#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}'
+
+        (ConvertTo-MonitorDeviceToken -DeviceId $legacyPath) | Should -Be 'DEL1234\5&ABC&0&UID1'
+        (ConvertTo-MonitorDeviceToken -DeviceId $winRtPath) | Should -Be 'DEL1234\5&ABC&0&UID1'
+    }
+
+    It "prefers WinRT identity EDID connector and luminance metadata" {
+        $legacyPath = 'MONITOR\DEL1234\5&abc&0&UID1'
+        $winRtPath = '\\?\DISPLAY#DEL1234#5&abc&0&UID1#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}'
+        $displayDevice = [PSCustomObject]@{ DeviceID = $legacyPath; DeviceString = "Legacy display" }
+        $winRt = [PSCustomObject]@{
+            DeviceInterfacePath = $winRtPath
+            DeviceToken = ConvertTo-MonitorDeviceToken -DeviceId $winRtPath
+            DisplayName = "WinRT display"
+            Edid = [byte[]]$script:WinRtEdid.Clone()
+            PeakLuminanceNits = 420.5
+            PhysicalConnector = "DisplayPort"
+        }
+
+        $identity = New-MonitorIdentity -DisplayDeviceName '\\.\DISPLAY3' -FriendlyName "Physical monitor" -Width 2560 -Height 1440 -MonitorIndex 1 -WinRtMonitors @($winRt) -DisplayDevice $displayDevice
+
+        $identity.Source | Should -Be "winrt"
+        $identity.Key | Should -Match '^winrt:'
+        $identity.LegacyKey | Should -Match '^edid:'
+        $identity.DevicePath | Should -Be $winRtPath
+        $identity.LegacyDevicePath | Should -Be $legacyPath
+        $identity.Manufacturer | Should -Be "DEL"
+        $identity.Model | Should -Be "1234"
+        $identity.Serial | Should -Be "SERIAL-42"
+        $identity.DefaultLabel | Should -Be "WinRT Panel"
+        $identity.PhysicalConnector | Should -Be "DisplayPort"
+        $identity.PeakLuminanceNits | Should -Be 420.5
+    }
+
+    It "falls back cleanly when WinRT initialization fails" {
+        @(Get-WinRtDisplayMonitorInventory -CreateManager { throw "WinRT unavailable" }).Count | Should -Be 0
+        $legacyPath = 'MONITOR\ACR0001\instance'
+        $displayDevice = [PSCustomObject]@{ DeviceID = $legacyPath; DeviceString = "Fallback panel" }
+        $identity = New-MonitorIdentity -DisplayDeviceName '\\.\DISPLAY2' -FriendlyName "Fallback panel" -Width 1920 -Height 1080 -MonitorIndex 2 -WinRtMonitors @() -DisplayDevice $displayDevice
+
+        $identity.Source | Should -Be "device"
+        $identity.Key | Should -Not -Match '^winrt:'
+        $identity.DevicePath | Should -Be $legacyPath
+    }
+
+    It "moves identity-keyed labels unlocks caches timing and restore state without loss" {
+        $oldKey = "edid:legacy"
+        $newKey = "winrt:current"
+        $script:MonitorIdentityRecords = @{
+            $oldKey = [PSCustomObject]@{ Key = $oldKey; Label = "Desk panel" }
+        }
+        $script:CapabilitiesExcludedIdentityKeys = @{ $oldKey = $true }
+        $script:CapabilitiesLastIncidentIdentityKey = $oldKey
+        $script:RiskyVcpEnabledIdentityKeys = @{ $oldKey = $true }
+        $script:CapabilitiesCache = @{ $oldKey = [PSCustomObject]@{ Capabilities = "vcp(10)" } }
+        $script:DdcTimingProfiles = @{ $oldKey = [PSCustomObject]@{ IdentityKey = $oldKey; Mode = "Manual" } }
+        $script:DisplayStateRestoreValues = @{ $oldKey = [PSCustomObject]@{ Brightness = 37 } }
+
+        $migration = Update-MonitorIdentityKeyedState -OldKey $oldKey -NewKey $newKey
+
+        $migration.AnyChanged | Should -BeTrue
+        $script:MonitorIdentityRecords.ContainsKey($oldKey) | Should -BeFalse
+        $script:MonitorIdentityRecords[$newKey].Label | Should -Be "Desk panel"
+        $script:CapabilitiesExcludedIdentityKeys.ContainsKey($newKey) | Should -BeTrue
+        $script:CapabilitiesLastIncidentIdentityKey | Should -Be $newKey
+        $script:RiskyVcpEnabledIdentityKeys.ContainsKey($newKey) | Should -BeTrue
+        $script:CapabilitiesCache[$newKey].Capabilities | Should -Be "vcp(10)"
+        $script:DdcTimingProfiles[$newKey].IdentityKey | Should -Be $newKey
+        $script:DisplayStateRestoreValues[$newKey].Brightness | Should -Be 37
+    }
+
+    It "resolves legacy profile targets through aliases and rewrites them to the current identity" {
+        $oldKey = "edid:legacy"
+        $newKey = "winrt:current"
+        $newPath = '\\?\DISPLAY#DEL1234#instance#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}'
+        $script:PhysicalMonitors = @([PSCustomObject]@{
+            IdentityKey = $newKey
+            IdentityAliases = @($oldKey)
+            DevicePath = $newPath
+        })
+        $profile = [PSCustomObject]@{
+            SchemaVersion = $script:ProfileSchemaVersion
+            Name = "Legacy target"
+            MonitorIdentityKey = $oldKey
+            MonitorDevicePath = "MONITOR\DEL1234\instance"
+            MonitorSettings = @([PSCustomObject]@{
+                IdentityKey = $oldKey
+                DevicePath = "MONITOR\DEL1234\instance"
+                Brightness = 40
+            })
+        }
+
+        (Find-MonitorIndexByIdentity -IdentityKey $oldKey) | Should -Be 0
+        (Resolve-MonitorIdentityKey -IdentityKey $oldKey) | Should -Be $newKey
+        (Test-ProfileIdentityMigrationRequired -Profile $profile) | Should -BeTrue
+        $converted = ConvertTo-CurrentProfileSchema -Profile $profile -FallbackName "Legacy target"
+        $converted.MonitorIdentityKey | Should -Be $newKey
+        $converted.MonitorDevicePath | Should -Be $newPath
+        $converted.MonitorSettings[0].IdentityKey | Should -Be $newKey
+        $converted.MonitorSettings[0].DevicePath | Should -Be $newPath
+    }
+
+    It "loads the WinRT type in long form once and includes its metadata in diagnostics" {
+        $source = Get-Content -LiteralPath $script:AppPath -Raw
+        $source | Should -Match '\[Windows\.Devices\.Display\.Core\.DisplayManager, Windows\.Devices\.Display\.Core, ContentType=WindowsRuntime\]'
+        $source | Should -Match 'Physical connector: \$\(\$target\.PhysicalConnector\)'
+        $source | Should -Match 'Peak luminance: \$\(\[Math\]::Round'
     }
 }
 
