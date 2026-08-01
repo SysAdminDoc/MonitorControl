@@ -808,6 +808,12 @@ $script:VcpWriteSafetySettingsPath = ""
 $script:VcpWriteSafetySchemaVersion = 1
 $script:RiskyVcpEnabledIdentityKeys = @{}
 $script:RiskyVcpCodes = @(0x04, 0x08, 0x60, 0xD6, 0xE8, 0xE9)
+# Continuous VCP codes whose reported maximum is monitor-defined. Stored profile,
+# automation, tray, and bridge values for these codes are percentages; the raw value
+# is derived per monitor at the write boundary. Discrete codes (color preset, display
+# mode, mute, input, power) carry enumerated values and are never rescaled.
+$script:VcpScaledCodes = @(0x10, 0x12, 0x16, 0x18, 0x1A, 0x62, 0x87)
+$script:VcpDefaultMaximum = 100
 $script:UpdatingVcpWriteSafetyUI = $false
 $script:DdcReportWorker = $null
 $script:DdcReportWorkerInput = $null
@@ -898,7 +904,7 @@ $script:ProfileScheduleRulesPath = Join-Path $script:ProfilesPath "profile-sched
 $script:IdleDimSettingsPath = Join-Path $script:ProfilesPath "idle-dim.json"
 $script:BatteryProfileSettingsPath = Join-Path $script:ProfilesPath "battery-profile.json"
 $script:MonitorIdentitySettingsPath = Join-Path $script:ProfilesPath "monitor-identities.json"
-$script:ProfileSchemaVersion = 3
+$script:ProfileSchemaVersion = 4
 $script:ProfileBundleSchemaVersion = 2
 $script:ProfileBundleMaxProfiles = 100
 $script:ProfileBundleMaxArchiveBytes = 16777216
@@ -1174,6 +1180,54 @@ function ConvertTo-VcpValue {
     $value = [uint32]0
     if (-not [uint32]::TryParse($Text.Trim(), [System.Globalization.NumberStyles]::Integer, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$value)) { return $null }
     return $value
+}
+
+function Test-VcpCodeIsScaled {
+    param([int]$Code)
+    return $script:VcpScaledCodes -contains $Code
+}
+
+function Get-VcpMaximumForMonitor {
+    param($Monitor, [int]$Code)
+    if ($null -ne $Monitor -and $null -ne $Monitor.PSObject.Properties["VcpMaximums"] -and $null -ne $Monitor.VcpMaximums) {
+        if ($Monitor.VcpMaximums.ContainsKey($Code)) {
+            $cached = [int]$Monitor.VcpMaximums[$Code]
+            if ($cached -gt 0) { return $cached }
+        }
+    }
+    return $script:VcpDefaultMaximum
+}
+
+function Set-VcpMaximumForMonitor {
+    param($Monitor, [int]$Code, [int]$Maximum)
+    if ($null -eq $Monitor -or $Maximum -le 0) { return }
+    if ($null -eq $Monitor.PSObject.Properties["VcpMaximums"] -or $null -eq $Monitor.VcpMaximums) { return }
+    $Monitor.VcpMaximums[$Code] = [int]$Maximum
+}
+
+function Get-SelectedMonitorVcpMaximum {
+    param([int]$Code)
+    if ($script:CurrentMonitorIndex -lt 0 -or $script:CurrentMonitorIndex -ge $script:PhysicalMonitors.Count) { return $script:VcpDefaultMaximum }
+    return Get-VcpMaximumForMonitor -Monitor $script:PhysicalMonitors[$script:CurrentMonitorIndex] -Code $Code
+}
+
+function ConvertTo-VcpPercent {
+    param([double]$RawValue, [int]$Maximum)
+    if ($Maximum -le 0) { return 0 }
+    $percent = [Math]::Round(($RawValue * 100.0) / [double]$Maximum, [System.MidpointRounding]::AwayFromZero)
+    if ($percent -lt 0) { return 0 }
+    if ($percent -gt 100) { return 100 }
+    return [int]$percent
+}
+
+function ConvertTo-VcpRawValue {
+    param([double]$Percent, [int]$Maximum)
+    if ($Maximum -le 0) { return 0 }
+    $clamped = [Math]::Max(0.0, [Math]::Min(100.0, $Percent))
+    $raw = [Math]::Round(($clamped * [double]$Maximum) / 100.0, [System.MidpointRounding]::AwayFromZero)
+    if ($raw -lt 0) { return 0 }
+    if ($raw -gt $Maximum) { return [int]$Maximum }
+    return [int]$raw
 }
 
 function Set-ControlVcpSupport {
@@ -2661,7 +2715,7 @@ function Get-Monitors {
                             RefreshRate = $devMode.dmDisplayFrequency; IsPrimary = ($monInfo.Flags -band [MonitorAPI]::MONITORINFOF_PRIMARY) -ne 0
                             Left = $monInfo.Monitor.Left; Top = $monInfo.Monitor.Top; Right = $monInfo.Monitor.Right
                             Bottom = $monInfo.Monitor.Bottom; Capabilities = ""
-                            CapabilitiesKnown = $false; SupportedVcpCodes = @{}; CapabilitiesPending = $false
+                            CapabilitiesKnown = $false; SupportedVcpCodes = @{}; CapabilitiesPending = $false; VcpMaximums = @{}
                             CapabilitiesExcluded = $false; CapabilitiesSafetyError = ""
                             IdentityKey = $identity.Key; IdentitySource = $identity.Source; IdentityDefaultLabel = $identity.DefaultLabel
                             DevicePath = $identity.DevicePath; MonitorDeviceString = $identity.DeviceString; HardwareId = $identity.HardwareId
@@ -2684,7 +2738,7 @@ function Get-Monitors {
             Handle = [IntPtr]::Zero; HMonitor = [IntPtr]::Zero; Name = $fallbackName; Index = 1
             DeviceName = $fallbackDevice; Width = 1920; Height = 1080; RefreshRate = 60; IsPrimary = $true
             Left = 0; Top = 0; Right = 1920; Bottom = 1080; Capabilities = ""
-            CapabilitiesKnown = $false; SupportedVcpCodes = @{}; CapabilitiesPending = $false
+            CapabilitiesKnown = $false; SupportedVcpCodes = @{}; CapabilitiesPending = $false; VcpMaximums = @{}
             CapabilitiesExcluded = $false; CapabilitiesSafetyError = ""
             IdentityKey = $identity.Key; IdentitySource = $identity.Source; IdentityDefaultLabel = $identity.DefaultLabel
             DevicePath = $identity.DevicePath; MonitorDeviceString = $identity.DeviceString; HardwareId = $identity.HardwareId
@@ -2782,25 +2836,42 @@ function Queue-VCPValue {
     return $true
 }
 
+function Resolve-VcpWriteValueForMonitor {
+    param($Monitor, [int]$Code, [uint32]$Value, [switch]$Percent)
+    if (-not $Percent -or -not (Test-VcpCodeIsScaled -Code $Code)) { return [uint32]$Value }
+    $maximum = Get-VcpMaximumForMonitor -Monitor $Monitor -Code $Code
+    return [uint32](ConvertTo-VcpRawValue -Percent ([double]$Value) -Maximum $maximum)
+}
+
 function Set-VCPValueWithSync {
-    param([byte]$VCPCode, [uint32]$Value, [switch]$Force)
+    param([byte]$VCPCode, [uint32]$Value, [switch]$Force, [switch]$Percent)
     if (Test-VcpWriteRequiresSafetyConsent -Code ([int]$VCPCode)) {
         if (Get-Command Update-Status -ErrorAction SilentlyContinue) {
             Update-Status "Risky VCP 0x$("{0:X2}" -f $VCPCode) requires the verified manual or consented automation path"
         }
         return $false
     }
+    $code = [int]$VCPCode
+    # WMI brightness is always expressed as a percentage, so an unscaled caller has to be
+    # converted from the selected monitor's range before it reaches the integrated panel.
+    $wmiPercent = if ($Percent) {
+        [uint32][Math]::Max(0, [Math]::Min(100, [int]$Value))
+    } else {
+        [uint32](ConvertTo-VcpPercent -RawValue ([double]$Value) -Maximum (Get-SelectedMonitorVcpMaximum -Code $code))
+    }
     $queued = 0
     if ($script:ApplyToAll -or $Force) {
         for ($i = 0; $i -lt $script:PhysicalMonitors.Count; $i++) {
             $mon = $script:PhysicalMonitors[$i]
-            if (Queue-VCPValue -Handle $mon.Handle -VCPCode $VCPCode -Value $Value -Key "$i`:0x$("{0:X2}" -f $VCPCode)" -MonitorName $mon.Name) { $queued++ }
+            $target = Resolve-VcpWriteValueForMonitor -Monitor $mon -Code $code -Value $Value -Percent:$Percent
+            if (Queue-VCPValue -Handle $mon.Handle -VCPCode $VCPCode -Value $target -Key "$i`:0x$("{0:X2}" -f $VCPCode)" -MonitorName $mon.Name) { $queued++ }
         }
-        if ($VCPCode -eq [MonitorAPI]::VCP_BRIGHTNESS -and $script:WmiBrightnessAvailable) { Set-WmiBrightness -Value $Value | Out-Null }
+        if ($VCPCode -eq [MonitorAPI]::VCP_BRIGHTNESS -and $script:WmiBrightnessAvailable) { Set-WmiBrightness -Value $wmiPercent | Out-Null }
     } else {
         $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
-        if (Queue-VCPValue -Handle $mon.Handle -VCPCode $VCPCode -Value $Value -Key "$script:CurrentMonitorIndex`:0x$("{0:X2}" -f $VCPCode)" -MonitorName $mon.Name) { $queued++ }
-        elseif ($VCPCode -eq [MonitorAPI]::VCP_BRIGHTNESS -and $script:WmiBrightnessAvailable) { Set-WmiBrightness -Value $Value | Out-Null }
+        $target = Resolve-VcpWriteValueForMonitor -Monitor $mon -Code $code -Value $Value -Percent:$Percent
+        if (Queue-VCPValue -Handle $mon.Handle -VCPCode $VCPCode -Value $target -Key "$script:CurrentMonitorIndex`:0x$("{0:X2}" -f $VCPCode)" -MonitorName $mon.Name) { $queued++ }
+        elseif ($VCPCode -eq [MonitorAPI]::VCP_BRIGHTNESS -and $script:WmiBrightnessAvailable) { Set-WmiBrightness -Value $wmiPercent | Out-Null }
     }
     if ($queued -gt 0) { return $true }
     return ($VCPCode -eq [MonitorAPI]::VCP_BRIGHTNESS -and $script:WmiBrightnessAvailable)
@@ -3987,7 +4058,7 @@ function Get-AutomationBridgeMonitorList {
     foreach ($mon in @($script:PhysicalMonitors)) {
         if ($null -eq $mon) { continue }
         $brightness = $null
-        if (($mon.Index - 1) -eq $script:CurrentMonitorIndex) { $brightness = [int]$brightnessSlider.Value }
+        if (($mon.Index - 1) -eq $script:CurrentMonitorIndex) { $brightness = [int](Get-SelectedBrightnessPercent) }
         $items += [PSCustomObject]@{
             Index = [int]$mon.Index
             Label = [string](Get-MonitorDisplayLabel -Monitor $mon)
@@ -3996,6 +4067,7 @@ function Get-AutomationBridgeMonitorList {
             DeviceName = [string]$mon.DeviceName
             HasDdc = ([int64]$mon.Handle.ToInt64() -ne 0)
             Brightness = $brightness
+            BrightnessMaximum = [int](Get-VcpMaximumForMonitor -Monitor $mon -Code ([int][MonitorAPI]::VCP_BRIGHTNESS))
         }
     }
     return $items
@@ -4034,7 +4106,15 @@ function Read-AutomationBridgeBrightness {
     }
     $result = Get-VCPValue -Handle $mon.Handle -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -MonitorName $mon.Name
     if (-not [bool]$result.Success) { return New-AutomationBridgeResponse -Status 502 -Body @{ error = "ddc_read_failed" } }
-    return New-AutomationBridgeResponse -Status 200 -Body @{ monitor = $mon.Index; brightness = [int]$result.Current; maximum = [int]$result.Maximum; source = "DDC" }
+    Set-VcpMaximumForMonitor -Monitor $mon -Code ([int][MonitorAPI]::VCP_BRIGHTNESS) -Maximum ([int]$result.Maximum)
+    $maximum = Get-VcpMaximumForMonitor -Monitor $mon -Code ([int][MonitorAPI]::VCP_BRIGHTNESS)
+    return New-AutomationBridgeResponse -Status 200 -Body @{
+        monitor = $mon.Index
+        brightness = [int](ConvertTo-VcpPercent -RawValue ([double]$result.Current) -Maximum $maximum)
+        raw = [int]$result.Current
+        maximum = [int]$result.Maximum
+        source = "DDC"
+    }
 }
 
 function Set-AutomationBridgeBrightness {
@@ -4058,10 +4138,15 @@ function Set-AutomationBridgeBrightness {
     $queued = 0
     foreach ($index in $targets) {
         $mon = $script:PhysicalMonitors[$index]
-        if (Queue-VCPValue -Handle $mon.Handle -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value ([uint32]$value) -Key "bridge:$index`:0x10" -MonitorName $mon.Name) { $queued++ }
+        $rawTarget = [uint32](ConvertTo-VcpRawValue -Percent ([double]$value) -Maximum (Get-VcpMaximumForMonitor -Monitor $mon -Code ([int][MonitorAPI]::VCP_BRIGHTNESS)))
+        if (Queue-VCPValue -Handle $mon.Handle -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value $rawTarget -Key "bridge:$index`:0x10" -MonitorName $mon.Name) { $queued++ }
         if ($index -eq $script:CurrentMonitorIndex) {
             $script:UpdatingUI = $true
-            try { $brightnessSlider.Value = $value; $brightnessValue.Text = $value.ToString() } finally { $script:UpdatingUI = $false }
+            try {
+                $rawValue = ConvertTo-SelectedRawValue -Percent $value -Code ([int][MonitorAPI]::VCP_BRIGHTNESS)
+                $brightnessSlider.Value = $rawValue
+                $brightnessValue.Text = ([int]$rawValue).ToString()
+            } finally { $script:UpdatingUI = $false }
         }
     }
     if ($queued -eq 0 -and $script:WmiBrightnessAvailable) {
@@ -4731,6 +4816,50 @@ function Stop-MonitorSettingsWorker {
     $script:MonitorSettingsWorkerTargets = @()
 }
 
+function Update-VcpMaximumCache {
+    param([object[]]$Results)
+    foreach ($result in @($Results)) {
+        if (-not [bool]$result.Success) { continue }
+        $maximum = [int]$result.Maximum
+        if ($maximum -le 0) { continue }
+        $identityKey = [string]$result.IdentityKey
+        if ([string]::IsNullOrWhiteSpace($identityKey)) { continue }
+        foreach ($monitor in @($script:PhysicalMonitors)) {
+            if ([string]$monitor.IdentityKey -ne $identityKey) { continue }
+            Set-VcpMaximumForMonitor -Monitor $monitor -Code ([int]$result.Code) -Maximum $maximum
+            break
+        }
+    }
+}
+
+function ConvertTo-SelectedRawValue {
+    param([int]$Percent, [int]$Code)
+    return ConvertTo-VcpRawValue -Percent ([double]$Percent) -Maximum (Get-SelectedMonitorVcpMaximum -Code $Code)
+}
+
+function Get-SelectedBrightnessPercent {
+    return ConvertTo-VcpPercent -RawValue ([double]$brightnessSlider.Value) -Maximum (Get-SelectedMonitorVcpMaximum -Code ([int][MonitorAPI]::VCP_BRIGHTNESS))
+}
+
+function Set-BrightnessSliderFromPercent {
+    param([int]$Percent)
+    $raw = ConvertTo-VcpRawValue -Percent ([double]$Percent) -Maximum (Get-SelectedMonitorVcpMaximum -Code ([int][MonitorAPI]::VCP_BRIGHTNESS))
+    $script:UpdatingUI = $true
+    try {
+        $brightnessSlider.Value = $raw
+        $brightnessValue.Text = ([int]$raw).ToString()
+    } finally {
+        $script:UpdatingUI = $false
+    }
+    return $raw
+}
+
+function Set-ScaledVcpFromSlider {
+    param([byte]$VCPCode, [double]$RawValue)
+    $percent = ConvertTo-VcpPercent -RawValue $RawValue -Maximum (Get-SelectedMonitorVcpMaximum -Code ([int]$VCPCode))
+    return Set-VCPValueWithSync -VCPCode $VCPCode -Value ([uint32]$percent) -Percent
+}
+
 function Apply-MonitorSettingResult {
     param($Result)
     if (-not [bool]$Result.Success) { return }
@@ -4773,6 +4902,7 @@ function Update-MonitorSettingsWorkerOutput {
     $results = @($script:MonitorSettingsWorkerOutput | Where-Object {
         Test-DisplayWorkerResultCurrent -Result $_ -CurrentGeneration $script:DisplayRecoveryGeneration -Monitors $script:PhysicalMonitors
     })
+    Update-VcpMaximumCache -Results $results
     $selectedPublished = $false
     foreach ($target in $workerTargets) {
         if (-not (Test-DisplayWorkerResultCurrent -Result $target -CurrentGeneration $script:DisplayRecoveryGeneration -Monitors $script:PhysicalMonitors)) { continue }
@@ -4928,7 +5058,7 @@ function Get-TimeBasedSettings {
 
 function Apply-TimeBasedSettings {
     $settings = Get-TimeBasedSettings
-    Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value $settings.Brightness -Force | Out-Null
+    Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value $settings.Brightness -Force -Percent | Out-Null
     Set-GammaRamp -Gamma 1.0 -RedMult $settings.GammaRed -GreenMult $settings.GammaGreen -BlueMult $settings.GammaBlue
     return $settings
 }
@@ -5006,10 +5136,8 @@ function Apply-AmbientLightSettings {
         return
     }
     $brightness = Get-BrightnessForAmbientLux -Lux $lux
-    Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value $brightness -Force
-    $script:UpdatingUI = $true
-    $brightnessSlider.Value = $brightness; $brightnessValue.Text = $brightness
-    $script:UpdatingUI = $false
+    Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value $brightness -Force -Percent
+    Set-BrightnessSliderFromPercent -Percent $brightness | Out-Null
     $autoModeText.Text = "Ambient: $([math]::Round($lux, 0)) lx"
     Update-Status "Ambient brightness: $brightness"
 }
@@ -6341,6 +6469,17 @@ function Get-ProfileIntValue {
     return [int]$value
 }
 
+# Schema v4 stores every scaled DDC value as a percentage. Profiles written before v4 held
+# a raw value captured on whatever range the source monitor reported, so clamp them into
+# the percentage domain rather than replaying an out-of-range number to the hardware.
+function Get-ProfilePercentValue {
+    param($Object, [string]$Property, [int]$Default = 50)
+    $value = Get-ProfileIntValue -Object $Object -Property $Property -Default $Default
+    if ($value -lt 0) { return 0 }
+    if ($value -gt 100) { return 100 }
+    return [int]$value
+}
+
 function New-ProfileSettingsObject {
     param($Monitor)
     return [PSCustomObject]@{
@@ -6348,11 +6487,11 @@ function New-ProfileSettingsObject {
         MonitorLabel = if ($Monitor) { Get-MonitorDisplayLabel -Monitor $Monitor } else { "" }
         MonitorName = if ($Monitor) { [string]$Monitor.Name } else { "" }
         DevicePath = if ($Monitor) { [string]$Monitor.DevicePath } else { "" }
-        Brightness = [int]$brightnessSlider.Value
-        Contrast = [int]$contrastSlider.Value
-        Red = [int]$redSlider.Value
-        Green = [int]$greenSlider.Value
-        Blue = [int]$blueSlider.Value
+        Brightness = [int](ConvertTo-VcpPercent -RawValue ([double]$brightnessSlider.Value) -Maximum (Get-VcpMaximumForMonitor -Monitor $Monitor -Code ([int][MonitorAPI]::VCP_BRIGHTNESS)))
+        Contrast = [int](ConvertTo-VcpPercent -RawValue ([double]$contrastSlider.Value) -Maximum (Get-VcpMaximumForMonitor -Monitor $Monitor -Code ([int][MonitorAPI]::VCP_CONTRAST)))
+        Red = [int](ConvertTo-VcpPercent -RawValue ([double]$redSlider.Value) -Maximum (Get-VcpMaximumForMonitor -Monitor $Monitor -Code ([int][MonitorAPI]::VCP_RED_GAIN)))
+        Green = [int](ConvertTo-VcpPercent -RawValue ([double]$greenSlider.Value) -Maximum (Get-VcpMaximumForMonitor -Monitor $Monitor -Code ([int][MonitorAPI]::VCP_GREEN_GAIN)))
+        Blue = [int](ConvertTo-VcpPercent -RawValue ([double]$blueSlider.Value) -Maximum (Get-VcpMaximumForMonitor -Monitor $Monitor -Code ([int][MonitorAPI]::VCP_BLUE_GAIN)))
         Gamma = [int]$gammaSlider.Value
         GammaRed = [int]$gammaRedSlider.Value
         GammaGreen = [int]$gammaGreenSlider.Value
@@ -6396,8 +6535,8 @@ function ConvertTo-CurrentProfileSchema {
         MonitorLabel = [string](Get-ProfilePropertyValue -Object $Profile -Property "MonitorLabel" -Default "")
         MonitorName = [string](Get-ProfilePropertyValue -Object $Profile -Property "MonitorName" -Default "")
         DevicePath = [string](Get-ProfilePropertyValue -Object $Profile -Property "MonitorDevicePath" -Default "")
-        Brightness = Get-ProfileIntValue -Object $Profile -Property "Brightness" -Default 50
-        Contrast = Get-ProfileIntValue -Object $Profile -Property "Contrast" -Default 50
+        Brightness = Get-ProfilePercentValue -Object $Profile -Property "Brightness" -Default 50
+        Contrast = Get-ProfilePercentValue -Object $Profile -Property "Contrast" -Default 50
         Red = Get-ProfileIntValue -Object $Profile -Property "Red" -Default 50
         Green = Get-ProfileIntValue -Object $Profile -Property "Green" -Default 50
         Blue = Get-ProfileIntValue -Object $Profile -Property "Blue" -Default 50
@@ -6414,11 +6553,11 @@ function ConvertTo-CurrentProfileSchema {
             MonitorLabel = [string](Get-ProfilePropertyValue -Object $setting -Property "MonitorLabel" -Default "")
             MonitorName = [string](Get-ProfilePropertyValue -Object $setting -Property "MonitorName" -Default "")
             DevicePath = [string](Get-ProfilePropertyValue -Object $setting -Property "DevicePath" -Default "")
-            Brightness = Get-ProfileIntValue -Object $setting -Property "Brightness" -Default $topSetting.Brightness
-            Contrast = Get-ProfileIntValue -Object $setting -Property "Contrast" -Default $topSetting.Contrast
-            Red = Get-ProfileIntValue -Object $setting -Property "Red" -Default $topSetting.Red
-            Green = Get-ProfileIntValue -Object $setting -Property "Green" -Default $topSetting.Green
-            Blue = Get-ProfileIntValue -Object $setting -Property "Blue" -Default $topSetting.Blue
+            Brightness = Get-ProfilePercentValue -Object $setting -Property "Brightness" -Default $topSetting.Brightness
+            Contrast = Get-ProfilePercentValue -Object $setting -Property "Contrast" -Default $topSetting.Contrast
+            Red = Get-ProfilePercentValue -Object $setting -Property "Red" -Default $topSetting.Red
+            Green = Get-ProfilePercentValue -Object $setting -Property "Green" -Default $topSetting.Green
+            Blue = Get-ProfilePercentValue -Object $setting -Property "Blue" -Default $topSetting.Blue
             Gamma = Get-ProfileIntValue -Object $setting -Property "Gamma" -Default $topSetting.Gamma
             GammaRed = Get-ProfileIntValue -Object $setting -Property "GammaRed" -Default $topSetting.GammaRed
             GammaGreen = Get-ProfileIntValue -Object $setting -Property "GammaGreen" -Default $topSetting.GammaGreen
@@ -7874,14 +8013,15 @@ function Get-ProfileVcpWritePlan {
     foreach ($monitor in $targets) {
         if ($monitor.Handle -eq [IntPtr]::Zero) {
             if (-not $wmiIncluded -and $script:WmiBrightnessAvailable) {
-                $operations += Get-VcpWriteOperation -Monitor $monitor -Code ([MonitorAPI]::VCP_BRIGHTNESS) -Value ([uint32]$values.Brightness) -Backend "WMI"
+                $operations += Get-VcpWriteOperation -Monitor $monitor -Code ([MonitorAPI]::VCP_BRIGHTNESS) -Value ([uint32][Math]::Max(0, [Math]::Min(100, [int]$values.Brightness))) -Backend "WMI"
                 $wmiIncluded = $true
             }
             continue
         }
         foreach ($codeValue in $codeValues) {
-            if (Test-MonitorSupportsVcpValue -Monitor $monitor -Code ([int]$codeValue.Code) -Value ([int]$codeValue.Value)) {
-                $operations += Get-VcpWriteOperation -Monitor $monitor -Code ([int]$codeValue.Code) -Value ([uint32]$codeValue.Value)
+            $rawValue = [uint32](ConvertTo-VcpRawValue -Percent ([double]$codeValue.Value) -Maximum (Get-VcpMaximumForMonitor -Monitor $monitor -Code ([int]$codeValue.Code)))
+            if (Test-MonitorSupportsVcpValue -Monitor $monitor -Code ([int]$codeValue.Code) -Value ([int]$rawValue)) {
+                $operations += Get-VcpWriteOperation -Monitor $monitor -Code ([int]$codeValue.Code) -Value $rawValue
             } else {
                 $skippedUnsupported++
             }
@@ -7955,11 +8095,16 @@ function Apply-ProfileByName {
     }
     try {
         $script:UpdatingUI = $true
-        $brightnessSlider.Value = $plan.Values.Brightness; $brightnessValue.Text = $plan.Values.Brightness
-        $contrastSlider.Value = $plan.Values.Contrast; $contrastValue.Text = $plan.Values.Contrast
-        $redSlider.Value = $plan.Values.Red; $redValue.Text = $plan.Values.Red
-        $greenSlider.Value = $plan.Values.Green; $greenValue.Text = $plan.Values.Green
-        $blueSlider.Value = $plan.Values.Blue; $blueValue.Text = $plan.Values.Blue
+        $brightnessRaw = ConvertTo-SelectedRawValue -Percent $plan.Values.Brightness -Code ([int][MonitorAPI]::VCP_BRIGHTNESS)
+        $contrastRaw = ConvertTo-SelectedRawValue -Percent $plan.Values.Contrast -Code ([int][MonitorAPI]::VCP_CONTRAST)
+        $redRaw = ConvertTo-SelectedRawValue -Percent $plan.Values.Red -Code ([int][MonitorAPI]::VCP_RED_GAIN)
+        $greenRaw = ConvertTo-SelectedRawValue -Percent $plan.Values.Green -Code ([int][MonitorAPI]::VCP_GREEN_GAIN)
+        $blueRaw = ConvertTo-SelectedRawValue -Percent $plan.Values.Blue -Code ([int][MonitorAPI]::VCP_BLUE_GAIN)
+        $brightnessSlider.Value = $brightnessRaw; $brightnessValue.Text = $brightnessRaw
+        $contrastSlider.Value = $contrastRaw; $contrastValue.Text = $contrastRaw
+        $redSlider.Value = $redRaw; $redValue.Text = $redRaw
+        $greenSlider.Value = $greenRaw; $greenValue.Text = $greenRaw
+        $blueSlider.Value = $blueRaw; $blueValue.Text = $blueRaw
         if ($plan.Values.Gamma) { $gammaSlider.Value = $plan.Values.Gamma; $gammaValue.Text = ($plan.Values.Gamma / 100).ToString("F2") }
         if ($plan.Values.GammaRed) {
             $gammaRedSlider.Value = $plan.Values.GammaRed
@@ -8275,15 +8420,9 @@ function Invoke-IdleDimCheck {
     $idleSeconds = Get-IdleSeconds
     $thresholdSeconds = [Math]::Max(1, [int]$script:IdleDimMinutes) * 60
     if (-not $script:IdleDimActive -and $idleSeconds -ge $thresholdSeconds) {
-        $script:IdleDimPreviousBrightness = [int]$brightnessSlider.Value
-        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value ([uint32]$script:IdleDimBrightness) -Force
-        $script:UpdatingUI = $true
-        try {
-            $brightnessSlider.Value = $script:IdleDimBrightness
-            $brightnessValue.Text = ([int]$script:IdleDimBrightness).ToString()
-        } finally {
-            $script:UpdatingUI = $false
-        }
+        $script:IdleDimPreviousBrightness = [int](Get-SelectedBrightnessPercent)
+        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value ([uint32]$script:IdleDimBrightness) -Force -Percent
+        Set-BrightnessSliderFromPercent -Percent ([int]$script:IdleDimBrightness) | Out-Null
         $script:IdleDimActive = $true
         Update-IdleDimControls
         Update-TrayPopupState
@@ -8291,14 +8430,8 @@ function Invoke-IdleDimCheck {
         Update-Status "Idle dim active"
     } elseif ($script:IdleDimActive -and $idleSeconds -lt 5) {
         if ($script:IdleDimRestoreOnActivity -and $null -ne $script:IdleDimPreviousBrightness) {
-            Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value ([uint32]$script:IdleDimPreviousBrightness) -Force
-            $script:UpdatingUI = $true
-            try {
-                $brightnessSlider.Value = $script:IdleDimPreviousBrightness
-                $brightnessValue.Text = ([int]$script:IdleDimPreviousBrightness).ToString()
-            } finally {
-                $script:UpdatingUI = $false
-            }
+            Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value ([uint32]$script:IdleDimPreviousBrightness) -Force -Percent
+            Set-BrightnessSliderFromPercent -Percent ([int]$script:IdleDimPreviousBrightness) | Out-Null
         }
         $script:IdleDimActive = $false
         $script:IdleDimPreviousBrightness = $null
@@ -8374,11 +8507,11 @@ function Invoke-BatteryProfileCheck {
     if ($script:LastPowerLineStatus -eq $status) { return }
     $script:LastPowerLineStatus = $status
     if ($status -eq "Offline") {
-        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value $script:BatteryBrightness -Force
+        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value $script:BatteryBrightness -Force -Percent
         Update-Status "Battery profile: $($script:BatteryBrightness)%"
         $batteryProfileStatusText.Text = "Battery"
     } elseif ($status -eq "Online") {
-        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value $script:AcBrightness -Force
+        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value $script:AcBrightness -Force -Percent
         Update-Status "AC profile: $($script:AcBrightness)%"
         $batteryProfileStatusText.Text = "AC"
     } else {
@@ -8411,7 +8544,7 @@ function Get-CurrentMonitorLabel {
 
 function Update-TrayIconText {
     if ($null -eq $script:TrayIcon) { return }
-    $brightness = [int]$brightnessSlider.Value
+    $brightness = [int](Get-SelectedBrightnessPercent)
     $text = "MonitorControl Pro - $(Get-CurrentMonitorLabel) - $brightness%"
     if ($text.Length -gt 63) { $text = $text.Substring(0, 63) }
     $script:TrayIcon.Text = $text
@@ -8512,7 +8645,7 @@ function New-TrayPopup {
         } finally {
             $script:UpdatingUI = $false
         }
-        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value $value
+        Set-ScaledVcpFromSlider -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -RawValue $value | Out-Null
         Update-Status "Brightness: $value"
         Update-TrayIconText
     })
@@ -8827,13 +8960,13 @@ $monitorLabelResetBtn.Add_Click({
     }
 })
 
-$brightnessSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$brightnessSlider.Value; $brightnessValue.Text = $v; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value $v; Update-TrayPopupState; Update-TrayIconText })
-$contrastSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$contrastSlider.Value; $contrastValue.Text = $v; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_CONTRAST) -Value $v })
-$redSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$redSlider.Value; $redValue.Text = $v; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_RED_GAIN) -Value $v })
-$greenSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$greenSlider.Value; $greenValue.Text = $v; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_GREEN_GAIN) -Value $v })
-$blueSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$blueSlider.Value; $blueValue.Text = $v; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BLUE_GAIN) -Value $v })
-$volumeSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$volumeSlider.Value; $volumeValue.Text = $v; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_VOLUME) -Value $v })
-$sharpnessSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$sharpnessSlider.Value; $sharpnessValue.Text = $v; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_SHARPNESS) -Value $v })
+$brightnessSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$brightnessSlider.Value; $brightnessValue.Text = $v; Set-ScaledVcpFromSlider -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -RawValue $v | Out-Null; Update-TrayPopupState; Update-TrayIconText })
+$contrastSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$contrastSlider.Value; $contrastValue.Text = $v; Set-ScaledVcpFromSlider -VCPCode ([MonitorAPI]::VCP_CONTRAST) -RawValue $v | Out-Null })
+$redSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$redSlider.Value; $redValue.Text = $v; Set-ScaledVcpFromSlider -VCPCode ([MonitorAPI]::VCP_RED_GAIN) -RawValue $v | Out-Null })
+$greenSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$greenSlider.Value; $greenValue.Text = $v; Set-ScaledVcpFromSlider -VCPCode ([MonitorAPI]::VCP_GREEN_GAIN) -RawValue $v | Out-Null })
+$blueSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$blueSlider.Value; $blueValue.Text = $v; Set-ScaledVcpFromSlider -VCPCode ([MonitorAPI]::VCP_BLUE_GAIN) -RawValue $v | Out-Null })
+$volumeSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$volumeSlider.Value; $volumeValue.Text = $v; Set-ScaledVcpFromSlider -VCPCode ([MonitorAPI]::VCP_VOLUME) -RawValue $v | Out-Null })
+$sharpnessSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$sharpnessSlider.Value; $sharpnessValue.Text = $v; Set-ScaledVcpFromSlider -VCPCode ([MonitorAPI]::VCP_SHARPNESS) -RawValue $v | Out-Null })
 $muteCheckbox.Add_Checked({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_MUTE) -Value 1 }); $muteCheckbox.Add_Unchecked({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_MUTE) -Value 2 })
 
 $colorTempWarm.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_COLOR_PRESET) -Value ([MonitorAPI]::COLOR_PRESET_5000K); Update-Status "Color: 5000K (Warm)" })
@@ -8847,13 +8980,13 @@ $pictureModeWeb.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_DIS
 $pictureModeCinema.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_DISPLAY_MODE) -Value ([MonitorAPI]::DISPLAY_MODE_MOVIE); Update-Status "Picture mode: Cinema" })
 $pictureModeGame.Add_Click({ Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_DISPLAY_MODE) -Value ([MonitorAPI]::DISPLAY_MODE_GAMES); Update-Status "Picture mode: Game" })
 
-$presetDay.Add_Click({ $script:AutoModeEnabled = $false; $script:AmbientLightEnabled = $false; Start-AmbientLightWatcher; $autoModeText.Text = ""; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value 80 -Force; Set-GammaRamp -Gamma 1.0; $script:UpdatingUI = $true; $brightnessSlider.Value = 80; $brightnessValue.Text = "80"; $script:UpdatingUI = $false; Update-Status "Day Mode" })
-$presetNight.Add_Click({ $script:AutoModeEnabled = $false; $script:AmbientLightEnabled = $false; Start-AmbientLightWatcher; $autoModeText.Text = ""; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value 40 -Force; Set-GammaRamp -Gamma 1.0 -RedMult 1.0 -GreenMult 0.9 -BlueMult 0.75; $script:UpdatingUI = $true; $brightnessSlider.Value = 40; $brightnessValue.Text = "40"; $script:UpdatingUI = $false; Update-Status "Night Mode" })
+$presetDay.Add_Click({ $script:AutoModeEnabled = $false; $script:AmbientLightEnabled = $false; Start-AmbientLightWatcher; $autoModeText.Text = ""; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value 80 -Force -Percent; Set-GammaRamp -Gamma 1.0; Set-BrightnessSliderFromPercent -Percent 80 | Out-Null; Update-Status "Day Mode" })
+$presetNight.Add_Click({ $script:AutoModeEnabled = $false; $script:AmbientLightEnabled = $false; Start-AmbientLightWatcher; $autoModeText.Text = ""; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value 40 -Force -Percent; Set-GammaRamp -Gamma 1.0 -RedMult 1.0 -GreenMult 0.9 -BlueMult 0.75; Set-BrightnessSliderFromPercent -Percent 40 | Out-Null; Update-Status "Night Mode" })
 $presetAutoMode.Add_Click({
     $script:AmbientLightEnabled = $false; Start-AmbientLightWatcher
     $script:AutoModeEnabled = -not $script:AutoModeEnabled
     if ($script:AutoModeEnabled) {
-        $s = Apply-TimeBasedSettings; $autoModeText.Text = "Auto: $($s.Mode)"; $script:UpdatingUI = $true; $brightnessSlider.Value = $s.Brightness; $brightnessValue.Text = $s.Brightness; $script:UpdatingUI = $false
+        $s = Apply-TimeBasedSettings; $autoModeText.Text = "Auto: $($s.Mode)"; Set-BrightnessSliderFromPercent -Percent ([int]$s.Brightness) | Out-Null
         if ($null -eq $script:AutoModeTimer) { $script:AutoModeTimer = New-Object System.Windows.Threading.DispatcherTimer; $script:AutoModeTimer.Interval = [TimeSpan]::FromMinutes(15); $script:AutoModeTimer.Add_Tick({ if ($script:AutoModeEnabled) { $s = Apply-TimeBasedSettings; $autoModeText.Text = "Auto: $($s.Mode)" } }) }
         $script:AutoModeTimer.Start()
     } else { if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; $autoModeText.Text = ""; Update-Status "Auto Mode Off" }
@@ -8864,7 +8997,7 @@ $presetAmbientMode.Add_Click({
     $script:AmbientLightEnabled = -not $script:AmbientLightEnabled
     if ($script:AmbientLightEnabled) { Start-AmbientLightWatcher } else { Start-AmbientLightWatcher; $autoModeText.Text = ""; Update-Status "Ambient mode off" }
 })
-$presetReset.Add_Click({ $script:AutoModeEnabled = $false; $script:AmbientLightEnabled = $false; Start-AmbientLightWatcher; $autoModeText.Text = ""; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value 50 -Force; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_CONTRAST) -Value 50 -Force; Set-GammaRamp -Gamma 1.0; Load-MonitorSettings; Update-Status "Reset" })
+$presetReset.Add_Click({ $script:AutoModeEnabled = $false; $script:AmbientLightEnabled = $false; Start-AmbientLightWatcher; $autoModeText.Text = ""; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value 50 -Force -Percent; Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_CONTRAST) -Value 50 -Force -Percent; Set-GammaRamp -Gamma 1.0; Load-MonitorSettings; Update-Status "Reset" })
 
 $inputSourceCombo.Add_SelectionChanged({
     if ($script:UpdatingUI -or $inputSourceCombo.SelectedItem -eq $null) { return }

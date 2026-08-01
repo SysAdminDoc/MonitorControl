@@ -55,6 +55,7 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 - **VCP Explorer** — Query and set any VCP code for advanced users
 - **VCP Code Scanner** — Discover which DDC/CI features your monitor supports, including extended MCCS codes for gamma, OSD controls, indicators, auxiliary power, and display modes
 - **Capabilities-Aware Controls** — Parses monitor `vcp(...)` capabilities, disables controls that are known unsupported, and can scan either reported capabilities or the full probe table
+- **Monitor-Reported Value Ranges** — Brightness, contrast, RGB gain, volume, and sharpness honour each monitor's own reported maximum. Profiles, schedules, idle dim, battery targets, ambient mode, the tray popup, and the automation bridge all speak percentages, which are converted to each display's raw range at the moment of writing, so linking monitors with different ranges produces the same perceived level rather than the same raw number
 - **Crash-Safe Capability Discovery** — Requires explicit consent, persists a per-probe crash sentinel, automatically excludes an interrupted monitor identity, and offers a maximum-compatibility mode that never requests capability strings
 - **Stable Monitor Identity** — Stores EDID/device-path backed monitor identities, supports custom display labels, and targets saved profiles by identity after reordering
 - **System-Aware Accessibility** — Follows Windows high contrast live, supports 100–200% text scaling with independently scrollable content and navigation, exposes visible keyboard focus and UI Automation names, and raises native live-region events for inline errors
@@ -194,6 +195,7 @@ This is the same pinned lane used by CI. It gates static-analysis errors, determ
 - Query-string and JSON-body API keys are rejected, and the saved key is encrypted for the current Windows user with DPAPI
 - The listener enforces request-line, header-count, header-size, body-size, response-size, concurrency, and socket-deadline limits; malformed framing receives a deterministic 4xx response
 - Supported endpoints are `GET /api/health`, `GET /api/monitors`, `GET /api/profiles`, `GET /api/brightness`, `POST /api/brightness`, and `POST /api/profile`
+- Brightness is expressed as a percentage in both directions. `GET /api/brightness` also returns the `raw` DDC value and the monitor's reported `maximum`, and `GET /api/monitors` reports `BrightnessMaximum` per display
 - MQTT/Home Assistant integration remains disabled; use the bridge as the local foundation before enabling network integrations
 
 ### Capability Discovery Safety
@@ -293,7 +295,7 @@ Profiles are saved as JSON files in `%APPDATA%\MonitorControlPro\`
 ### Profile Contents
 ```json
 {
-  "SchemaVersion": 3,
+  "SchemaVersion": 4,
   "Name": "Gaming",
   "MonitorIdentityKey": "edid:0123456789abcdef",
   "MonitorLabel": "Desk Left",
@@ -328,6 +330,12 @@ Profiles are saved as JSON files in `%APPDATA%\MonitorControlPro\`
 ```
 
 Profiles without `SchemaVersion` are treated as v1 and migrated to the current schema on load.
+
+Schema v4 stores every scaled DDC value (brightness, contrast, RGB gain, volume, sharpness) as a
+percentage rather than a raw VCP number. Monitors do not all use a 0-100 range — a panel may
+report a maximum of 31 or 255 — so the raw value is derived per monitor when the profile is
+applied. Values from profiles written before v4 are clamped into 0-100 on load. Gamma remains a
+software curve and is not a DDC value.
 
 Use **Export Bundle** on the Profiles tab to create a manifest-declared, SHA-256 checksummed ZIP in `%APPDATA%\MonitorControlPro\exports`.
 Use **Import Bundle** to preview creates, replacements, and skipped conflicts before writing. Imports reject unsafe paths, undeclared or duplicate entries, unsupported schemas, invalid values, oversized content, and suspicious compression ratios.

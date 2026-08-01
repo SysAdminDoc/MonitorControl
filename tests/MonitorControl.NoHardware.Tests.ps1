@@ -24,6 +24,17 @@ BeforeAll {
 
     function Update-ProfilesList {}
 
+    function global:New-RangeTestMonitor {
+        param([string]$IdentityKey, [int]$BrightnessMaximum)
+        $monitor = [PSCustomObject]@{
+            IdentityKey = $IdentityKey
+            Name = "Monitor $IdentityKey"
+            VcpMaximums = @{}
+        }
+        if ($BrightnessMaximum -gt 0) { $monitor.VcpMaximums[0x10] = $BrightnessMaximum }
+        return $monitor
+    }
+
     Import-MonitorControlFunctions -Name @(
         "Set-DeferredStatus",
         "Test-JsonFileValid",
@@ -86,6 +97,14 @@ BeforeAll {
         "Set-VcpWriteEnabledForMonitor",
         "Set-ControlVcpSupport",
         "Get-VcpWriteOperation",
+        "Test-VcpCodeIsScaled",
+        "Get-VcpMaximumForMonitor",
+        "Set-VcpMaximumForMonitor",
+        "ConvertTo-VcpPercent",
+        "ConvertTo-VcpRawValue",
+        "Resolve-VcpWriteValueForMonitor",
+        "Update-VcpMaximumCache",
+        "Get-ProfilePercentValue",
         "Invoke-VerifiedVcpTransaction",
         "Get-VcpDescription",
         "Format-VcpWriteConfirmation",
@@ -357,10 +376,10 @@ Describe "Profile filename validation" {
 
 Describe "Profile schema migration" {
     BeforeEach {
-        $script:ProfileSchemaVersion = 3
+        $script:ProfileSchemaVersion = 4
     }
 
-    It "migrates every supported legacy schema to schema v3" {
+    It "migrates every supported legacy schema to the current schema" {
         $fixtures = @(
             [PSCustomObject]@{
                 Name = "Legacy v1"
@@ -396,7 +415,7 @@ Describe "Profile schema migration" {
             ConvertTo-CurrentProfileSchema -Profile $_ -FallbackName "Fallback"
         })
 
-        @($migrated.SchemaVersion) | Should -Be @(3, 3)
+        @($migrated.SchemaVersion) | Should -Be @(4, 4)
         $migrated[0].MonitorSettings.Count | Should -Be 1
         $migrated[0].MonitorSettings[0].IdentityKey | Should -Be "edid:v1"
         $migrated[1].MonitorSettings.Count | Should -Be 1
@@ -464,7 +483,7 @@ Describe "Transactional profile bundle import" {
         $script:ProfilesPath = Join-Path $TestDrive "profiles"
         $script:ProfileExportsPath = Join-Path $TestDrive "exports"
         New-Item -ItemType Directory -Path $script:ProfilesPath -Force | Out-Null
-        $script:ProfileSchemaVersion = 3
+        $script:ProfileSchemaVersion = 4
         $script:ProfileBundleSchemaVersion = 2
         $script:ProfileBundleMaxProfiles = 100
         $script:ProfileBundleMaxArchiveBytes = 16777216
@@ -1315,6 +1334,166 @@ Describe "VCP parser helpers" {
         $badText = ConvertTo-VcpValue -Text "12.5"
         $negative | Should -BeNullOrEmpty
         $badText | Should -BeNullOrEmpty
+    }
+}
+
+Describe "Monitor reported VCP range normalization" {
+    BeforeEach {
+        $script:VcpScaledCodes = @(0x10, 0x12, 0x16, 0x18, 0x1A, 0x62, 0x87)
+        $script:VcpDefaultMaximum = 100
+        $script:ProfileSchemaVersion = 4
+    }
+
+    It "treats only continuous codes as scaled" {
+        foreach ($code in @(0x10, 0x12, 0x16, 0x18, 0x1A, 0x62, 0x87)) {
+            Test-VcpCodeIsScaled -Code $code | Should -BeTrue
+        }
+        foreach ($code in @(0x14, 0x60, 0xD6, 0xDC, 0x8D, 0x04)) {
+            Test-VcpCodeIsScaled -Code $code | Should -BeFalse
+        }
+    }
+
+    It "falls back to a 0-100 range until a maximum has been observed" {
+        $monitor = New-RangeTestMonitor -IdentityKey "unknown" -BrightnessMaximum 0
+        Get-VcpMaximumForMonitor -Monitor $monitor -Code 0x10 | Should -Be 100
+        Get-VcpMaximumForMonitor -Monitor $null -Code 0x10 | Should -Be 100
+    }
+
+    It "ignores non-positive reported maximums" {
+        $monitor = New-RangeTestMonitor -IdentityKey "zero" -BrightnessMaximum 0
+        Set-VcpMaximumForMonitor -Monitor $monitor -Code 0x10 -Maximum 0
+        Set-VcpMaximumForMonitor -Monitor $monitor -Code 0x10 -Maximum -5
+        Get-VcpMaximumForMonitor -Monitor $monitor -Code 0x10 | Should -Be 100
+    }
+
+    It "maps percentages onto 0-31, 0-100, and 0-255 ranges" {
+        ConvertTo-VcpRawValue -Percent 0 -Maximum 31 | Should -Be 0
+        ConvertTo-VcpRawValue -Percent 100 -Maximum 31 | Should -Be 31
+        ConvertTo-VcpRawValue -Percent 50 -Maximum 31 | Should -Be 16
+
+        ConvertTo-VcpRawValue -Percent 0 -Maximum 100 | Should -Be 0
+        ConvertTo-VcpRawValue -Percent 42 -Maximum 100 | Should -Be 42
+        ConvertTo-VcpRawValue -Percent 100 -Maximum 100 | Should -Be 100
+
+        ConvertTo-VcpRawValue -Percent 100 -Maximum 255 | Should -Be 255
+        ConvertTo-VcpRawValue -Percent 50 -Maximum 255 | Should -Be 128
+    }
+
+    It "maps raw values back to percentages and clamps out-of-range input" {
+        ConvertTo-VcpPercent -RawValue 31 -Maximum 31 | Should -Be 100
+        ConvertTo-VcpPercent -RawValue 0 -Maximum 31 | Should -Be 0
+        ConvertTo-VcpPercent -RawValue 128 -Maximum 255 | Should -Be 50
+        ConvertTo-VcpPercent -RawValue 400 -Maximum 255 | Should -Be 100
+        ConvertTo-VcpPercent -RawValue -10 -Maximum 100 | Should -Be 0
+        ConvertTo-VcpRawValue -Percent 250 -Maximum 31 | Should -Be 31
+        ConvertTo-VcpRawValue -Percent -40 -Maximum 31 | Should -Be 0
+    }
+
+    It "round-trips every percentage on a 0-100 monitor without drift" {
+        foreach ($percent in 0..100) {
+            $raw = ConvertTo-VcpRawValue -Percent $percent -Maximum 100
+            ConvertTo-VcpPercent -RawValue $raw -Maximum 100 | Should -Be $percent
+        }
+    }
+
+    It "keeps a percentage monotonic across a compressed range" {
+        $previous = -1
+        foreach ($percent in 0..100) {
+            $raw = ConvertTo-VcpRawValue -Percent $percent -Maximum 31
+            $raw | Should -BeGreaterOrEqual $previous
+            $previous = $raw
+        }
+    }
+
+    It "resolves one percentage into a different raw value per monitor" {
+        $narrow = New-RangeTestMonitor -IdentityKey "narrow" -BrightnessMaximum 31
+        $standard = New-RangeTestMonitor -IdentityKey "standard" -BrightnessMaximum 100
+        $wide = New-RangeTestMonitor -IdentityKey "wide" -BrightnessMaximum 255
+
+        Resolve-VcpWriteValueForMonitor -Monitor $narrow -Code 0x10 -Value 80 -Percent | Should -Be 25
+        Resolve-VcpWriteValueForMonitor -Monitor $standard -Code 0x10 -Value 80 -Percent | Should -Be 80
+        Resolve-VcpWriteValueForMonitor -Monitor $wide -Code 0x10 -Value 80 -Percent | Should -Be 204
+    }
+
+    It "never rescales a discrete code even when asked for percentages" {
+        $wide = New-RangeTestMonitor -IdentityKey "wide" -BrightnessMaximum 255
+        $wide.VcpMaximums[0x60] = 255
+        Resolve-VcpWriteValueForMonitor -Monitor $wide -Code 0x60 -Value 17 -Percent | Should -Be 17
+        Resolve-VcpWriteValueForMonitor -Monitor $wide -Code 0xD6 -Value 4 -Percent | Should -Be 4
+    }
+
+    It "passes raw values through untouched when percentages were not requested" {
+        $wide = New-RangeTestMonitor -IdentityKey "wide" -BrightnessMaximum 255
+        Resolve-VcpWriteValueForMonitor -Monitor $wide -Code 0x10 -Value 200 | Should -Be 200
+    }
+
+    It "caches reported maximums from worker results by monitor identity" {
+        $narrow = New-RangeTestMonitor -IdentityKey "narrow" -BrightnessMaximum 0
+        $wide = New-RangeTestMonitor -IdentityKey "wide" -BrightnessMaximum 0
+        $script:PhysicalMonitors = @($narrow, $wide)
+
+        Update-VcpMaximumCache -Results @(
+            [PSCustomObject]@{ Success = $true; Code = 0x10; Maximum = 31; IdentityKey = "narrow" },
+            [PSCustomObject]@{ Success = $true; Code = 0x10; Maximum = 255; IdentityKey = "wide" },
+            [PSCustomObject]@{ Success = $false; Code = 0x12; Maximum = 900; IdentityKey = "narrow" },
+            [PSCustomObject]@{ Success = $true; Code = 0x12; Maximum = 0; IdentityKey = "wide" },
+            [PSCustomObject]@{ Success = $true; Code = 0x10; Maximum = 64; IdentityKey = "" }
+        )
+
+        Get-VcpMaximumForMonitor -Monitor $narrow -Code 0x10 | Should -Be 31
+        Get-VcpMaximumForMonitor -Monitor $wide -Code 0x10 | Should -Be 255
+        Get-VcpMaximumForMonitor -Monitor $narrow -Code 0x12 | Should -Be 100
+        Get-VcpMaximumForMonitor -Monitor $wide -Code 0x12 | Should -Be 100
+    }
+
+    It "sends one linked brightness percentage to three differently ranged monitors" {
+        $monitors = @(
+            (New-RangeTestMonitor -IdentityKey "narrow" -BrightnessMaximum 31),
+            (New-RangeTestMonitor -IdentityKey "standard" -BrightnessMaximum 100),
+            (New-RangeTestMonitor -IdentityKey "wide" -BrightnessMaximum 255)
+        )
+        $written = @(foreach ($monitor in $monitors) {
+            [int](Resolve-VcpWriteValueForMonitor -Monitor $monitor -Code 0x10 -Value 25 -Percent)
+        })
+
+        $written | Should -Be @(8, 25, 64)
+        # A coarse range cannot represent every percentage exactly, so the contract is that
+        # each monitor lands on its nearest representable step - not on the same raw number.
+        foreach ($index in 0..2) {
+            $maximum = Get-VcpMaximumForMonitor -Monitor $monitors[$index] -Code 0x10
+            $observed = ConvertTo-VcpPercent -RawValue $written[$index] -Maximum $maximum
+            [Math]::Abs($observed - 25) | Should -BeLessOrEqual ([Math]::Ceiling(100.0 / (2 * $maximum)))
+        }
+    }
+}
+
+Describe "Profile percentage schema" {
+    It "clamps pre-v4 raw values into the percentage domain" {
+        $legacy = [PSCustomObject]@{ Brightness = 200; Contrast = 31; Red = -5 }
+        Get-ProfilePercentValue -Object $legacy -Property "Brightness" -Default 50 | Should -Be 100
+        Get-ProfilePercentValue -Object $legacy -Property "Contrast" -Default 50 | Should -Be 31
+        Get-ProfilePercentValue -Object $legacy -Property "Red" -Default 50 | Should -Be 0
+        Get-ProfilePercentValue -Object $legacy -Property "Missing" -Default 50 | Should -Be 50
+    }
+
+    It "upgrades every legacy profile schema to the percentage schema" {
+        foreach ($schema in @(1, 2, 3)) {
+            $legacy = [PSCustomObject]@{
+                SchemaVersion = $schema
+                Name = "Legacy$schema"
+                Brightness = 240
+                Contrast = 60
+            }
+            $converted = ConvertTo-CurrentProfileSchema -Profile $legacy -FallbackName "Legacy$schema"
+            $converted.SchemaVersion | Should -Be 4
+            $converted.Brightness | Should -Be 100
+            $converted.Contrast | Should -Be 60
+        }
+    }
+
+    It "rejects a profile schema newer than this build" {
+        $future = [PSCustomObject]@{ SchemaVersion = 5; Name = "Future" }
+        { ConvertTo-CurrentProfileSchema -Profile $future -FallbackName "Future" } | Should -Throw
     }
 }
 

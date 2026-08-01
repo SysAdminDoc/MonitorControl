@@ -4,6 +4,10 @@ All notable changes to MonitorControl will be documented in this file.
 
 ## [Unreleased]
 
+- Fixed: brightness, contrast, RGB gain, volume, and sharpness now honour each monitor's own reported VCP maximum. Profiles, schedules, idle dim, battery targets, ambient mode, presets, the tray popup, and the automation bridge exchange percentages and convert to each display's raw range at the write boundary, so a linked change no longer writes one raw number to panels that report different ranges.
+- Changed: profile schema v4 stores scaled DDC values as percentages; profiles written before v4 are clamped into 0-100 on load.
+- Changed: `GET /api/brightness` returns a percentage plus the raw value and reported maximum, and `GET /api/monitors` reports `BrightnessMaximum` per display.
+
 - Added: live Windows high-contrast colors, text-only scaling through 200%, per-monitor DPI awareness, reflowed headers, and independently scrollable navigation and tab content.
 - Added: visible keyboard focus, access-key navigation, keyboard-invokable monitor tiles, complete UI Automation names, and inline dismissible error banners.
 - Added: assertive WPF live regions with a native UI Automation provider fallback, plus an out-of-process accessibility-event smoke assertion.
