@@ -3,9 +3,9 @@ BeforeAll {
     $script:RepoRoot = Split-Path -Parent $PSScriptRoot
     $script:AppPath = Join-Path $script:RepoRoot "MonitorControlPro.ps1"
 
-    # The value cache and its suppression predicate live in the inline C# layer, so the suite
-    # compiles that block on its own. No P/Invoke is called from these tests; only the managed
-    # cache helpers are exercised, with synthetic handle values that never reach a driver.
+    # The value cache, queue, and suppression predicate live in the inline C# layer, so the suite
+    # compiles that block on its own. Synthetic handles reach only an injected managed adapter;
+    # no test invokes a monitor-driver P/Invoke.
     function Import-MonitorControlNativeType {
         if ("MonitorAPI" -as [type]) { return }
         $text = [System.IO.File]::ReadAllText($script:AppPath)
@@ -18,6 +18,58 @@ BeforeAll {
     }
 
     Import-MonitorControlNativeType
+
+    if (-not ("MonitorControlVcpWriteProbe" -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Collections.Generic;
+using System.Threading;
+
+public static class MonitorControlVcpWriteProbe
+{
+    private static readonly object Sync = new object();
+    private static readonly HashSet<long> DestroyedHandles = new HashSet<long>();
+    private static int delayMilliseconds;
+    private static int startedCount;
+    private static int completedCount;
+    private static int attemptsAfterDestroy;
+
+    public static void Reset(int delay)
+    {
+        lock (Sync)
+        {
+            DestroyedHandles.Clear();
+            delayMilliseconds = delay;
+            startedCount = 0;
+            completedCount = 0;
+            attemptsAfterDestroy = 0;
+        }
+    }
+
+    public static bool Write(IntPtr handle, byte code, uint value)
+    {
+        int delay;
+        lock (Sync) { startedCount++; delay = delayMilliseconds; }
+        if (delay > 0) { Thread.Sleep(delay); }
+        lock (Sync)
+        {
+            if (DestroyedHandles.Contains(handle.ToInt64())) { attemptsAfterDestroy++; }
+            completedCount++;
+        }
+        return true;
+    }
+
+    public static void MarkDestroyed(IntPtr handle)
+    {
+        lock (Sync) { DestroyedHandles.Add(handle.ToInt64()); }
+    }
+
+    public static int StartedCount { get { lock (Sync) { return startedCount; } } }
+    public static int CompletedCount { get { lock (Sync) { return completedCount; } } }
+    public static int AttemptsAfterDestroy { get { lock (Sync) { return attemptsAfterDestroy; } } }
+}
+"@ -ErrorAction Stop
+    }
 
     function Import-MonitorControlFunctions {
         param([string[]]$Name)
@@ -125,6 +177,7 @@ BeforeAll {
         "Get-DisplayRecoveryReadRetryCount",
         "Get-DisplayRecoveryTransition",
         "Test-DisplayWorkerResultCurrent",
+        "Stop-DdcWriteQueueForHandleRelease",
         "Clear-PhysicalMonitorHandles",
         "Test-MonitorSupportsVcp",
         "Test-MonitorSupportsVcpValue",
@@ -1059,6 +1112,10 @@ Describe "Deferred callback closure safety" {
 
 Describe "Physical monitor handle cleanup" {
     BeforeEach {
+        [MonitorAPI]::CancelVCPWrites() | Out-Null
+        Wait-DdcWriteQueueIdle -TimeoutMs 5000 | Should -BeTrue
+        [MonitorAPI]::ResetVcpSetFeatureAdapter()
+        [MonitorAPI]::ResumeVCPWrites() | Should -BeTrue
         $script:DestroyedHandleValues = @()
         $script:PhysicalMonitors = @(
             [PSCustomObject]@{ Name = "First"; Handle = [IntPtr]101 },
@@ -1066,6 +1123,13 @@ Describe "Physical monitor handle cleanup" {
             [PSCustomObject]@{ Name = "Second"; Handle = [IntPtr]202 },
             [PSCustomObject]@{ Name = "No handle"; Handle = [IntPtr]::Zero }
         )
+    }
+
+    AfterEach {
+        [MonitorAPI]::CancelVCPWrites() | Out-Null
+        Wait-DdcWriteQueueIdle -TimeoutMs 5000 | Should -BeTrue
+        [MonitorAPI]::ResetVcpSetFeatureAdapter()
+        [MonitorAPI]::ResumeVCPWrites() | Should -BeTrue
     }
 
     It "destroys each unique native handle once and zeros every alias" {
@@ -1088,6 +1152,45 @@ Describe "Physical monitor handle cleanup" {
 
         @($script:DestroyedHandleValues) | Should -Be @(202)
         @($monitors | Where-Object { $_.Handle -ne [IntPtr]::Zero }).Count | Should -Be 0
+    }
+
+    It "reports a timeout and preserves handles when the write worker will not release them" {
+        $released = Stop-DdcWriteQueueForHandleRelease -TimeoutMs 25 -CancelWrites {} -WaitForIdle { param([int]$Timeout) return $false }
+
+        $released | Should -BeFalse
+        $script:LastStatusMessage | Should -Be "DDC write worker did not release monitor handles within 25 ms; handle destruction was aborted"
+        @($script:PhysicalMonitors | Where-Object { $_.Handle -ne [IntPtr]::Zero }).Count | Should -Be 3
+    }
+
+    It "cancels a stressed queue before refresh destroys any physical handle" {
+        $handles = @([IntPtr]1001, [IntPtr]1002, [IntPtr]1003)
+        $script:PhysicalMonitors = @(
+            foreach ($handle in $handles) { [PSCustomObject]@{ Name = "Stress $($handle.ToInt64())"; Handle = $handle } }
+        )
+        [MonitorControlVcpWriteProbe]::Reset(150)
+        $adapterMethod = [MonitorControlVcpWriteProbe].GetMethod("Write")
+        $adapter = [System.Delegate]::CreateDelegate([MonitorAPI+VcpSetFeatureAdapter], $adapterMethod)
+        [MonitorAPI]::SetVcpSetFeatureAdapter($adapter)
+
+        foreach ($handle in $handles) {
+            foreach ($writeIndex in 1..5) {
+                [MonitorAPI]::QueueVCPWrite($handle, [byte]0x10, [uint32](40 + $writeIndex), "$($handle.ToInt64()):$writeIndex", "Stress", $true) | Should -BeTrue
+            }
+        }
+        $deadline = [DateTime]::UtcNow.AddSeconds(2)
+        while ([MonitorControlVcpWriteProbe]::StartedCount -eq 0 -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 10 }
+        [MonitorControlVcpWriteProbe]::StartedCount | Should -BeGreaterThan 0
+
+        Clear-PhysicalMonitorHandles -ClearList -DestroyHandle {
+            param([IntPtr]$Handle)
+            [MonitorControlVcpWriteProbe]::MarkDestroyed($Handle)
+        } | Should -BeTrue
+
+        [MonitorControlVcpWriteProbe]::AttemptsAfterDestroy | Should -Be 0
+        [MonitorControlVcpWriteProbe]::StartedCount | Should -BeLessThan 15
+        [MonitorAPI]::IsVCPWriteWorkerActive() | Should -BeFalse
+        [MonitorAPI]::GetPendingVCPWriteCount() | Should -Be 0
+        $script:PhysicalMonitors.Count | Should -Be 0
     }
 }
 

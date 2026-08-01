@@ -117,6 +117,8 @@ public class MonitorAPI
         public DateTime ObservedUtc;
     }
 
+    public delegate bool VcpSetFeatureAdapter(IntPtr hMonitor, byte bVCPCode, uint dwNewValue);
+
     public class VcpWriteResult {
         public string MonitorName;
         public string Key;
@@ -216,14 +218,17 @@ public class MonitorAPI
     private static readonly object VcpWriteResultsLock = new object();
     private static readonly List<VcpWriteResult> VcpWriteResults = new List<VcpWriteResult>();
     private static bool VcpWriteWorkerActive = false;
+    private static bool VcpWriteCancellationRequested = false;
+    private static readonly object VcpSetFeatureAdapterLock = new object();
+    private static VcpSetFeatureAdapter VcpSetFeatureOverride = null;
     public const int VcpReadRetryCount = 2;
     public const int VcpWriteRetryCount = 2;
     public const int VcpRetryDelayMilliseconds = 60;
     public const int VcpRetryDelayCeilingMilliseconds = 2000;
 
-    public static void QueueVCPWrite(IntPtr hMonitor, byte bVCPCode, uint dwNewValue, string coalesceKey, string monitorName)
+    public static bool QueueVCPWrite(IntPtr hMonitor, byte bVCPCode, uint dwNewValue, string coalesceKey, string monitorName)
     {
-        QueueVCPWrite(hMonitor, bVCPCode, dwNewValue, coalesceKey, monitorName, false);
+        return QueueVCPWrite(hMonitor, bVCPCode, dwNewValue, coalesceKey, monitorName, false);
     }
 
     // Pure predicate so the decision can be exercised without touching hardware.
@@ -234,17 +239,18 @@ public class MonitorAPI
         return TryGetVcpValue(hMonitor, bVCPCode, out known) && known == dwNewValue;
     }
 
-    public static void QueueVCPWrite(IntPtr hMonitor, byte bVCPCode, uint dwNewValue, string coalesceKey, string monitorName, bool force)
+    public static bool QueueVCPWrite(IntPtr hMonitor, byte bVCPCode, uint dwNewValue, string coalesceKey, string monitorName, bool force)
     {
-        if (hMonitor == IntPtr.Zero) { return; }
+        if (hMonitor == IntPtr.Zero) { return false; }
         if (ShouldSuppressVcpWrite(hMonitor, bVCPCode, dwNewValue, force))
         {
             Interlocked.Increment(ref SuppressedVcpWrites);
-            return;
+            return true;
         }
         string key = String.IsNullOrEmpty(coalesceKey) ? hMonitor.ToInt64().ToString("X") + ":" + bVCPCode.ToString("X2") : coalesceKey;
         lock (VcpWriteQueueLock)
         {
+            if (VcpWriteCancellationRequested) { return false; }
             QueuedVcpWrites[key] = new QueuedVcpWrite { Handle = hMonitor, Code = bVCPCode, Value = dwNewValue, Key = key, MonitorName = monitorName, Force = force };
             if (!VcpWriteWorkerActive)
             {
@@ -252,6 +258,50 @@ public class MonitorAPI
                 ThreadPool.QueueUserWorkItem(ProcessQueuedVcpWrites);
             }
         }
+        return true;
+    }
+
+    public static int CancelVCPWrites()
+    {
+        lock (VcpWriteQueueLock)
+        {
+            VcpWriteCancellationRequested = true;
+            int cancelled = QueuedVcpWrites.Count;
+            QueuedVcpWrites.Clear();
+            return cancelled;
+        }
+    }
+
+    public static bool ResumeVCPWrites()
+    {
+        lock (VcpWriteQueueLock)
+        {
+            if (VcpWriteWorkerActive) { return false; }
+            VcpWriteCancellationRequested = false;
+            return true;
+        }
+    }
+
+    public static bool IsVCPWriteCancellationRequested()
+    {
+        lock (VcpWriteQueueLock) { return VcpWriteCancellationRequested; }
+    }
+
+    public static void SetVcpSetFeatureAdapter(VcpSetFeatureAdapter adapter)
+    {
+        lock (VcpSetFeatureAdapterLock) { VcpSetFeatureOverride = adapter; }
+    }
+
+    public static void ResetVcpSetFeatureAdapter()
+    {
+        lock (VcpSetFeatureAdapterLock) { VcpSetFeatureOverride = null; }
+    }
+
+    private static bool InvokeSetVcpFeature(IntPtr hMonitor, byte bVCPCode, uint dwNewValue)
+    {
+        VcpSetFeatureAdapter adapter;
+        lock (VcpSetFeatureAdapterLock) { adapter = VcpSetFeatureOverride; }
+        return adapter == null ? SetVCPFeature(hMonitor, bVCPCode, dwNewValue) : adapter(hMonitor, bVCPCode, dwNewValue);
     }
 
     // The delay between retries is a per-monitor property: panels differ by an order of
@@ -308,7 +358,7 @@ public class MonitorAPI
         for (int retry = 0; retry <= maxRetries; retry++)
         {
             attempts = retry + 1;
-            bool ok = SetVCPFeature(hMonitor, bVCPCode, dwNewValue);
+            bool ok = InvokeSetVcpFeature(hMonitor, bVCPCode, dwNewValue);
             if (ok)
             {
                 lastError = 0;
@@ -341,6 +391,12 @@ public class MonitorAPI
             QueuedVcpWrite[] batch;
             lock (VcpWriteQueueLock)
             {
+                if (VcpWriteCancellationRequested)
+                {
+                    QueuedVcpWrites.Clear();
+                    VcpWriteWorkerActive = false;
+                    return;
+                }
                 if (QueuedVcpWrites.Count == 0)
                 {
                     VcpWriteWorkerActive = false;
@@ -352,6 +408,14 @@ public class MonitorAPI
             }
             foreach (QueuedVcpWrite write in batch)
             {
+                lock (VcpWriteQueueLock)
+                {
+                    if (VcpWriteCancellationRequested)
+                    {
+                        VcpWriteWorkerActive = false;
+                        return;
+                    }
+                }
                 if (!write.Force)
                 {
                     uint known;
@@ -2579,11 +2643,29 @@ function Wait-DdcWriteQueueIdle {
     return $false
 }
 
+function Stop-DdcWriteQueueForHandleRelease {
+    param(
+        [int]$TimeoutMs = 5000,
+        [scriptblock]$CancelWrites,
+        [scriptblock]$WaitForIdle
+    )
+    if ($null -eq $CancelWrites) { $CancelWrites = { [MonitorAPI]::CancelVCPWrites() | Out-Null } }
+    if ($null -eq $WaitForIdle) { $WaitForIdle = { param([int]$Timeout) Wait-DdcWriteQueueIdle -TimeoutMs $Timeout } }
+    & $CancelWrites
+    if (& $WaitForIdle $TimeoutMs) { return $true }
+    $message = "DDC write worker did not release monitor handles within $TimeoutMs ms; handle destruction was aborted"
+    if (Get-Command Update-Status -ErrorAction SilentlyContinue) { Update-Status $message }
+    return $false
+}
+
 function Clear-PhysicalMonitorHandles {
     param(
         [switch]$ClearList,
-        [scriptblock]$DestroyHandle
+        [scriptblock]$DestroyHandle,
+        [switch]$KeepWritesCancelled,
+        [int]$WriteQueueTimeoutMs = 5000
     )
+    if (-not (Stop-DdcWriteQueueForHandleRelease -TimeoutMs $WriteQueueTimeoutMs)) { return $false }
     if ($null -eq $DestroyHandle) {
         $DestroyHandle = {
             param([IntPtr]$Handle)
@@ -2602,6 +2684,11 @@ function Clear-PhysicalMonitorHandles {
     }
     try { [MonitorAPI]::InvalidateVcpValueCache() } catch {}
     if ($ClearList) { $script:PhysicalMonitors = @() }
+    if (-not $KeepWritesCancelled -and -not [MonitorAPI]::ResumeVCPWrites()) {
+        if (Get-Command Update-Status -ErrorAction SilentlyContinue) { Update-Status "DDC write queue could not resume after monitor handle cleanup" }
+        return $false
+    }
+    return $true
 }
 
 function Get-CapabilitiesSafetySettingsObject {
@@ -3379,8 +3466,10 @@ function Get-Monitors {
     Stop-VcpWorker -Cancel
     Stop-CapabilitiesWorker -Cancel
     Stop-DdcReportWorker -Cancel
-    Wait-DdcWriteQueueIdle -TimeoutMs 1000 | Out-Null
-    Clear-PhysicalMonitorHandles -ClearList
+    if (-not (Clear-PhysicalMonitorHandles -ClearList -KeepWritesCancelled)) {
+        throw "Monitor refresh aborted because the DDC write worker still owns a physical monitor handle"
+    }
+    try {
     $monitorHandles = [MonitorAPI]::GetAllMonitorHandles()
     $monitorIndex = 1
     $displayDevices = @{}
@@ -3453,6 +3542,11 @@ function Get-Monitors {
     Sync-DisplayRecoveryInventory
     if ($script:DdcAvailabilityDiagnosis -and [string]$script:DdcAvailabilityDiagnosis.Severity -ne "None") {
         Update-Status ([string]$script:DdcAvailabilityDiagnosis.Headline)
+    }
+    } finally {
+        if (-not [MonitorAPI]::ResumeVCPWrites()) {
+            throw "Monitor refresh could not resume the DDC write queue"
+        }
     }
 }
 
@@ -3755,8 +3849,7 @@ function Set-VCPValue {
 function Queue-VCPValue {
     param([IntPtr]$Handle, [byte]$VCPCode, [uint32]$Value, [string]$Key, [string]$MonitorName = "", [switch]$ForceWrite)
     if ($Handle -eq [IntPtr]::Zero) { return $false }
-    [MonitorAPI]::QueueVCPWrite($Handle, $VCPCode, $Value, $Key, $MonitorName, [bool]$ForceWrite)
-    return $true
+    return [bool][MonitorAPI]::QueueVCPWrite($Handle, $VCPCode, $Value, $Key, $MonitorName, [bool]$ForceWrite)
 }
 
 function Get-SuppressedDdcWriteCount {
@@ -11266,8 +11359,9 @@ $window.Add_Closed({ Stop-SystemAccessibility; if ($script:GpuTimer) { $script:G
     if ($script:FpsOverlayWindow) { try { $script:FpsOverlayWindow.Close() } catch {} }
     if ($script:HardwareMonitorComputer) { try { $script:HardwareMonitorComputer.Close() } catch {} }
     Dispose-TrayMode
-    Wait-DdcWriteQueueIdle -TimeoutMs 1000 | Out-Null
-    Clear-PhysicalMonitorHandles -ClearList
+    if (-not (Clear-PhysicalMonitorHandles -ClearList -KeepWritesCancelled)) {
+        [System.Diagnostics.Trace]::TraceError("MonitorControl closed before the DDC write worker released its physical monitor handles; native destruction was skipped.")
+    }
 })
 
 if ($StartMinimized) {

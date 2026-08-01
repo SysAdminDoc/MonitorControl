@@ -4,6 +4,7 @@ All notable changes to MonitorControl will be documented in this file.
 
 ## [Unreleased]
 
+- Fixed: monitor refresh and shutdown now cancel queued DDC writes, reject new queue entries during teardown, and wait for any in-flight native call to release its handle before destruction. A timeout aborts destruction with an explicit error instead of passing a freed physical-monitor handle to the background worker.
 - Fixed: DDC value observations now expire after five minutes so panel OSD changes, other DDC tools, and self-reverting monitors cannot suppress a needed write indefinitely. Direct control changes always bypass suppression, repeating automation retains write-wear protection with a read-before-write after expiry, and System now offers a selected-monitor **Re-read values** action.
 - Fixed: risky-write UI state is now refreshed with the selected monitor. The System checkbox and status name the active display, VCP Explorer's arbitrary Set button is disabled with guidance when that identity is locked, and all-monitor standby remains unavailable until every connected DDC/CI identity is unlocked.
 - Fixed: monitor-identification overlays and delayed post-reset refreshes now close over their function-local state before the dispatcher invokes them. Identify overlays stop and close after two seconds, reset refreshes reach the selected monitor, and an AST regression test rejects future deferred timer handlers that capture function locals without `GetNewClosure()`.
