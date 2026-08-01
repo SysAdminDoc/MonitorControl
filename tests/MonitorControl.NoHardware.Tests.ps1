@@ -3343,7 +3343,9 @@ Describe "Per-monitor DDC timing and null-message semantics" {
         Import-MonitorControlFunctions -Name @(
             "New-DdcTimingProfile", "Get-DdcTimingProfile", "Get-DdcEffectiveTiming", "Get-DdcWorkerTiming",
             "Get-DdcCalibratedSleepMultiplier", "Test-DdcCodeUnsupported", "Register-DdcCodeOutcome",
-            "Set-DdcTimingMode", "Clear-DdcTimingCalibration", "Update-DdcTimingCalibration"
+            "Test-DdcErrorIndicatesNullResponse", "Get-DdcNullSemanticsDecision", "Set-DdcNullSemanticsClassification",
+            "Set-DdcTimingMode", "Clear-DdcTimingCalibration", "Update-DdcTimingCalibration",
+            "Get-DdcTimingSettingsObject", "Get-VCPValue"
         )
         $script:DdcTimingMinMultiplier = 1.0
         $script:DdcTimingMaxMultiplier = 4.0
@@ -3361,6 +3363,8 @@ Describe "Per-monitor DDC timing and null-message semantics" {
         $timing.CalibratedAt | Should -BeNullOrEmpty
         $timing.ReadRetries | Should -Be ([int][MonitorAPI]::VcpReadRetryCount)
         $timing.WriteRetries | Should -Be ([int][MonitorAPI]::VcpWriteRetryCount)
+        $timing.NullMeansUnsupported | Should -BeFalse
+        $timing.NullSemanticsClassifiedAt | Should -BeNullOrEmpty
         @($timing.UnsupportedCodes).Count | Should -Be 0
     }
 
@@ -3465,6 +3469,60 @@ Describe "Per-monitor DDC timing and null-message semantics" {
         $timing = Get-DdcTimingProfile -IdentityKey "edid:a"
         Register-DdcCodeOutcome -TimingProfile $timing -Code 0xDF -Success $false -LastError 50 -Attempts 1 -OtherCodesResponded $true | Should -BeFalse
         Test-DdcCodeUnsupported -TimingProfile $timing -Code 0xDF | Should -BeFalse
+    }
+
+    It "classifies a persistent invalid-data reply to VCP 0x00 as Null-for-unsupported" {
+        $probe = [PSCustomObject]@{ Success = $false; LastError = [int]0xC0262585; Attempts = 3 }
+        $decision = Get-DdcNullSemanticsDecision -ProbeResult $probe -OtherCodesResponded $true
+
+        $decision.Classified | Should -BeTrue
+        $decision.NullMeansUnsupported | Should -BeTrue
+        $decision.Reason | Should -Be "PersistentNullReply"
+    }
+
+    It "classifies an explicit unsupported reply to VCP 0x00 without changing retry semantics" {
+        $probe = [PSCustomObject]@{ Success = $false; LastError = [int]0xC0262584; Attempts = 1 }
+        $decision = Get-DdcNullSemanticsDecision -ProbeResult $probe -OtherCodesResponded $true
+
+        $decision.Classified | Should -BeTrue
+        $decision.NullMeansUnsupported | Should -BeFalse
+        $decision.Reason | Should -Be "ExplicitUnsupportedReply"
+    }
+
+    It "leaves the monitor unclassified when the channel answered nothing or returned another error" {
+        $nullProbe = [PSCustomObject]@{ Success = $false; LastError = [int]0xC0262585; Attempts = 3 }
+        $otherError = [PSCustomObject]@{ Success = $false; LastError = 31; Attempts = 3 }
+
+        (Get-DdcNullSemanticsDecision -ProbeResult $nullProbe -OtherCodesResponded $false).Classified | Should -BeFalse
+        (Get-DdcNullSemanticsDecision -ProbeResult $otherError -OtherCodesResponded $true).Classified | Should -BeFalse
+    }
+
+    It "persists the one-time classification and immediately learns later Null responses" {
+        $timing = Get-DdcTimingProfile -IdentityKey "edid:null-panel"
+        $probe = [PSCustomObject]@{ Success = $false; LastError = [int]0xC0262585; Attempts = 3 }
+        $classifiedAt = [DateTime]::Parse("2026-08-01T12:30:00Z").ToUniversalTime()
+
+        Set-DdcNullSemanticsClassification -TimingProfile $timing -ProbeResult $probe -OtherCodesResponded $true -NowUtc $classifiedAt | Should -BeTrue
+        Set-DdcNullSemanticsClassification -TimingProfile $timing -ProbeResult $probe -OtherCodesResponded $true -NowUtc $classifiedAt.AddMinutes(1) | Should -BeFalse
+        $timing.NullMeansUnsupported | Should -BeTrue
+        $timing.NullSemanticsClassifiedAt | Should -Be $classifiedAt.ToString("o")
+        Register-DdcCodeOutcome -TimingProfile $timing -Code 0xDF -Success $false -LastError ([int]0xC0262585) -Attempts 1 -OtherCodesResponded $true | Should -BeTrue
+        Register-DdcCodeOutcome -TimingProfile $timing -Code 0xC0 -Success $false -LastError 31 -Attempts 1 -OtherCodesResponded $true | Should -BeFalse
+
+        $script:DdcTimingSchemaVersion = 2
+        $document = Get-DdcTimingSettingsObject
+        $document.SchemaVersion | Should -Be 2
+        $document.Monitors[0].NullMeansUnsupported | Should -BeTrue
+        $document.Monitors[0].NullSemanticsClassifiedAt | Should -Be $classifiedAt.ToString("o")
+    }
+
+    It "runs VCP 0x00 only after a healthy read and stops retrying learned Null replies" {
+        $source = Get-Content -LiteralPath $script:AppPath -Raw
+        $source | Should -Match 'ProbeNullSemantics = \[string\]::IsNullOrWhiteSpace'
+        $source | Should -Match '\[byte\]0x00'
+        $source | Should -Match 'if \(\[bool\]\$target\.ProbeNullSemantics -and \$anySuccess\)'
+        $source | Should -Match 'stopOnNullResponse && lastError == ErrorGraphicsDdcciInvalidData'
+        (Get-Command Get-VCPValue).Definition | Should -Match 'ReadVCPWithRetry\(\$Handle, \$VCPCode, \[int\]\$timing\.ReadRetries, \[int\]\$timing\.DelayMilliseconds, \[bool\]\$stopOnNullResponse,'
     }
 
     It "forgets a skipped code as soon as it answers again" {

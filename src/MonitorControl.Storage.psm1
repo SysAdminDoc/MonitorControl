@@ -495,6 +495,9 @@ function Get-DdcTimingSettingsObject {
             ReadRetries = [int]$entry.ReadRetries
             WriteRetries = [int]$entry.WriteRetries
             CapabilityRetries = [int]$entry.CapabilityRetries
+            NullMeansUnsupported = [bool]$entry.NullMeansUnsupported
+            NullSemanticsClassifiedAt = [string]$entry.NullSemanticsClassifiedAt
+            NullProbeLastError = [int]$entry.NullProbeLastError
             UnsupportedCodes = @(@($entry.UnsupportedCodes) | ForEach-Object {
                 [PSCustomObject]@{ Code = [int]$_.Code; LastError = [int]$_.LastError; ObservedAt = [string]$_.ObservedAt }
             })
@@ -532,6 +535,9 @@ function Import-DdcTimingSettings {
         $timingProfile.ReadRetries = [int](Get-ProfilePropertyValue -Object $record -Property "ReadRetries" -Default ([int][MonitorAPI]::VcpReadRetryCount))
         $timingProfile.WriteRetries = [int](Get-ProfilePropertyValue -Object $record -Property "WriteRetries" -Default ([int][MonitorAPI]::VcpWriteRetryCount))
         $timingProfile.CapabilityRetries = [int](Get-ProfilePropertyValue -Object $record -Property "CapabilityRetries" -Default ([int][MonitorAPI]::VcpReadRetryCount))
+        $timingProfile.NullMeansUnsupported = [bool](Get-ProfilePropertyValue -Object $record -Property "NullMeansUnsupported" -Default $false)
+        $timingProfile.NullSemanticsClassifiedAt = [string](Get-ProfilePropertyValue -Object $record -Property "NullSemanticsClassifiedAt" -Default "")
+        $timingProfile.NullProbeLastError = [int](Get-ProfilePropertyValue -Object $record -Property "NullProbeLastError" -Default 0)
         $codes = @()
         foreach ($codeRecord in @((Get-ProfilePropertyValue -Object $record -Property "UnsupportedCodes" -Default @()))) {
             if ($null -eq $codeRecord) { continue }

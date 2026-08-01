@@ -263,9 +263,15 @@ These controls are under **System > Display & DDC**.
   Null Message to mean "not supported" rather than "not ready", and burning the full retry budget
   on every such code is the usual cause of a scan that looks like a hang. The code is forgotten
   again the moment it answers
+- After the first healthy read, the app queries impossible VCP code `0x00` once for that identity.
+  An explicit unsupported reply leaves Null responses retryable; a persistent invalid-data/Null
+  reply records `NullMeansUnsupported`, so later Null replies stop after one attempt and the code
+  is learned immediately. Inconclusive probes are not saved, and mixed panels continue through
+  the per-code learning above
 - **Reset calibration** clears both the learned multiplier and the skipped-code list for the
   selected monitor
-- Effective values, calibration state, and skipped codes appear in the DDC Compatibility Report
+- Effective values, calibration state, Null-message classification and date, and skipped codes
+  appear in the DDC Compatibility Report
 - A separate liveness probe performs one read-only VCP query per monitor every 60 seconds while
   the DDC pipeline is idle. It never writes to a display. The report records the last attempt and
   last successful probe for each display; an isolated failure causes full handle re-acquisition

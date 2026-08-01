@@ -235,6 +235,7 @@ public class MonitorAPI
     public const int VcpWriteRetryCount = 2;
     public const int VcpRetryDelayMilliseconds = 60;
     public const int VcpRetryDelayCeilingMilliseconds = 2000;
+    private const int ErrorGraphicsDdcciInvalidData = unchecked((int)0xC0262585);
 
     public static bool QueueVCPWrite(IntPtr hMonitor, byte bVCPCode, uint dwNewValue, string coalesceKey, string monitorName)
     {
@@ -331,6 +332,11 @@ public class MonitorAPI
 
     public static bool ReadVCPWithRetry(IntPtr hMonitor, byte bVCPCode, int maxRetries, int delayMilliseconds, out uint pvct, out uint pdwCurrentValue, out uint pdwMaximumValue, out int lastError, out int attempts)
     {
+        return ReadVCPWithRetry(hMonitor, bVCPCode, maxRetries, delayMilliseconds, false, out pvct, out pdwCurrentValue, out pdwMaximumValue, out lastError, out attempts);
+    }
+
+    public static bool ReadVCPWithRetry(IntPtr hMonitor, byte bVCPCode, int maxRetries, int delayMilliseconds, bool stopOnNullResponse, out uint pvct, out uint pdwCurrentValue, out uint pdwMaximumValue, out int lastError, out int attempts)
+    {
         delayMilliseconds = ClampRetryDelay(delayMilliseconds);
         pvct = 0;
         pdwCurrentValue = 0;
@@ -349,6 +355,7 @@ public class MonitorAPI
                 return true;
             }
             lastError = Marshal.GetLastWin32Error();
+            if (stopOnNullResponse && lastError == ErrorGraphicsDdcciInvalidData) { return false; }
             if (retry < maxRetries) { Thread.Sleep(delayMilliseconds); }
         }
         return false;
@@ -932,7 +939,7 @@ $script:AutomationBridgeRequests = New-Object 'System.Collections.Concurrent.Con
 $script:AutomationBridgeResponses = [hashtable]::Synchronized(@{})
 $script:AutomationBridgeState = [hashtable]::Synchronized(@{ Stop = $false })
 $script:UpdatingAutomationBridgeUI = $false
-$script:DdcTimingSchemaVersion = 1
+$script:DdcTimingSchemaVersion = 2
 $script:DdcTimingProfiles = @{}
 $script:DdcRespondedIdentityKeys = @{}
 # ddcutil calls this the sleep multiplier: how much longer than the default a panel
@@ -2484,12 +2491,14 @@ function Start-VcpReadWorker {
     if ($MonitorIndex -lt 0 -or [string]::IsNullOrWhiteSpace($IdentityKey)) { return }
     $state = if ($script:DisplayRecoveryStates.ContainsKey($IdentityKey)) { $script:DisplayRecoveryStates[$IdentityKey] } else { $null }
     $workerTiming = Get-DdcWorkerTiming -IdentityKey $IdentityKey -ReadRetries $ReadRetries -DelayMilliseconds $DelayMilliseconds -RecoveryState $state
+    $timingProfile = Get-DdcTimingProfile -IdentityKey $IdentityKey
+    $stopOnNullResponse = $timingProfile.PSObject.Properties.Name -contains "NullMeansUnsupported" -and [bool]$timingProfile.NullMeansUnsupported
     $ReadRetries = [int]$workerTiming.ReadRetries
     $DelayMilliseconds = [int]$workerTiming.DelayMilliseconds
     $generation = [int]$script:DisplayRecoveryGeneration
     $handleValue = [int64]$Handle.ToInt64()
     $workerScript = {
-        param([IntPtr]$Handle, [int[]]$Codes, [string]$MonitorName, [int]$ReadRetries, [int]$DelayMilliseconds, [string]$IdentityKey, [int]$MonitorIndex, [int]$Generation, [int64]$HandleValue)
+        param([IntPtr]$Handle, [int[]]$Codes, [string]$MonitorName, [int]$ReadRetries, [int]$DelayMilliseconds, [bool]$StopOnNullResponse, [string]$IdentityKey, [int]$MonitorIndex, [int]$Generation, [int64]$HandleValue)
         $index = 0
         foreach ($code in $Codes) {
             $index++
@@ -2498,7 +2507,7 @@ function Start-VcpReadWorker {
             $maximum = [uint32]0
             $lastError = [int]0
             $attempts = [int]0
-            $ok = [MonitorAPI]::ReadVCPWithRetry($Handle, [byte]$code, $ReadRetries, $DelayMilliseconds, [ref]$vct, [ref]$current, [ref]$maximum, [ref]$lastError, [ref]$attempts)
+            $ok = [MonitorAPI]::ReadVCPWithRetry($Handle, [byte]$code, $ReadRetries, $DelayMilliseconds, $StopOnNullResponse, [ref]$vct, [ref]$current, [ref]$maximum, [ref]$lastError, [ref]$attempts)
             [PSCustomObject]@{
                 Code = [int]$code
                 Success = [bool]$ok
@@ -2528,7 +2537,7 @@ function Start-VcpReadWorker {
     $script:VcpWorkerInput.Complete()
     $script:VcpWorkerOutput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
     $script:VcpWorker = [PowerShell]::Create()
-    $script:VcpWorker.AddScript($workerScript.ToString()).AddArgument($Handle).AddArgument($Codes).AddArgument($MonitorName).AddArgument($ReadRetries).AddArgument($DelayMilliseconds).AddArgument($IdentityKey).AddArgument($MonitorIndex).AddArgument($generation).AddArgument($handleValue) | Out-Null
+    $script:VcpWorker.AddScript($workerScript.ToString()).AddArgument($Handle).AddArgument($Codes).AddArgument($MonitorName).AddArgument($ReadRetries).AddArgument($DelayMilliseconds).AddArgument($stopOnNullResponse).AddArgument($IdentityKey).AddArgument($MonitorIndex).AddArgument($generation).AddArgument($handleValue) | Out-Null
     $script:VcpWorkerAsyncResult = $script:VcpWorker.BeginInvoke($script:VcpWorkerInput, $script:VcpWorkerOutput)
     $script:VcpWorkerLastOutputCount = 0
     if (-not $script:VcpWorkerTimer) {
@@ -2591,6 +2600,18 @@ function Update-DdcReportWorkerOutput {
     }
     if (-not $completed) { return }
     try { $script:DdcReportWorker.EndInvoke($script:DdcReportWorkerAsyncResult) } catch { Update-Status "DDC report failed: $($_.Exception.Message)" }
+    $timingDirty = $false
+    foreach ($target in @($script:DdcReportTargets)) {
+        $targetResults = @($probeResults | Where-Object { [int]$_.TargetIndex -eq [int]$target.Index })
+        $timingProfile = Get-DdcTimingProfile -IdentityKey ([string]$target.IdentityKey)
+        $otherCodesResponded = @($targetResults | Where-Object { [bool]$_.Success }).Count -gt 0 -or (Test-DdcMonitorResponded -IdentityKey ([string]$target.IdentityKey))
+        foreach ($probeResult in $targetResults) {
+            if (Register-DdcCodeOutcome -TimingProfile $timingProfile -Code ([int]$probeResult.Code) -Success ([bool]$probeResult.Success) -LastError ([int]$probeResult.LastError) -Attempts ([int]$probeResult.Attempts) -OtherCodesResponded $otherCodesResponded) {
+                $timingDirty = $true
+            }
+        }
+    }
+    if ($timingDirty) { Save-DdcTimingSettings | Out-Null }
     $report = New-DdcCompatibilityReport -Targets $script:DdcReportTargets -ProbeResults $probeResults -RecentErrors (Get-DdcReportRecentErrors)
     $script:DdcReportLastText = $report
     $ddcReportBox.Text = $report
@@ -2640,7 +2661,7 @@ function Start-DdcReportWorker {
                 $maximum = [uint32]0
                 $lastError = [int]0
                 $attempts = [int]0
-                $ok = [MonitorAPI]::ReadVCPWithRetry($target.Handle, [byte]$code, $ReadRetries, [ref]$vct, [ref]$current, [ref]$maximum, [ref]$lastError, [ref]$attempts)
+                $ok = [MonitorAPI]::ReadVCPWithRetry($target.Handle, [byte]$code, $ReadRetries, [MonitorAPI]::VcpRetryDelayMilliseconds, [bool]$target.StopOnNullResponse, [ref]$vct, [ref]$current, [ref]$maximum, [ref]$lastError, [ref]$attempts)
                 [PSCustomObject]@{
                     Kind = "Probe"
                     TargetIndex = [int]$target.Index
@@ -3001,13 +3022,30 @@ function Update-MonitorSettingsWorkerOutput {
     $results = @($script:MonitorSettingsWorkerOutput | Where-Object {
         Test-DisplayWorkerResultCurrent -Result $_ -CurrentGeneration $script:DisplayRecoveryGeneration -Monitors $script:PhysicalMonitors
     })
-    Update-VcpMaximumCache -Results $results
+    $settingResults = @($results | Where-Object { [string]$_.Kind -ne "NullProbe" })
+    Update-VcpMaximumCache -Results $settingResults
     $selectedPublished = $false
+    $timingDirty = $false
     foreach ($target in $workerTargets) {
         if (-not (Test-DisplayWorkerResultCurrent -Result $target -CurrentGeneration $script:DisplayRecoveryGeneration -Monitors $script:PhysicalMonitors)) { continue }
-        $targetResults = @($results | Where-Object { [string]$_.IdentityKey -eq [string]$target.IdentityKey })
+        $targetResults = @($settingResults | Where-Object { [string]$_.IdentityKey -eq [string]$target.IdentityKey })
         $successes = @($targetResults | Where-Object { [bool]$_.Success })
         $failures = @($targetResults | Where-Object { -not [bool]$_.Success })
+        $timingProfile = Get-DdcTimingProfile -IdentityKey ([string]$target.IdentityKey)
+        $otherCodesResponded = $successes.Count -gt 0 -or (Test-DdcMonitorResponded -IdentityKey ([string]$target.IdentityKey))
+        foreach ($settingResult in $targetResults) {
+            if (Register-DdcCodeOutcome -TimingProfile $timingProfile -Code ([int]$settingResult.Code) -Success ([bool]$settingResult.Success) -LastError ([int]$settingResult.LastError) -Attempts ([int]$settingResult.Attempts) -OtherCodesResponded $otherCodesResponded) {
+                $timingDirty = $true
+            }
+        }
+        $nullProbeResult = @($results | Where-Object {
+            [string]$_.IdentityKey -eq [string]$target.IdentityKey -and [string]$_.Kind -eq "NullProbe"
+        } | Select-Object -First 1)
+        if ($nullProbeResult.Count -gt 0) {
+            if (Set-DdcNullSemanticsClassification -TimingProfile $timingProfile -ProbeResult $nullProbeResult[0] -OtherCodesResponded:($successes.Count -gt 0)) {
+                $timingDirty = $true
+            }
+        }
         if ($successes.Count -gt 0) {
             Set-DisplayRecoveryOutcome -IdentityKey ([string]$target.IdentityKey) -Outcome "Success" -Generation $script:DisplayRecoveryGeneration | Out-Null
         } else {
@@ -3037,6 +3075,7 @@ function Update-MonitorSettingsWorkerOutput {
             Update-TrayIconText
         }
     }
+    if ($timingDirty) { Save-DdcTimingSettings | Out-Null }
     Invoke-DisplayStateRestore -Generation $script:DisplayRecoveryGeneration -Reason "display refresh" | Out-Null
     if (-not $selectedPublished -and $workerName -and $script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) {
         Update-SelectedMonitorRecoveryUi
@@ -3066,6 +3105,8 @@ function Start-MonitorSettingsWorker {
         if ($null -eq $monitor -or $monitor.Handle -eq [IntPtr]::Zero -or [string]::IsNullOrWhiteSpace([string]$monitor.IdentityKey)) { continue }
         $state = if ($script:DisplayRecoveryStates.ContainsKey([string]$monitor.IdentityKey)) { $script:DisplayRecoveryStates[[string]$monitor.IdentityKey] } else { $null }
         $codes = if ($index -eq $MonitorIndex) { $selectedCodes } else { @([int][MonitorAPI]::VCP_BRIGHTNESS) }
+        $timingProfile = Get-DdcTimingProfile -IdentityKey ([string]$monitor.IdentityKey)
+        $effectiveTiming = Get-DdcEffectiveTiming -TimingProfile $timingProfile
         $targets += [PSCustomObject]@{
             MonitorIndex = [int]$index
             MonitorName = [string]$monitor.Name
@@ -3074,9 +3115,12 @@ function Start-MonitorSettingsWorker {
             HandleValue = [int64]$monitor.Handle.ToInt64()
             Generation = $generation
             Codes = [object[]]$codes
-            ReadRetries = Get-DisplayRecoveryReadRetryCount -State $state -DefaultRetries ([int](Get-DdcEffectiveTiming -TimingProfile (Get-DdcTimingProfile -IdentityKey ([string]$monitor.IdentityKey))).ReadRetries)
-            DelayMilliseconds = [int](Get-DdcEffectiveTiming -TimingProfile (Get-DdcTimingProfile -IdentityKey ([string]$monitor.IdentityKey))).DelayMilliseconds
-            SkipCodes = [object[]]@(@((Get-DdcTimingProfile -IdentityKey ([string]$monitor.IdentityKey)).UnsupportedCodes) | ForEach-Object { [int]$_.Code })
+            ReadRetries = Get-DisplayRecoveryReadRetryCount -State $state -DefaultRetries ([int]$effectiveTiming.ReadRetries)
+            DelayMilliseconds = [int]$effectiveTiming.DelayMilliseconds
+            SkipCodes = [object[]]@(@($timingProfile.UnsupportedCodes) | ForEach-Object { [int]$_.Code })
+            StopOnNullResponse = $timingProfile.PSObject.Properties.Name -contains "NullMeansUnsupported" -and [bool]$timingProfile.NullMeansUnsupported
+            ProbeNullSemantics = [string]::IsNullOrWhiteSpace([string]$timingProfile.NullSemanticsClassifiedAt)
+            NullProbeRetries = [int][Math]::Max(2, [int]$effectiveTiming.ReadRetries)
         }
         Set-DisplayRecoveryOutcome -IdentityKey ([string]$monitor.IdentityKey) -Outcome "Retry" -Generation $generation | Out-Null
     }
@@ -3085,6 +3129,7 @@ function Start-MonitorSettingsWorker {
         param([object[]]$Targets)
         foreach ($target in $Targets) {
             $index = 0
+            $anySuccess = $false
             foreach ($code in @($target.Codes)) {
                 $index++
                 $vct = [uint32]0
@@ -3093,8 +3138,10 @@ function Start-MonitorSettingsWorker {
                 $lastError = [int]0
                 $attempts = [int]0
                 if (@($target.SkipCodes) -contains [int]$code) { continue }
-                $ok = [MonitorAPI]::ReadVCPWithRetry($target.Handle, [byte]$code, [int]$target.ReadRetries, [int]$target.DelayMilliseconds, [ref]$vct, [ref]$current, [ref]$maximum, [ref]$lastError, [ref]$attempts)
+                $ok = [MonitorAPI]::ReadVCPWithRetry($target.Handle, [byte]$code, [int]$target.ReadRetries, [int]$target.DelayMilliseconds, [bool]$target.StopOnNullResponse, [ref]$vct, [ref]$current, [ref]$maximum, [ref]$lastError, [ref]$attempts)
+                if ($ok) { $anySuccess = $true }
                 [PSCustomObject]@{
+                    Kind = "Setting"
                     Code = [int]$code
                     Success = [bool]$ok
                     Current = [uint32]$current
@@ -3112,13 +3159,39 @@ function Start-MonitorSettingsWorker {
                     Count = [int]@($target.Codes).Count
                 }
             }
+            if ([bool]$target.ProbeNullSemantics -and $anySuccess) {
+                $vct = [uint32]0
+                $current = [uint32]0
+                $maximum = [uint32]0
+                $lastError = [int]0
+                $attempts = [int]0
+                $ok = [MonitorAPI]::ReadVCPWithRetry($target.Handle, [byte]0x00, [int]$target.NullProbeRetries, [int]$target.DelayMilliseconds, [ref]$vct, [ref]$current, [ref]$maximum, [ref]$lastError, [ref]$attempts)
+                [PSCustomObject]@{
+                    Kind = "NullProbe"
+                    Code = 0
+                    Success = [bool]$ok
+                    Current = [uint32]$current
+                    Maximum = [uint32]$maximum
+                    Type = [uint32]$vct
+                    LastError = [int]$lastError
+                    Attempts = [int]$attempts
+                    RetryCount = [Math]::Max(0, $attempts - 1)
+                    MonitorName = [string]$target.MonitorName
+                    IdentityKey = [string]$target.IdentityKey
+                    MonitorIndex = [int]$target.MonitorIndex
+                    Generation = [int]$target.Generation
+                    HandleValue = [int64]$target.HandleValue
+                    Index = [int](@($target.Codes).Count + 1)
+                    Count = [int](@($target.Codes).Count + 1)
+                }
+            }
         }
     }
     $script:MonitorSettingsWorkerIndex = $MonitorIndex
     $script:MonitorSettingsWorkerName = $MonitorName
     $script:MonitorSettingsWorkerGeneration = $generation
     $script:MonitorSettingsWorkerTargets = $targets
-    $script:MonitorSettingsWorkerTotalReads = [int](($targets | ForEach-Object { @($_.Codes).Count } | Measure-Object -Sum).Sum)
+    $script:MonitorSettingsWorkerTotalReads = [int](($targets | ForEach-Object { @($_.Codes).Count + $(if ([bool]$_.ProbeNullSemantics) { 1 } else { 0 }) } | Measure-Object -Sum).Sum)
     $script:MonitorSettingsWorkerInput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
     $script:MonitorSettingsWorkerInput.Complete()
     $script:MonitorSettingsWorkerOutput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'

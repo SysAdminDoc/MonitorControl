@@ -1090,6 +1090,9 @@ function New-DdcTimingProfile {
         ReadRetries = [int][MonitorAPI]::VcpReadRetryCount
         WriteRetries = [int][MonitorAPI]::VcpWriteRetryCount
         CapabilityRetries = [int][MonitorAPI]::VcpReadRetryCount
+        NullMeansUnsupported = $false
+        NullSemanticsClassifiedAt = ""
+        NullProbeLastError = 0
         UnsupportedCodes = @()
     }
 }
@@ -1171,6 +1174,47 @@ function Test-DdcCodeUnsupported {
     return $false
 }
 
+function Test-DdcErrorIndicatesNullResponse {
+    param([int]$LastError)
+    return $LastError -eq [int]0xC0262585
+}
+
+function Get-DdcNullSemanticsDecision {
+    param($ProbeResult, [bool]$OtherCodesResponded)
+    $lastError = if ($null -ne $ProbeResult -and $ProbeResult.PSObject.Properties.Name -contains "LastError") { [int]$ProbeResult.LastError } else { 0 }
+    $attempts = if ($null -ne $ProbeResult -and $ProbeResult.PSObject.Properties.Name -contains "Attempts") { [int]$ProbeResult.Attempts } else { 0 }
+    $success = $null -ne $ProbeResult -and [bool]$ProbeResult.Success
+    $classified = $false
+    $nullMeansUnsupported = $false
+    $reason = "Inconclusive"
+    if (-not $success -and $OtherCodesResponded -and $lastError -eq [int]0xC0262584) {
+        $classified = $true
+        $reason = "ExplicitUnsupportedReply"
+    } elseif (-not $success -and $OtherCodesResponded -and $attempts -ge 2 -and (Test-DdcErrorIndicatesNullResponse -LastError $lastError)) {
+        $classified = $true
+        $nullMeansUnsupported = $true
+        $reason = "PersistentNullReply"
+    }
+    return [PSCustomObject]@{
+        Classified = [bool]$classified
+        NullMeansUnsupported = [bool]$nullMeansUnsupported
+        LastError = [int]$lastError
+        Attempts = [int]$attempts
+        Reason = [string]$reason
+    }
+}
+
+function Set-DdcNullSemanticsClassification {
+    param($TimingProfile, $ProbeResult, [bool]$OtherCodesResponded, [DateTime]$NowUtc = [DateTime]::UtcNow)
+    if ($null -eq $TimingProfile -or -not [string]::IsNullOrWhiteSpace([string]$TimingProfile.NullSemanticsClassifiedAt)) { return $false }
+    $decision = Get-DdcNullSemanticsDecision -ProbeResult $ProbeResult -OtherCodesResponded $OtherCodesResponded
+    if (-not [bool]$decision.Classified) { return $false }
+    $TimingProfile | Add-Member -NotePropertyName NullMeansUnsupported -NotePropertyValue ([bool]$decision.NullMeansUnsupported) -Force
+    $TimingProfile | Add-Member -NotePropertyName NullSemanticsClassifiedAt -NotePropertyValue $NowUtc.ToString("o") -Force
+    $TimingProfile | Add-Member -NotePropertyName NullProbeLastError -NotePropertyValue ([int]$decision.LastError) -Force
+    return $true
+}
+
 function Register-DdcCodeOutcome {
     param($TimingProfile, [int]$Code, [bool]$Success, [int]$LastError = 0, [int]$Attempts = 0, [bool]$OtherCodesResponded = $false)
     if ($null -eq $TimingProfile) { return $false }
@@ -1185,7 +1229,12 @@ function Register-DdcCodeOutcome {
     # Message for both, and burning the full retry budget on each of them is what makes a
     # scan look like the app has hung.
     if (-not $OtherCodesResponded) { return $false }
-    if ($Attempts -lt 2) { return $false }
+    $nullMeansUnsupported = $TimingProfile.PSObject.Properties.Name -contains "NullMeansUnsupported" -and [bool]$TimingProfile.NullMeansUnsupported
+    if ($nullMeansUnsupported) {
+        if (-not (Test-DdcErrorIndicatesNullResponse -LastError $LastError)) { return $false }
+    } elseif ($Attempts -lt 2) {
+        return $false
+    }
     if (Test-DdcCodeUnsupported -TimingProfile $TimingProfile -Code $Code) { return $false }
     $TimingProfile.UnsupportedCodes = @(@($TimingProfile.UnsupportedCodes) + [PSCustomObject]@{
         Code = [int]$Code
@@ -1247,7 +1296,8 @@ function Get-VCPValue {
     $timing = Get-DdcEffectiveTiming -TimingProfile $timingProfile
     $vct = [uint32]0; $cur = [uint32]0; $max = [uint32]0
     $lastError = [int]0; $attempts = [int]0
-    $result = [MonitorAPI]::ReadVCPWithRetry($Handle, $VCPCode, [int]$timing.ReadRetries, [int]$timing.DelayMilliseconds, [ref]$vct, [ref]$cur, [ref]$max, [ref]$lastError, [ref]$attempts)
+    $stopOnNullResponse = $timingProfile.PSObject.Properties.Name -contains "NullMeansUnsupported" -and [bool]$timingProfile.NullMeansUnsupported
+    $result = [MonitorAPI]::ReadVCPWithRetry($Handle, $VCPCode, [int]$timing.ReadRetries, [int]$timing.DelayMilliseconds, [bool]$stopOnNullResponse, [ref]$vct, [ref]$cur, [ref]$max, [ref]$lastError, [ref]$attempts)
     if (-not [string]::IsNullOrWhiteSpace($IdentityKey)) {
         $dirty = Update-DdcTimingCalibration -IdentityKey $IdentityKey -Attempts $attempts -Success $result
         if (Register-DdcCodeOutcome -TimingProfile $timingProfile -Code ([int]$VCPCode) -Success $result -LastError $lastError -Attempts $attempts -OtherCodesResponded (Test-DdcMonitorResponded -IdentityKey $IdentityKey)) { $dirty = $true }
@@ -1611,6 +1661,15 @@ function Update-VcpWorkerOutput {
             $failure = $items[-1]
             Register-DdcDiagnostic -Operation "Read" -Monitor ([string]$failure.MonitorName) -Code ([int]$failure.Code) -Value $null -LastError ([int]$failure.LastError) -Attempts ([int]$failure.Attempts) -Message "" | Out-Null
         }
+        $timingProfile = Get-DdcTimingProfile -IdentityKey ([string]$context.IdentityKey)
+        $otherCodesResponded = @($items | Where-Object { [bool]$_.Success }).Count -gt 0 -or (Test-DdcMonitorResponded -IdentityKey ([string]$context.IdentityKey))
+        $timingDirty = $false
+        foreach ($item in $items) {
+            if (Register-DdcCodeOutcome -TimingProfile $timingProfile -Code ([int]$item.Code) -Success ([bool]$item.Success) -LastError ([int]$item.LastError) -Attempts ([int]$item.Attempts) -OtherCodesResponded $otherCodesResponded) {
+                $timingDirty = $true
+            }
+        }
+        if ($timingDirty) { Save-DdcTimingSettings | Out-Null }
         if (@($items | Where-Object { [bool]$_.Success }).Count -gt 0) {
             Set-DisplayRecoveryOutcome -IdentityKey ([string]$context.IdentityKey) -Outcome "Success" -Generation $script:DisplayRecoveryGeneration | Out-Null
         } elseif ($items.Count -gt 0) {
@@ -1694,6 +1753,7 @@ function Get-DdcReportTargets {
             SupportedCodes = [object[]]$supportedCodes
             ProbeCodes = [object[]]$probeCodes
             SkippedProbeCodes = [object[]]$skippedCodes
+            StopOnNullResponse = [bool](Get-DdcTimingProfile -IdentityKey ([string]$mon.IdentityKey)).NullMeansUnsupported
             RiskyWritesEnabled = Test-VcpWriteEnabledForMonitor -Monitor $mon
             RecoveryState = if ($mon.PSObject.Properties.Name -contains "RecoveryState") { [string]$mon.RecoveryState } else { "Stale" }
             RecoveryLastSuccessUtc = if ($mon.PSObject.Properties.Name -contains "RecoveryLastSuccessUtc") { $mon.RecoveryLastSuccessUtc } else { $null }
@@ -1796,6 +1856,14 @@ function New-DdcCompatibilityReport {
             $timing = Get-DdcEffectiveTiming -TimingProfile $timingProfile
             $calibration = if ([string]::IsNullOrWhiteSpace([string]$timingProfile.CalibratedAt)) { "uncalibrated" } else { "calibrated $($timingProfile.CalibratedAt)" }
             [void]$sb.AppendLine("- $($target.Label): mode=$($timing.Mode) multiplier=$($timing.SleepMultiplier) delay=$($timing.DelayMilliseconds)ms retries read=$($timing.ReadRetries) write=$($timing.WriteRetries) capability=$($timing.CapabilityRetries) ($calibration)")
+            $nullSemantics = if ([string]::IsNullOrWhiteSpace([string]$timingProfile.NullSemanticsClassifiedAt)) {
+                "unclassified"
+            } elseif ([bool]$timingProfile.NullMeansUnsupported) {
+                "Null means unsupported; classified $($timingProfile.NullSemanticsClassifiedAt)"
+            } else {
+                "Null remains retryable; classified $($timingProfile.NullSemanticsClassifiedAt)"
+            }
+            [void]$sb.AppendLine("    null-message semantics: $nullSemantics (probe Win32=$([int]$timingProfile.NullProbeLastError))")
             $unsupported = @($timingProfile.UnsupportedCodes)
             if ($unsupported.Count -gt 0) {
                 $codeText = ($unsupported | ForEach-Object { "0x{0:X2} (Win32 {1})" -f [int]$_.Code, [int]$_.LastError }) -join ", "
