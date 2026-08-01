@@ -7,12 +7,13 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 if ([string]::IsNullOrWhiteSpace($OutputRoot)) { $OutputRoot = Join-Path $repoRoot "dist" }
 $scriptPath = Join-Path $repoRoot "MonitorControlPro.ps1"
+$compilePath = Join-Path $repoRoot "tools\compile.ps1"
 $readmePath = Join-Path $repoRoot "README.md"
 $licensePath = Join-Path $repoRoot "LICENSE"
 $iconPath = Join-Path $repoRoot "icon.ico"
 $screenshotPath = Join-Path $repoRoot "screenshot.png"
 
-foreach ($required in @($scriptPath, $readmePath, $licensePath, $iconPath, $screenshotPath)) {
+foreach ($required in @($scriptPath, $compilePath, $readmePath, $licensePath, $iconPath, $screenshotPath)) {
     if (-not (Test-Path -LiteralPath $required)) { throw "Missing release input: $required" }
 }
 
@@ -47,7 +48,7 @@ Get-ChildItem -LiteralPath $OutputRoot -Filter "MonitorControlPro-v*" -Force |
 New-Item -ItemType Directory -Path $stageRoot -Force | Out-Null
 
 $releaseScript = Join-Path $stageRoot "MonitorControlPro.ps1"
-Copy-Item -LiteralPath $scriptPath -Destination $releaseScript -Force
+& $compilePath -OutputPath $releaseScript | Out-Null
 Copy-Item -LiteralPath $readmePath -Destination (Join-Path $stageRoot "README.md") -Force
 Copy-Item -LiteralPath $licensePath -Destination (Join-Path $stageRoot "LICENSE") -Force
 Copy-Item -LiteralPath $iconPath -Destination (Join-Path $stageRoot "icon.ico") -Force

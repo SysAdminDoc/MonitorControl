@@ -4,6 +4,7 @@ All notable changes to MonitorControl will be documented in this file.
 
 ## [Unreleased]
 
+- Changed: the 11,000-line monolith is now maintained as Core, Storage, DDC, Automation, Bridge, and WPF application source components. The development launcher preserves every existing switch, tests compose a disposable standalone script, and release builds still ship one PowerShell 5.1-compatible file with no runtime module dependency. Composition rejects syntax errors and duplicate function definitions, while regression tests keep WPF globals out of the testable modules and preserve injectable native read/write adapters.
 - Changed: all seven workspaces now share a denser midnight control-center shell with page subtitles, bento-style cards, clearer metrics, consistent rounded controls, and an accessible blue accent. System settings now use named Overview, Display & DDC, Safety, Automation, Diagnostics, and Integrations categories instead of one ten-card scrolling column.
 - Changed: the WPF smoke lane navigates the new System categories, verifies that the persistent header never scrolls away, and can export every visible workspace through app-native WPF rendering for pixel-accurate review without capturing the desktop.
 - Fixed: the per-monitor capability retry budget and calibrated retry delay now reach the capability worker, and VCP Explorer Query/Scan use the same effective per-monitor read timing. Retries remain off the WPF dispatcher and report their actual attempt count.

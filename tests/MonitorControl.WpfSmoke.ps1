@@ -410,6 +410,22 @@ public sealed class MonitorControlLiveRegionProbe : IDisposable
         throw "The UI Automation root did not report the active theme and text scale."
     }
 
+    $isolatedLeft = 0
+    $isolatedTop = 0
+    $isolatedWidth = 0
+    $isolatedHeight = 0
+    if ([int]::TryParse([string]$env:MONITORCONTROL_ISOLATED_X, [ref]$isolatedLeft) -and
+        [int]::TryParse([string]$env:MONITORCONTROL_ISOLATED_Y, [ref]$isolatedTop) -and
+        [int]::TryParse([string]$env:MONITORCONTROL_ISOLATED_WIDTH, [ref]$isolatedWidth) -and
+        [int]::TryParse([string]$env:MONITORCONTROL_ISOLATED_HEIGHT, [ref]$isolatedHeight)) {
+        $bounds = $root.Current.BoundingRectangle
+        if ($bounds.Left -lt $isolatedLeft -or $bounds.Top -lt $isolatedTop -or
+            $bounds.Right -gt ($isolatedLeft + $isolatedWidth) -or
+            $bounds.Bottom -gt ($isolatedTop + $isolatedHeight)) {
+            throw "The WPF window escaped the isolated display bounds."
+        }
+    }
+
     if (-not [string]::IsNullOrWhiteSpace($ScreenshotDirectory)) {
         $renderDeadline = [DateTime]::UtcNow.AddSeconds(30)
         $renderCompletePath = Join-Path $ScreenshotDirectory "render.complete"
