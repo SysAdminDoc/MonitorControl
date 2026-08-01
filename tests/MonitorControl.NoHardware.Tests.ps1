@@ -1,7 +1,10 @@
 BeforeAll {
     Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
     $script:RepoRoot = Split-Path -Parent $PSScriptRoot
-    $script:AppPath = Join-Path $script:RepoRoot "MonitorControlPro.ps1"
+    $script:CompiledTestRoot = Join-Path ([System.IO.Path]::GetTempPath()) "MonitorControl-CompiledTests-$([guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $script:CompiledTestRoot -Force | Out-Null
+    $compiledResult = & (Join-Path $script:RepoRoot "tools\compile.ps1") -OutputPath (Join-Path $script:CompiledTestRoot "MonitorControlPro.ps1")
+    $script:AppPath = $compiledResult.OutputPath
 
     # The value cache, queue, and suppression predicate live in the inline C# layer, so the suite
     # compiles that block on its own. Synthetic handles reach only an injected managed adapter;
@@ -502,6 +505,74 @@ public static class MonitorControlVcpWriteProbe
             $archive.Dispose()
         }
         return $Path
+    }
+}
+
+Describe "Build-time source composition" {
+    It "keeps function bodies unique across source components" {
+        $sourceFiles = @(Get-Content -LiteralPath (Join-Path $script:RepoRoot "src\MonitorControl.sources") |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        $sourceFiles.Count | Should -Be 6
+
+        $allNames = New-Object System.Collections.Generic.List[string]
+        foreach ($relativePath in $sourceFiles) {
+            $path = Join-Path $script:RepoRoot $relativePath
+            Test-Path -LiteralPath $path -PathType Leaf | Should -BeTrue
+            $tokens = $null
+            $errors = $null
+            $sourceAst = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
+            $errors.Count | Should -Be 0
+            foreach ($function in $sourceAst.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+            }, $true)) {
+                $allNames.Add($function.Name)
+            }
+        }
+
+        @($allNames | Group-Object | Where-Object Count -gt 1).Count | Should -Be 0
+        $allNames.Count | Should -BeGreaterThan 300
+    }
+
+    It "keeps WPF globals out of the testable source modules" {
+        foreach ($modulePath in Get-ChildItem -LiteralPath (Join-Path $script:RepoRoot "src") -Filter "*.psm1") {
+            $text = [System.IO.File]::ReadAllText($modulePath.FullName)
+            $text | Should -Not -Match 'System\.Windows\.|Windows\.Forms|AutomationProperties|DispatcherTimer|UIAutomation|XamlReader|FindName\('
+        }
+    }
+
+    It "keeps native reads and writes injectable in the DDC transaction seam" {
+        $tokens = $null
+        $errors = $null
+        $ddcPath = Join-Path $script:RepoRoot "src\MonitorControl.Ddc.psm1"
+        $ddcAst = [System.Management.Automation.Language.Parser]::ParseFile($ddcPath, [ref]$tokens, [ref]$errors)
+        $transaction = @($ddcAst.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq "Invoke-VerifiedVcpTransaction"
+        }, $true))[0]
+        $parameterNames = @($transaction.Body.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
+        $parameterNames | Should -Contain "ReadValue"
+        $parameterNames | Should -Contain "WriteValue"
+    }
+
+    It "composes a standalone script without development source references" {
+        Test-Path -LiteralPath $script:AppPath -PathType Leaf | Should -BeTrue
+        $composedText = [System.IO.File]::ReadAllText($script:AppPath)
+        $composedText | Should -Not -Match 'MonitorControl\.sources|src\\MonitorControl\.'
+        $composedText | Should -Match '\$nativeCode = @"'
+
+        $launcherTokens = $null
+        $launcherErrors = $null
+        $launcherAst = [System.Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path $script:RepoRoot "MonitorControlPro.ps1"),
+            [ref]$launcherTokens,
+            [ref]$launcherErrors
+        )
+        @($launcherAst.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+        }, $true)).Count | Should -Be 0
     }
 }
 
@@ -3187,8 +3258,12 @@ Describe "Ambient light hysteresis" {
     BeforeAll {
         Import-MonitorControlFunctions -Name @("Get-AmbientLevelIndex", "Get-AmbientBrightnessDecision")
         $appText = [System.IO.File]::ReadAllText($script:AppPath)
-        $start = $appText.IndexOf('$script:AmbientLuxLadder = @(')
-        $end = $appText.IndexOf('$script:AmbientMaxStepPercent')
+        $start = $appText.IndexOf('$script:AmbientLuxLadder = @(', [System.StringComparison]::Ordinal)
+        $end = if ($start -ge 0) {
+            $appText.IndexOf('$script:AmbientMaxStepPercent', $start, [System.StringComparison]::Ordinal)
+        } else {
+            -1
+        }
         if ($start -lt 0 -or $end -lt $start) { throw "Ambient ladder not found" }
         . ([scriptblock]::Create($appText.Substring($start, $end - $start)))
         $script:Ladder = @($script:AmbientLuxLadder)
@@ -3277,5 +3352,18 @@ Describe "Ambient light hysteresis" {
         }
         $writes | Should -Be 1
         $brightness | Should -Be 40
+    }
+}
+
+AfterAll {
+    if (-not [string]::IsNullOrWhiteSpace($script:CompiledTestRoot) -and
+        (Test-Path -LiteralPath $script:CompiledTestRoot)) {
+        $fullPath = [System.IO.Path]::GetFullPath($script:CompiledTestRoot).TrimEnd("\")
+        $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd("\") + "\"
+        if (-not $fullPath.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+            [System.IO.Path]::GetFileName($fullPath) -notlike "MonitorControl-CompiledTests-*") {
+            throw "Refusing to remove an unvalidated compiled-test directory: $fullPath"
+        }
+        Remove-Item -LiteralPath $fullPath -Recurse -Force
     }
 }

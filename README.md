@@ -121,14 +121,14 @@ $Shortcut.Save()
 .\tools\build-release.ps1
 ```
 
-The release builder writes an unsigned `dist\MonitorControlPro-vX.Y.Z.zip` and includes `SIGNING.txt` plus `SHA256SUMS` in the ZIP.
+The release builder composes the source modules into one PowerShell 5.1-compatible script, writes an unsigned `dist\MonitorControlPro-vX.Y.Z.zip`, and includes `SIGNING.txt` plus `SHA256SUMS` in the ZIP. The portable ZIP does not require the development `src` directory.
 
 ### Run No-Hardware Tests
 ```powershell
 .\tools\run-tests.ps1
 ```
 
-The deterministic suite requires Pester 5.9.0 and imports only selected function definitions from `MonitorControlPro.ps1`, so it does not enumerate displays, open the WPF app, or require DDC/CI hardware.
+The deterministic suite requires Pester 5.9.0, composes the same standalone script as the release builder, and imports only selected function definitions from that disposable output. It does not enumerate displays, open the WPF app, or require DDC/CI hardware.
 
 ### Run the Full Windows Verification Lane
 ```powershell
@@ -476,6 +476,13 @@ The full breakdown - every display path, its classification, and whether it answ
 
 ## Technical Details
 
+### Source Architecture
+
+- `MonitorControlPro.ps1` is the development launcher and preserves the public command-line switches.
+- `src\MonitorControl.Core.psm1`, `Storage`, `Ddc`, `Automation`, and `Bridge` contain testable function definitions without WPF globals.
+- `src\MonitorControl.App.ps1` owns native type initialization, XAML, UI binding, handlers, and startup.
+- `tools\compile.ps1` composes those sources into the single portable script used by tests and release builds, and rejects duplicate function definitions or invalid PowerShell syntax.
+
 ### APIs Used
 - **dxva2.dll** — Windows DDC/CI implementation
   - `GetPhysicalMonitorsFromHMONITOR`
@@ -515,8 +522,9 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ### Development Setup
 1. Clone the repository
-2. Edit `MonitorControlPro.ps1` in your preferred editor (VS Code with PowerShell extension recommended)
-3. Test changes by running the script directly
+2. Edit the matching file under `src` in your preferred editor (VS Code with PowerShell extension recommended)
+3. Run `MonitorControlPro.ps1` to exercise the modular development source, or run `tools\compile.ps1` to inspect the composed standalone script under `build`
+4. Run `tools\run-tests.ps1` before submitting changes
 
 ### Areas for Improvement
 - [ ] Multi-monitor profile linking

@@ -64,6 +64,7 @@ if (-not (Test-Path -LiteralPath $analysisSettings -PathType Leaf)) {
 }
 $analysisPaths = @(
     (Join-Path $repoRoot "MonitorControlPro.ps1")
+    (Join-Path $repoRoot "src")
     (Join-Path $repoRoot "tools")
     (Join-Path $repoRoot "tests")
 )
