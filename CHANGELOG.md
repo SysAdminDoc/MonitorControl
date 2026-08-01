@@ -2,7 +2,7 @@
 
 All notable changes to MonitorControl will be documented in this file.
 
-## [Unreleased]
+## [v3.35.0] - 2026-07-31
 
 - Added: an opt-in "Restore brightness at launch and after resume" setting in System. Monitors commonly reset themselves to full brightness after a power or sleep cycle; when enabled, the last brightness set for each stable monitor identity is written back once per detected display change through the verified write path. Displays without a stable identity, without a DDC/CI handle, or that do not report brightness are skipped with a stated reason.
 - Changed: the verification lane now refuses any PowerShell source containing a byte above 0x7F, enforces PSScriptAnalyzer warnings as well as errors against a committed `PSScriptAnalyzerSettings.psd1`, and pins Pester 5.9.0 on a windows-2025 runner. Every remaining analyzer finding was either fixed or excluded with a documented reason.
