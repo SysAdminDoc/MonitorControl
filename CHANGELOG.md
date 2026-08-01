@@ -55,7 +55,7 @@ All notable changes to MonitorControl will be documented in this file.
 ## [v3.29.0] - 2026-06-30
 
 - Added: local `tools/build-release.ps1` portable ZIP builder with staged script, icon, README, LICENSE, signing status, and SHA256SUMS.
-- Added: optional Authenticode signing when a local code-signing certificate is available.
+- Added: an explicit unsigned-release contract recorded in SIGNING.txt.
 - Changed: README install docs now prefer the portable release ZIP and document the release build command.
 
 ## [v3.28.0] - 2026-06-30
@@ -204,10 +204,3 @@ All notable changes to MonitorControl will be documented in this file.
 - Added: minimize-to-tray behavior for persistent background operation.
 - Added: tray link-monitor toggle and profile cycling from the tray surface.
 - Changed: moved global hotkey work to blocked because current project rules disallow keyboard shortcuts.
-
-## [v0.1.0] - %Y->- (HEAD -> main, origin/main, origin/HEAD)
-
-- Added: Add screenshot to README
-- docs: fix YOUR_USERNAME placeholder URLs
-- Added: Add files via upload
-- Added: Add files via upload
