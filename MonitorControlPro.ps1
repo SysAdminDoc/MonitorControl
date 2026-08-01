@@ -932,6 +932,14 @@ $script:DefaultProfilesPath = "$env:APPDATA\MonitorControlPro"
 $script:ProfileStorageSettingsPath = Join-Path $script:DefaultProfilesPath "profile-storage.json"
 $script:AutomationBridgeSettingsPath = Join-Path $script:DefaultProfilesPath "automation-bridge.json"
 $script:AutomationBridgeWriteLogPath = Join-Path $script:DefaultProfilesPath "automation-bridge-writes.jsonl"
+$script:DisplayStateRestoreSettingsPath = Join-Path $script:DefaultProfilesPath "display-restore.json"
+$script:DisplayStateRestoreSchemaVersion = 1
+# Monitors commonly reset themselves to full brightness after a power cycle or a sleep
+# cycle. Restoring is opt-in because it writes to hardware without the user asking.
+$script:DisplayStateRestoreEnabled = $false
+$script:DisplayStateRestoreValues = @{}
+$script:DisplayStateRestoreGeneration = -1
+$script:UpdatingDisplayStateRestoreUI = $false
 $script:OptionalHelperSettingsPath = Join-Path $script:DefaultProfilesPath "optional-helpers.json"
 $script:OptionalHelperSchemaVersion = 1
 # Optional native helpers are discovered next to the script and on PATH, so they stay off
@@ -990,7 +998,7 @@ $script:ProfileBundleMaxTotalBytes = 10485760
 $script:ProfileBundleMaxCompressionRatio = 100
 $script:ProfileBundleMaxMonitorSettings = 32
 $script:ProfileExportsPath = Join-Path $script:ProfilesPath "exports"
-$script:ProfileMetadataFiles = @("app-profile-rules.json", "profile-schedules.json", "idle-dim.json", "battery-profile.json", "profile-storage.json", "monitor-identities.json", "automation-bridge.json", "capabilities-safety.json", "capabilities-probe-pending.json", "vcp-write-safety.json", "optional-helpers.json")
+$script:ProfileMetadataFiles = @("app-profile-rules.json", "profile-schedules.json", "idle-dim.json", "battery-profile.json", "profile-storage.json", "monitor-identities.json", "automation-bridge.json", "capabilities-safety.json", "capabilities-probe-pending.json", "vcp-write-safety.json", "optional-helpers.json", "display-restore.json")
 $script:MonitorIdentityRecords = @{}
 $script:UpdatingMonitorLabelUI = $false
 $script:UiCulture = "en-US"
@@ -1054,6 +1062,7 @@ $script:UiStrings = @{
     "A11y.VcpResults" = "VCP results"
     "A11y.Capabilities" = "Monitor capabilities"
     "A11y.CapabilitiesDiscovery" = "Allow monitor capability discovery"
+    "A11y.DisplayRestore" = "Restore brightness at launch and after resume"
     "A11y.CpuMonitorHelper" = "Load CPU temperature library"
     "A11y.PresentMonHelper" = "Run PresentMon for the FPS overlay"
     "A11y.OptionalHelperStatus" = "Optional hardware helper provenance"
@@ -2317,6 +2326,7 @@ function Initialize-LocalizationAndAccessibility {
     Set-AccessibleName -Control $vcpResultBox -Key "A11y.VcpResults"
     Set-AccessibleName -Control $capabilitiesBox -Key "A11y.Capabilities"
     Set-AccessibleName -Control $capabilitiesDiscoveryEnabledCheckbox -Key "A11y.CapabilitiesDiscovery"
+    Set-AccessibleName -Control $displayRestoreEnabledCheckbox -Key "A11y.DisplayRestore"
     Set-AccessibleName -Control $cpuMonitorEnabledCheckbox -Key "A11y.CpuMonitorHelper"
     Set-AccessibleName -Control $presentMonEnabledCheckbox -Key "A11y.PresentMonHelper"
     Set-AccessibleName -Control $optionalHelperStatusBox -Key "A11y.OptionalHelperStatus"
@@ -2378,7 +2388,7 @@ function Initialize-LocalizationAndAccessibility {
         $idleDimEnabledCheckbox,$idleDimMinutesBox,$idleDimBrightnessBox,$idleDimRestoreCheckbox,$idleDimSaveBtn,
         $batteryProfileEnabledCheckbox,$batteryBrightnessBox,$acBrightnessBox,$batteryProfileSaveBtn,
         $displaySettingsBtn,$colorMgmtBtn,$gpuControlPanelBtn,$gammaRedSlider,$gammaGreenSlider,$gammaBlueSlider,$resetGammaBtn,$capabilitiesBox,
-        $cpuMonitorEnabledCheckbox,$presentMonEnabledCheckbox,$optionalHelperStatusBox,$capabilitiesDiscoveryEnabledCheckbox,$capabilitiesMaximumCompatibilityCheckbox,$capabilitiesExcludeCurrentBtn,$capabilitiesClearExclusionsBtn,$riskyVcpEnabledCheckbox,
+        $displayRestoreEnabledCheckbox,$cpuMonitorEnabledCheckbox,$presentMonEnabledCheckbox,$optionalHelperStatusBox,$capabilitiesDiscoveryEnabledCheckbox,$capabilitiesMaximumCompatibilityCheckbox,$capabilitiesExcludeCurrentBtn,$capabilitiesClearExclusionsBtn,$riskyVcpEnabledCheckbox,
         $automationBridgeEnabledCheckbox,$automationBridgeBindBox,$automationBridgePortBox,$automationBridgeKeyBox,$automationBridgeSaveBtn,
         $ddcReportGenerateBtn,$ddcReportCopyBtn,$ddcReportBox
     )
@@ -5117,6 +5127,7 @@ function Update-MonitorSettingsWorkerOutput {
             Update-TrayIconText
         }
     }
+    Invoke-DisplayStateRestore -Generation $script:DisplayRecoveryGeneration -Reason "display refresh" | Out-Null
     if (-not $selectedPublished -and $workerName -and $script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) {
         Update-SelectedMonitorRecoveryUi
     }
@@ -5496,6 +5507,128 @@ function Get-OptionalHelperStatusText {
         (Format-OptionalHelperProvenance -Label "CPU temperature library" -Provenance $script:CpuMonitorProvenance -Enabled $script:CpuMonitorEnabled),
         (Format-OptionalHelperProvenance -Label "PresentMon" -Provenance $script:PresentMonProvenance -Enabled $script:PresentMonEnabled)
     ) -join "`n`n")
+}
+
+function Get-DisplayStateRestoreSettingsObject {
+    $records = @()
+    foreach ($key in @($script:DisplayStateRestoreValues.Keys)) {
+        $entry = $script:DisplayStateRestoreValues[$key]
+        if ($null -eq $entry) { continue }
+        $records += [PSCustomObject]@{
+            IdentityKey = [string]$key
+            Brightness = [int]$entry.Brightness
+            UpdatedAt = [string]$entry.UpdatedAt
+        }
+    }
+    return [PSCustomObject]@{
+        SchemaVersion = [int]$script:DisplayStateRestoreSchemaVersion
+        Enabled = [bool]$script:DisplayStateRestoreEnabled
+        Monitors = @($records)
+    }
+}
+
+function Save-DisplayStateRestoreSettings {
+    return (Write-JsonFileSafely -Path $script:DisplayStateRestoreSettingsPath -Data (Get-DisplayStateRestoreSettingsObject) -Depth 5)
+}
+
+function Import-DisplayStateRestoreSettings {
+    $script:DisplayStateRestoreEnabled = $false
+    $script:DisplayStateRestoreValues = @{}
+    if (-not (Test-Path -LiteralPath $script:DisplayStateRestoreSettingsPath)) { return }
+    $data = Read-JsonFileSafely -Path $script:DisplayStateRestoreSettingsPath -Label "Display restore settings"
+    if ($null -eq $data) { return }
+    $schema = if ($data.PSObject.Properties.Name -contains "SchemaVersion") { [int]$data.SchemaVersion } else { 1 }
+    if ($schema -gt $script:DisplayStateRestoreSchemaVersion) {
+        Update-Status "Display restore settings use schema v$schema; restore stays disabled"
+        return
+    }
+    if ($data.PSObject.Properties.Name -contains "Enabled") { $script:DisplayStateRestoreEnabled = [bool]$data.Enabled }
+    foreach ($record in @((Get-ProfilePropertyValue -Object $data -Property "Monitors" -Default @()))) {
+        if ($null -eq $record) { continue }
+        $identityKey = [string](Get-ProfilePropertyValue -Object $record -Property "IdentityKey" -Default "")
+        if ([string]::IsNullOrWhiteSpace($identityKey)) { continue }
+        $brightness = Get-ProfilePercentValue -Object $record -Property "Brightness" -Default -1
+        if ($brightness -lt 0) { continue }
+        $script:DisplayStateRestoreValues[$identityKey] = [PSCustomObject]@{
+            Brightness = [int]$brightness
+            UpdatedAt = [string](Get-ProfilePropertyValue -Object $record -Property "UpdatedAt" -Default "")
+        }
+    }
+}
+
+function Set-DisplayStateRestoreValue {
+    param([string]$IdentityKey, [int]$BrightnessPercent, [string]$UpdatedAt = "")
+    if ([string]::IsNullOrWhiteSpace($IdentityKey)) { return $false }
+    if ($BrightnessPercent -lt 0 -or $BrightnessPercent -gt 100) { return $false }
+    if ([string]::IsNullOrWhiteSpace($UpdatedAt)) { $UpdatedAt = (Get-Date).ToString("o") }
+    $script:DisplayStateRestoreValues[$IdentityKey] = [PSCustomObject]@{
+        Brightness = [int]$BrightnessPercent
+        UpdatedAt = [string]$UpdatedAt
+    }
+    return $true
+}
+
+function Get-DisplayStateRestorePlan {
+    param([object[]]$Monitors, [hashtable]$Remembered, [bool]$Enabled)
+    $plan = [PSCustomObject]@{ Operations = @(); Skipped = @() }
+    if (-not $Enabled) { return $plan }
+    $operations = @()
+    $skipped = @()
+    foreach ($monitor in @($Monitors)) {
+        if ($null -eq $monitor) { continue }
+        $identityKey = [string]$monitor.IdentityKey
+        $label = if ($monitor.PSObject.Properties["DisplayLabel"] -and $monitor.DisplayLabel) { [string]$monitor.DisplayLabel } else { [string]$monitor.Name }
+        if ([string]::IsNullOrWhiteSpace($identityKey)) {
+            $skipped += [PSCustomObject]@{ Monitor = $label; Reason = "no stable identity" }
+            continue
+        }
+        if (-not $Remembered.ContainsKey($identityKey)) {
+            $skipped += [PSCustomObject]@{ Monitor = $label; Reason = "nothing remembered" }
+            continue
+        }
+        if ([int64]$monitor.Handle.ToInt64() -eq 0) {
+            $skipped += [PSCustomObject]@{ Monitor = $label; Reason = "no DDC/CI handle" }
+            continue
+        }
+        $percent = [int]$Remembered[$identityKey].Brightness
+        if (-not (Test-MonitorSupportsVcp -Monitor $monitor -Code ([int][MonitorAPI]::VCP_BRIGHTNESS))) {
+            $skipped += [PSCustomObject]@{ Monitor = $label; Reason = "brightness not reported" }
+            continue
+        }
+        $raw = [uint32](ConvertTo-VcpRawValue -Percent ([double]$percent) -Maximum (Get-VcpMaximumForMonitor -Monitor $monitor -Code ([int][MonitorAPI]::VCP_BRIGHTNESS)))
+        $operations += Get-VcpWriteOperation -Monitor $monitor -Code ([int][MonitorAPI]::VCP_BRIGHTNESS) -Value $raw
+    }
+    $plan.Operations = @($operations)
+    $plan.Skipped = @($skipped)
+    return $plan
+}
+
+function Invoke-DisplayStateRestore {
+    param([int]$Generation = $script:DisplayRecoveryGeneration, [string]$Reason = "startup")
+    if (-not $script:DisplayStateRestoreEnabled) { return $false }
+    # One restore per recovery generation, so a burst of display events cannot replay writes.
+    if ($script:DisplayStateRestoreGeneration -eq $Generation) { return $false }
+    $script:DisplayStateRestoreGeneration = $Generation
+    $plan = Get-DisplayStateRestorePlan -Monitors @($script:PhysicalMonitors) -Remembered $script:DisplayStateRestoreValues -Enabled $true
+    if (@($plan.Operations).Count -eq 0) { return $false }
+    $result = Invoke-VerifiedVcpTransaction -Operations @($plan.Operations) -RollbackOnFailure
+    $applied = @($plan.Operations).Count
+    if ([bool]$result.Success) {
+        Update-Status "Restored brightness on $applied display(s) after $Reason"
+    } else {
+        Update-Status "Brightness restore after $Reason ended $($result.Outcome); restore: $($result.Rollback)"
+    }
+    return [bool]$result.Success
+}
+
+function Update-DisplayStateRestoreFromUi {
+    if (-not $script:DisplayStateRestoreEnabled) { return }
+    if ($script:CurrentMonitorIndex -lt 0 -or $script:CurrentMonitorIndex -ge $script:PhysicalMonitors.Count) { return }
+    $monitor = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
+    if ($null -eq $monitor) { return }
+    if (Set-DisplayStateRestoreValue -IdentityKey ([string]$monitor.IdentityKey) -BrightnessPercent ([int](Get-SelectedBrightnessPercent))) {
+        Save-DisplayStateRestoreSettings | Out-Null
+    }
 }
 
 function Get-OptionalHelperSettingsObject {
@@ -6237,7 +6370,7 @@ try {
         </TabItem>
         <TabItem x:Name="SystemTab" Header="System" Tag="&#xE713;">
             <Border Background="Transparent" Padding="0"><ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><Grid>
-                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Border Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><StackPanel><TextBlock Text="Quick links" FontSize="12" Foreground="{DynamicResource TextBrush}" FontWeight="SemiBold" Margin="0,0,0,8"/>
                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                         <Button x:Name="DisplaySettingsBtn" Content="Display" Style="{StaticResource Btn}" Padding="5,4" FontSize="12"/>
@@ -6295,6 +6428,12 @@ try {
                         <Button x:Name="DdcReportCopyBtn" Grid.Column="4" Content="Copy" Style="{StaticResource Btn}" Padding="10,4" FontSize="12"/>
                     </Grid>
                     <TextBox x:Name="DdcReportBox" Grid.Row="2" IsReadOnly="True" TextWrapping="Wrap" Height="180" VerticalScrollBarVisibility="Auto" Background="{DynamicResource ControlBrush}" FontFamily="Consolas" FontSize="12" AcceptsReturn="True"/>
+                </Grid></Border>
+                <Border Grid.Row="16" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <Grid><CheckBox x:Name="DisplayRestoreEnabledCheckbox" Content="Restore brightness at launch and after resume" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="DisplayRestoreStatusText" Text="Off" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/></Grid>
+                    <TextBlock Grid.Row="2" Text="Monitors often reset themselves to full brightness after a power or sleep cycle. When this is on, the last brightness you set for each display is written back once per detected display change, through the verified write path." TextWrapping="Wrap" Foreground="{DynamicResource MutedTextBrush}" FontSize="12"/>
                 </Grid></Border>
                 <Border Grid.Row="14" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource WarningBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
@@ -6397,6 +6536,7 @@ $gammaRedSlider = $window.FindName("GammaRedSlider"); $gammaRedValue = $window.F
 $gammaGreenSlider = $window.FindName("GammaGreenSlider"); $gammaGreenValue = $window.FindName("GammaGreenValue")
 $gammaBlueSlider = $window.FindName("GammaBlueSlider"); $gammaBlueValue = $window.FindName("GammaBlueValue")
 $capabilitiesBox = $window.FindName("CapabilitiesBox"); $ddcReportBox = $window.FindName("DdcReportBox")
+$displayRestoreEnabledCheckbox = $window.FindName("DisplayRestoreEnabledCheckbox"); $displayRestoreStatusText = $window.FindName("DisplayRestoreStatusText")
 $cpuMonitorEnabledCheckbox = $window.FindName("CpuMonitorEnabledCheckbox"); $presentMonEnabledCheckbox = $window.FindName("PresentMonEnabledCheckbox"); $optionalHelperStatusBox = $window.FindName("OptionalHelperStatusBox")
 $capabilitiesDiscoveryEnabledCheckbox = $window.FindName("CapabilitiesDiscoveryEnabledCheckbox"); $capabilitiesMaximumCompatibilityCheckbox = $window.FindName("CapabilitiesMaximumCompatibilityCheckbox")
 $capabilitiesSafetyStatusText = $window.FindName("CapabilitiesSafetyStatusText"); $capabilitiesExcludeCurrentBtn = $window.FindName("CapabilitiesExcludeCurrentBtn"); $capabilitiesClearExclusionsBtn = $window.FindName("CapabilitiesClearExclusionsBtn")
@@ -6460,6 +6600,35 @@ function Update-SelectedMonitorRecoveryUi {
     if (-not [string]::IsNullOrWhiteSpace($lastError)) { $tooltip += "`n$lastError" }
     $selectedMonitorHealthText.ToolTip = $tooltip
     $selectedMonitorHealthDot.ToolTip = $tooltip
+}
+
+function Update-DisplayStateRestoreControls {
+    $script:UpdatingDisplayStateRestoreUI = $true
+    try {
+        if ($displayRestoreEnabledCheckbox) { $displayRestoreEnabledCheckbox.IsChecked = [bool]$script:DisplayStateRestoreEnabled }
+        if ($displayRestoreStatusText) {
+            $displayRestoreStatusText.Text = if ($script:DisplayStateRestoreEnabled) {
+                "Remembering $($script:DisplayStateRestoreValues.Count) display(s)"
+            } else {
+                "Off"
+            }
+        }
+    } finally {
+        $script:UpdatingDisplayStateRestoreUI = $false
+    }
+}
+
+function Set-DisplayStateRestoreEnabled {
+    param([bool]$Enabled)
+    $script:DisplayStateRestoreEnabled = $Enabled
+    if ($Enabled) {
+        Update-DisplayStateRestoreFromUi
+        Update-Status "Brightness restore enabled"
+    } else {
+        Update-Status "Brightness restore disabled"
+    }
+    Save-DisplayStateRestoreSettings | Out-Null
+    Update-DisplayStateRestoreControls
 }
 
 function Update-OptionalHelperControls {
@@ -9471,7 +9640,7 @@ $monitorLabelResetBtn.Add_Click({
     }
 })
 
-$brightnessSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$brightnessSlider.Value; $brightnessValue.Text = $v; Set-ScaledVcpFromSlider -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -RawValue $v | Out-Null; Update-TrayPopupState; Update-TrayIconText })
+$brightnessSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$brightnessSlider.Value; $brightnessValue.Text = $v; Set-ScaledVcpFromSlider -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -RawValue $v | Out-Null; Update-DisplayStateRestoreFromUi; Update-TrayPopupState; Update-TrayIconText })
 $contrastSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$contrastSlider.Value; $contrastValue.Text = $v; Set-ScaledVcpFromSlider -VCPCode ([MonitorAPI]::VCP_CONTRAST) -RawValue $v | Out-Null })
 $redSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$redSlider.Value; $redValue.Text = $v; Set-ScaledVcpFromSlider -VCPCode ([MonitorAPI]::VCP_RED_GAIN) -RawValue $v | Out-Null })
 $greenSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$greenSlider.Value; $greenValue.Text = $v; Set-ScaledVcpFromSlider -VCPCode ([MonitorAPI]::VCP_GREEN_GAIN) -RawValue $v | Out-Null })
@@ -9793,6 +9962,14 @@ $batteryProfileSaveBtn.Add_Click({
 
 $displaySettingsBtn.Add_Click({ Start-Process "ms-settings:display" }); $colorMgmtBtn.Add_Click({ Start-Process "colorcpl.exe" })
 $gpuControlPanelBtn.Add_Click({ if ($script:HasNvidia) { Start-Process "nvidia-settings" -ErrorAction SilentlyContinue } else { Start-Process "ms-settings:display" } })
+$displayRestoreEnabledCheckbox.Add_Checked({
+    if ($script:UpdatingDisplayStateRestoreUI) { return }
+    Set-DisplayStateRestoreEnabled -Enabled $true
+})
+$displayRestoreEnabledCheckbox.Add_Unchecked({
+    if ($script:UpdatingDisplayStateRestoreUI) { return }
+    Set-DisplayStateRestoreEnabled -Enabled $false
+})
 $cpuMonitorEnabledCheckbox.Add_Checked({
     if ($script:UpdatingOptionalHelperUI) { return }
     $answer = [System.Windows.MessageBox]::Show(
@@ -10007,7 +10184,7 @@ function Update-GpuStats {
 }
 
 # Initialize
-Initialize-WmiBrightness; Load-MonitorIdentitySettings; Import-CapabilitySafetyState; Import-VcpWriteSafetyState; Import-OptionalHelperSettings; Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList
+Initialize-WmiBrightness; Load-MonitorIdentitySettings; Import-CapabilitySafetyState; Import-VcpWriteSafetyState; Import-OptionalHelperSettings; Import-DisplayStateRestoreSettings; Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList
 Load-AppProfileRules; Update-AppProfileControls; Start-AppProfileWatcher
 Load-ProfileSchedules; Update-ScheduleControls; Start-ProfileScheduleWatcher
 Load-IdleDimSettings; Update-IdleDimControls; Start-IdleDimWatcher
@@ -10017,6 +10194,7 @@ Update-ProfileStorageControls
 Sync-CapabilitySafetyUi
 Sync-VcpWriteSafetyUi
 Update-OptionalHelperControls
+Update-DisplayStateRestoreControls
 Update-HardwareTabVisibility
 
 Initialize-TrayIcon

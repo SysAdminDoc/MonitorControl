@@ -199,6 +199,18 @@ This is the same pinned lane used by CI. It gates a pure-ASCII check across ever
 - Brightness is expressed as a percentage in both directions. `GET /api/brightness` also returns the `raw` DDC value and the monitor's reported `maximum`, and `GET /api/monitors` reports `BrightnessMaximum` per display
 - MQTT/Home Assistant integration remains disabled; use the bridge as the local foundation before enabling network integrations
 
+### Restoring Brightness After Sleep
+
+Many monitors forget their brightness across a power or sleep cycle and come back at full
+output. Open **System** and enable **Restore brightness at launch and after resume**.
+
+- The last brightness you set for each display is remembered against its stable monitor identity.
+- It is written back once per detected display change, so a burst of hot-plug events cannot
+  replay writes, and it goes through the verified write path with rollback.
+- Displays with no stable identity, no DDC/CI handle, or no reported brightness control are
+  skipped rather than guessed at.
+- The setting is off by default, because restoring writes to hardware without being asked.
+
 ### Optional Hardware Helpers
 
 MonitorControl Pro can read CPU temperature through LibreHardwareMonitorLib/OpenHardwareMonitorLib
@@ -438,6 +450,7 @@ Your monitor either:
 ### Data Storage
 - Profiles: `%APPDATA%\MonitorControlPro\*.json`
 - Optional helper consent: `%APPDATA%\MonitorControlPro\optional-helpers.json` (both helpers off by default)
+- Remembered brightness for restore: `%APPDATA%\MonitorControlPro\display-restore.json` (off by default)
 - Automation bridge settings: `%APPDATA%\MonitorControlPro\automation-bridge.json` (API key protected with current-user DPAPI)
 - Automation bridge write log: `%APPDATA%\MonitorControlPro\automation-bridge-writes.jsonl` (redacted and size-rotated)
 - Risky VCP identity unlocks: `%APPDATA%\MonitorControlPro\vcp-write-safety.json`
