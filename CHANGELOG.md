@@ -4,6 +4,10 @@ All notable changes to MonitorControl will be documented in this file.
 
 ## [Unreleased]
 
+- Changed: the verification lane now refuses any PowerShell source containing a byte above 0x7F, enforces PSScriptAnalyzer warnings as well as errors against a committed `PSScriptAnalyzerSettings.psd1`, and pins Pester 5.9.0 on a windows-2025 runner. Every remaining analyzer finding was either fixed or excluded with a documented reason.
+- Fixed: locals named `$profile` shadowed the automatic `$PROFILE` variable.
+- Added: cancellation and teardown coverage for all four background workers.
+- Changed: `main` is protected with admin enforcement and a required verify check.
 - Fixed: the tray popup, monitor identify overlays, FPS overlay, and schedule timeline markers now draw from the shared theme instead of hardcoded colours, so they follow Windows high contrast like the main window. Detached windows receive the resolved brushes when created and again whenever the theme changes.
 - Fixed: the tray popup "Link monitors" label no longer renders below the minimum supported text size.
 - Added: a regression test fails the build if the static XAML brush dictionary drifts from the palette function, or if a hardcoded colour reappears in the tray popup or overlays.

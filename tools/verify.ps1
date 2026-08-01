@@ -1,5 +1,5 @@
 param(
-    [version]$PesterVersion = [version]"5.8.0",
+    [version]$PesterVersion = [version]"5.9.0",
     [version]$PSScriptAnalyzerVersion = [version]"1.25.0"
 )
 
@@ -35,7 +35,33 @@ function Remove-ValidatedVerificationDirectory {
     Remove-Item -LiteralPath $fullPath -Recurse -Force
 }
 
+# Windows PowerShell 5.1 reads a BOM-less file as CP1252, so a single byte above 0x7F -
+# an em dash, a curly quote - decodes into a character that can terminate a string early
+# and produce parse errors pointing at unrelated lines. Refuse to ship one.
+$asciiExtensions = @(".ps1", ".psm1", ".psd1")
+$asciiTargets = @(Get-ChildItem -LiteralPath $repoRoot -Recurse -File |
+    Where-Object {
+        $asciiExtensions -contains $_.Extension -and
+        $_.FullName -notlike "*\dist\*" -and
+        $_.FullName -notlike "*\.git\*"
+    })
+$nonAsciiFiles = @()
+foreach ($target in $asciiTargets) {
+    $offending = @([System.IO.File]::ReadAllBytes($target.FullName) | Where-Object { $_ -gt 127 })
+    if ($offending.Count -gt 0) {
+        $nonAsciiFiles += "{0} ({1} byte(s) above 0x7F)" -f $target.FullName.Substring($repoRoot.Length + 1), $offending.Count
+    }
+}
+if ($nonAsciiFiles.Count -gt 0) {
+    throw "PowerShell sources must be pure ASCII:`n$($nonAsciiFiles -join "`n")"
+}
+Write-Host "ASCII check passed across $($asciiTargets.Count) PowerShell file(s)."
+
 Import-RequiredModuleVersion -Name "PSScriptAnalyzer" -Version $PSScriptAnalyzerVersion
+$analysisSettings = Join-Path $repoRoot "PSScriptAnalyzerSettings.psd1"
+if (-not (Test-Path -LiteralPath $analysisSettings -PathType Leaf)) {
+    throw "Analyzer settings not found: $analysisSettings"
+}
 $analysisPaths = @(
     (Join-Path $repoRoot "MonitorControlPro.ps1")
     (Join-Path $repoRoot "tools")
@@ -43,17 +69,16 @@ $analysisPaths = @(
 )
 $analysisResults = @()
 foreach ($path in $analysisPaths) {
-    $analysisResults += Invoke-ScriptAnalyzer -Path $path -Recurse
+    $analysisResults += Invoke-ScriptAnalyzer -Path $path -Recurse -Settings $analysisSettings
 }
-$analysisErrors = @($analysisResults | Where-Object Severity -eq "Error")
-if ($analysisErrors.Count -gt 0) {
-    $details = $analysisErrors |
+if ($analysisResults.Count -gt 0) {
+    $details = $analysisResults |
         Select-Object RuleName, Message, ScriptName, Line, Column |
         Format-Table -AutoSize |
         Out-String
-    throw "PSScriptAnalyzer reported $($analysisErrors.Count) error(s):`n$details"
+    throw "PSScriptAnalyzer reported $($analysisResults.Count) finding(s) at or above Warning:`n$details"
 }
-Write-Host "Static analysis passed with PSScriptAnalyzer $PSScriptAnalyzerVersion ($($analysisResults.Count) advisory findings)."
+Write-Host "Static analysis passed with PSScriptAnalyzer $PSScriptAnalyzerVersion (errors and warnings enforced)."
 
 $windowsPowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 & $windowsPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot "tools\run-tests.ps1") -Quiet -PesterVersion $PesterVersion.ToString()

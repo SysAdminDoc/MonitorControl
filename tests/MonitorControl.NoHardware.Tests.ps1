@@ -40,6 +40,26 @@ BeforeAll {
 
     function Update-ProfilesList {}
 
+    function global:New-FakeWorker {
+        $worker = [PSCustomObject]@{ Name = "worker" }
+        $worker | Add-Member -MemberType ScriptMethod -Name Stop -Value { [void]$script:StoppedWorkers.Add("worker") }
+        $worker | Add-Member -MemberType ScriptMethod -Name Dispose -Value { [void]$script:DisposedObjects.Add("worker") }
+        return $worker
+    }
+
+    function global:New-FakeDisposable {
+        param([string]$Label)
+        $item = [PSCustomObject]@{ Label = $Label }
+        $item | Add-Member -MemberType ScriptMethod -Name Dispose -Value { [void]$script:DisposedObjects.Add($this.Label) }
+        return $item
+    }
+
+    function global:New-FakeWorkerTimer {
+        $timer = [PSCustomObject]@{ Running = $true }
+        $timer | Add-Member -MemberType ScriptMethod -Name Stop -Value { $this.Running = $false }
+        return $timer
+    }
+
     function global:New-RangeTestMonitor {
         param([string]$IdentityKey, [int]$BrightnessMaximum)
         $monitor = [PSCustomObject]@{
@@ -121,6 +141,10 @@ BeforeAll {
         "Resolve-VcpWriteValueForMonitor",
         "Update-VcpMaximumCache",
         "Get-ProfilePercentValue",
+        "Stop-MonitorSettingsWorker",
+        "Stop-CapabilitiesWorker",
+        "Stop-VcpWorker",
+        "Stop-DdcReportWorker",
         "Get-ThemeBrushMap",
         "ConvertTo-ThemeBrush",
         "Register-DetachedThemedWindow",
@@ -1506,6 +1530,90 @@ Describe "Monitor reported VCP range normalization" {
     }
 }
 
+Describe "Background worker cancellation and teardown" {
+    BeforeEach {
+        $script:StoppedWorkers = New-Object System.Collections.ArrayList
+        $script:DisposedObjects = New-Object System.Collections.ArrayList
+    }
+
+    It "stops the in-flight <Name> runspace when cancelled and releases every handle" -ForEach @(
+        @{ Name = "MonitorSettings"; Stop = "Stop-MonitorSettingsWorker" }
+        @{ Name = "Capabilities"; Stop = "Stop-CapabilitiesWorker" }
+        @{ Name = "Vcp"; Stop = "Stop-VcpWorker" }
+        @{ Name = "DdcReport"; Stop = "Stop-DdcReportWorker" }
+    ) {
+        $timer = New-FakeWorkerTimer
+        Set-Variable -Name "$($Name)WorkerTimer" -Scope Script -Value $timer
+        Set-Variable -Name "$($Name)Worker" -Scope Script -Value (New-FakeWorker)
+        Set-Variable -Name "$($Name)WorkerInput" -Scope Script -Value (New-FakeDisposable -Label "input")
+        Set-Variable -Name "$($Name)WorkerOutput" -Scope Script -Value (New-FakeDisposable -Label "output")
+        Set-Variable -Name "$($Name)WorkerAsyncResult" -Scope Script -Value ([PSCustomObject]@{ IsCompleted = $false })
+
+        & $Stop -Cancel
+
+        $script:StoppedWorkers.Count | Should -Be 1
+        $script:DisposedObjects | Should -Contain "worker"
+        $script:DisposedObjects | Should -Contain "input"
+        $script:DisposedObjects | Should -Contain "output"
+        $timer.Running | Should -BeFalse
+        (Get-Variable -Name "$($Name)Worker" -Scope Script).Value | Should -BeNullOrEmpty
+        (Get-Variable -Name "$($Name)WorkerInput" -Scope Script).Value | Should -BeNullOrEmpty
+        (Get-Variable -Name "$($Name)WorkerOutput" -Scope Script).Value | Should -BeNullOrEmpty
+        (Get-Variable -Name "$($Name)WorkerAsyncResult" -Scope Script).Value | Should -BeNullOrEmpty
+    }
+
+    It "does not stop a completed <Name> runspace but still disposes it" -ForEach @(
+        @{ Name = "MonitorSettings"; Stop = "Stop-MonitorSettingsWorker" }
+        @{ Name = "Capabilities"; Stop = "Stop-CapabilitiesWorker" }
+        @{ Name = "Vcp"; Stop = "Stop-VcpWorker" }
+        @{ Name = "DdcReport"; Stop = "Stop-DdcReportWorker" }
+    ) {
+        Set-Variable -Name "$($Name)WorkerTimer" -Scope Script -Value (New-FakeWorkerTimer)
+        Set-Variable -Name "$($Name)Worker" -Scope Script -Value (New-FakeWorker)
+        Set-Variable -Name "$($Name)WorkerInput" -Scope Script -Value (New-FakeDisposable -Label "input")
+        Set-Variable -Name "$($Name)WorkerOutput" -Scope Script -Value (New-FakeDisposable -Label "output")
+        Set-Variable -Name "$($Name)WorkerAsyncResult" -Scope Script -Value ([PSCustomObject]@{ IsCompleted = $true })
+
+        & $Stop -Cancel
+
+        $script:StoppedWorkers.Count | Should -Be 0
+        $script:DisposedObjects | Should -Contain "worker"
+    }
+
+    It "tears <Name> down without cancelling when no cancel was requested" -ForEach @(
+        @{ Name = "MonitorSettings"; Stop = "Stop-MonitorSettingsWorker" }
+        @{ Name = "Capabilities"; Stop = "Stop-CapabilitiesWorker" }
+        @{ Name = "Vcp"; Stop = "Stop-VcpWorker" }
+        @{ Name = "DdcReport"; Stop = "Stop-DdcReportWorker" }
+    ) {
+        Set-Variable -Name "$($Name)WorkerTimer" -Scope Script -Value (New-FakeWorkerTimer)
+        Set-Variable -Name "$($Name)Worker" -Scope Script -Value (New-FakeWorker)
+        Set-Variable -Name "$($Name)WorkerInput" -Scope Script -Value $null
+        Set-Variable -Name "$($Name)WorkerOutput" -Scope Script -Value $null
+        Set-Variable -Name "$($Name)WorkerAsyncResult" -Scope Script -Value ([PSCustomObject]@{ IsCompleted = $false })
+
+        & $Stop
+
+        $script:StoppedWorkers.Count | Should -Be 0
+        $script:DisposedObjects | Should -Contain "worker"
+    }
+
+    It "is safe to call <Stop> when nothing is running" -ForEach @(
+        @{ Name = "MonitorSettings"; Stop = "Stop-MonitorSettingsWorker" }
+        @{ Name = "Capabilities"; Stop = "Stop-CapabilitiesWorker" }
+        @{ Name = "Vcp"; Stop = "Stop-VcpWorker" }
+        @{ Name = "DdcReport"; Stop = "Stop-DdcReportWorker" }
+    ) {
+        Set-Variable -Name "$($Name)WorkerTimer" -Scope Script -Value $null
+        Set-Variable -Name "$($Name)Worker" -Scope Script -Value $null
+        Set-Variable -Name "$($Name)WorkerInput" -Scope Script -Value $null
+        Set-Variable -Name "$($Name)WorkerOutput" -Scope Script -Value $null
+        Set-Variable -Name "$($Name)WorkerAsyncResult" -Scope Script -Value $null
+
+        { & $Stop -Cancel } | Should -Not -Throw
+    }
+}
+
 Describe "Theme palette single source" {
     BeforeAll {
         $script:AppText = [System.IO.File]::ReadAllText($script:AppPath)
@@ -1545,7 +1653,6 @@ Describe "Theme palette single source" {
         Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
         $script:IsHighContrastTheme = $false
         $script:DetachedThemedWindows = New-Object System.Collections.ArrayList
-        $window = $null
         $detached = New-Object System.Windows.Window
         try {
             Register-DetachedThemedWindow -Target $detached

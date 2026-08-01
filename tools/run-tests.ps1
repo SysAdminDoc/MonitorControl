@@ -1,6 +1,6 @@
 param(
     [switch]$Quiet,
-    [version]$PesterVersion = [version]"5.8.0"
+    [version]$PesterVersion = [version]"5.9.0"
 )
 
 $ErrorActionPreference = "Stop"
