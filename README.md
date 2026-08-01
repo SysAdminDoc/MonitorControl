@@ -258,6 +258,13 @@ These controls are under **System > Display & DDC**.
   returning to Adaptive discards the stored calibration and relearns it - the card says so before
   you switch
 - Read, write, and capability retry budgets are set separately, each 0-10
+- Readback verification is stored per monitor as **Strict**, **Lenient**, or **Off**. Strict treats
+  one in-range mismatch as a failure; Lenient waits for one longer calibrated delay and re-reads
+  before it can fail or roll back; Off trusts a successful write. The initial verification delay
+  and the longer Lenient delay both derive from that monitor's effective timing rather than a
+  fixed wait
+- A readback above the maximum reported by the monitor is classified as unreliable firmware data.
+  The write remains applied and is not rolled back solely because of that impossible value
 - A VCP code that fails every retry on a monitor that is answering other codes is recorded as
   null-signalled-unsupported for that monitor and skipped from then on. Some monitors use the DDC
   Null Message to mean "not supported" rather than "not ready", and burning the full retry budget
@@ -270,8 +277,8 @@ These controls are under **System > Display & DDC**.
   the per-code learning above
 - **Reset calibration** clears both the learned multiplier and the skipped-code list for the
   selected monitor
-- Effective values, calibration state, Null-message classification and date, and skipped codes
-  appear in the DDC Compatibility Report
+- Effective values, verification policy and delays, calibration state, Null-message classification
+  and date, and skipped codes appear in the DDC Compatibility Report
 - A separate liveness probe performs one read-only VCP query per monitor every 60 seconds while
   the DDC pipeline is idle. It never writes to a display. The report records the last attempt and
   last successful probe for each display; an isolated failure causes full handle re-acquisition
@@ -282,7 +289,9 @@ These controls are under **System > Display & DDC**.
 - The unlock covers power (`0xD6`), input (`0x60`), factory and color reset (`0x04`, `0x08`), color preset (`0x14`), OSD/button control (`0xCA`), OSD language (`0xCC`), auxiliary power (`0xD7`), PiP/PbP (`0xE8`, `0xE9`), and arbitrary VCP writes; identities without a stable key cannot be unlocked
 - Color preset is gated because some monitors keep the value after this app closes and need a factory reset to undo it, and OSD/button control is gated because it can disable the monitor's own buttons, which is the only way to recover a display that stops responding to software
 - Every direct command shows the exact VCP code, value, and target before writing. Canceling makes no hardware change
-- The app reads each supported value back and distinguishes **verified**, **mismatched**, and **readback unavailable** outcomes
+- The app reads each supported value back according to the selected monitor's verification policy
+  and distinguishes **verified**, **verified after re-read**, **mismatched**, **unreliable
+  readback**, **verification off**, and **readback unavailable** outcomes
 - A direct command that fails or reads back mismatched restores the readable prior value, and the status line reports whether that restore was complete or partial
 - Profile loads snapshot every readable prior DDC/WMI value and restore those values in reverse order when a write fails or reads back incorrectly
 - Automatic compatibility reports omit risky VCP codes; VCP Explorer reads remain explicitly user initiated

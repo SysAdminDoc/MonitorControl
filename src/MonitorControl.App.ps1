@@ -939,7 +939,7 @@ $script:AutomationBridgeRequests = New-Object 'System.Collections.Concurrent.Con
 $script:AutomationBridgeResponses = [hashtable]::Synchronized(@{})
 $script:AutomationBridgeState = [hashtable]::Synchronized(@{ Stop = $false })
 $script:UpdatingAutomationBridgeUI = $false
-$script:DdcTimingSchemaVersion = 2
+$script:DdcTimingSchemaVersion = 3
 $script:DdcTimingProfiles = @{}
 $script:DdcRespondedIdentityKeys = @{}
 # ddcutil calls this the sleep multiplier: how much longer than the default a panel
@@ -2453,7 +2453,10 @@ function Invoke-ManualVcpWrite {
     $rollback = [string]$result.Rollback
     switch ($result.Outcome) {
         "Verified" { Update-Status "Verified VCP $codeText" }
+        "VerifiedAfterRetry" { Update-Status "Verified VCP $codeText after a delayed re-read" }
         "Unverified" { Update-Status "VCP $codeText applied; readback unavailable" }
+        "UnreliableReadback" { Update-Status "VCP $codeText applied; monitor returned an out-of-range readback" }
+        "VerificationOff" { Update-Status "VCP $codeText applied; readback verification is off" }
         "Mismatched" { Update-Status "VCP $codeText mismatched its readback; restore: $rollback" }
         default { Update-Status "VCP $codeText failed; restore: $rollback" }
     }
@@ -4131,7 +4134,7 @@ try {
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="3*"/><ColumnDefinition Width="14"/><ColumnDefinition Width="2*"/></Grid.ColumnDefinitions>
                                 <Border Style="{StaticResource PageCard}">
                                     <Grid>
-                                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/><RowDefinition Height="10"/><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/><RowDefinition Height="10"/><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                                         <Grid>
                                             <StackPanel><TextBlock Text="DDC timing" Style="{StaticResource SectionTitle}"/><TextBlock Text="Per-monitor retry and calibration strategy" Foreground="{DynamicResource MutedTextBrush}" Margin="0,3,0,0"/></StackPanel>
                                             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
@@ -4145,12 +4148,21 @@ try {
                                             <StackPanel Grid.Column="2"><TextBlock Text="Write retries" Foreground="{DynamicResource MutedTextBrush}"/><TextBox x:Name="DdcTimingWriteRetriesBox" Margin="0,5,0,0"/></StackPanel>
                                             <StackPanel Grid.Column="4"><TextBlock Text="Capability retries" Foreground="{DynamicResource MutedTextBrush}"/><TextBox x:Name="DdcTimingCapabilityRetriesBox" Margin="0,5,0,0"/></StackPanel>
                                         </Grid>
-                                        <StackPanel Grid.Row="4" Orientation="Horizontal">
+                                        <Grid Grid.Row="4">
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                            <TextBlock Text="Readback verification" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center"/>
+                                            <ComboBox x:Name="DdcVerifyPolicyCombo" Grid.Column="2" SelectedValuePath="Tag" AutomationProperties.Name="DDC readback verification policy">
+                                                <ComboBoxItem Content="Strict - one mismatch fails" Tag="Strict"/>
+                                                <ComboBoxItem Content="Lenient - re-read before failure" Tag="Lenient"/>
+                                                <ComboBoxItem Content="Off - trust successful writes" Tag="Off"/>
+                                            </ComboBox>
+                                        </Grid>
+                                        <StackPanel Grid.Row="6" Orientation="Horizontal">
                                             <Button x:Name="DdcTimingResetBtn" Content="Reset calibration" Style="{StaticResource Btn}"/>
                                             <Button x:Name="DdcValuesRereadBtn" Content="Re-read values" Style="{StaticResource Btn}" Margin="8,0,0,0"/>
                                         </StackPanel>
-                                        <TextBlock x:Name="DdcTimingEffectiveText" Grid.Row="6" Text="" TextWrapping="Wrap" Foreground="{DynamicResource TextBrush}"/>
-                                        <TextBlock x:Name="DdcTimingWarningText" Grid.Row="8" Text="" TextWrapping="Wrap" Foreground="{DynamicResource WarningBrush}"/>
+                                        <TextBlock x:Name="DdcTimingEffectiveText" Grid.Row="8" Text="" TextWrapping="Wrap" Foreground="{DynamicResource TextBrush}"/>
+                                        <TextBlock x:Name="DdcTimingWarningText" Grid.Row="10" Text="" TextWrapping="Wrap" Foreground="{DynamicResource WarningBrush}"/>
                                     </Grid>
                                 </Border>
                                 <Border Grid.Column="2" Style="{StaticResource PageCard}">
@@ -4336,7 +4348,7 @@ $ddcTimingAdaptiveRadio = $window.FindName("DdcTimingAdaptiveRadio"); $ddcTiming
 $ddcTimingResetBtn = $window.FindName("DdcTimingResetBtn"); $ddcValuesRereadBtn = $window.FindName("DdcValuesRereadBtn"); $ddcTimingEffectiveText = $window.FindName("DdcTimingEffectiveText")
 $ddcTimingWarningText = $window.FindName("DdcTimingWarningText")
 $ddcTimingReadRetriesBox = $window.FindName("DdcTimingReadRetriesBox"); $ddcTimingWriteRetriesBox = $window.FindName("DdcTimingWriteRetriesBox")
-$ddcTimingCapabilityRetriesBox = $window.FindName("DdcTimingCapabilityRetriesBox")
+$ddcTimingCapabilityRetriesBox = $window.FindName("DdcTimingCapabilityRetriesBox"); $ddcVerifyPolicyCombo = $window.FindName("DdcVerifyPolicyCombo")
 $displayRestoreEnabledCheckbox = $window.FindName("DisplayRestoreEnabledCheckbox"); $displayRestoreStatusText = $window.FindName("DisplayRestoreStatusText")
 $cpuMonitorEnabledCheckbox = $window.FindName("CpuMonitorEnabledCheckbox"); $presentMonEnabledCheckbox = $window.FindName("PresentMonEnabledCheckbox"); $optionalHelperStatusBox = $window.FindName("OptionalHelperStatusBox")
 $capabilitiesClearCacheBtn = $window.FindName("CapabilitiesClearCacheBtn")
@@ -4424,6 +4436,7 @@ function Update-DdcTimingControls {
         $ddcTimingReadRetriesBox.Text = [string][int]$timingProfile.ReadRetries
         $ddcTimingWriteRetriesBox.Text = [string][int]$timingProfile.WriteRetries
         $ddcTimingCapabilityRetriesBox.Text = [string][int]$timingProfile.CapabilityRetries
+        if ($ddcVerifyPolicyCombo) { $ddcVerifyPolicyCombo.SelectedValue = [string]$timing.VerifyPolicy }
         $ddcTimingReadRetriesBox.IsEnabled = $true
         $ddcTimingWriteRetriesBox.IsEnabled = $true
         $ddcTimingCapabilityRetriesBox.IsEnabled = $true
@@ -4437,12 +4450,18 @@ function Update-DdcTimingControls {
         $skippedText = if ($skipped.Count -eq 0) { "no codes skipped" } else {
             "skipping " + (($skipped | ForEach-Object { "0x{0:X2}" -f [int]$_.Code }) -join ", ")
         }
-        $ddcTimingEffectiveText.Text = "Effective: $($timing.DelayMilliseconds) ms between retries (multiplier $($timing.SleepMultiplier)), read $($timing.ReadRetries), write $($timing.WriteRetries), capability $($timing.CapabilityRetries). $calibration; $skippedText."
-        $ddcTimingWarningText.Text = if ($isManual) {
+        $ddcTimingEffectiveText.Text = "Effective: $($timing.DelayMilliseconds) ms between retries (multiplier $($timing.SleepMultiplier)), read $($timing.ReadRetries), write $($timing.WriteRetries), capability $($timing.CapabilityRetries). Verification $($timing.VerifyPolicy.ToLowerInvariant()) after $($timing.VerificationDelayMilliseconds) ms; lenient second read after $($timing.LenientVerificationDelayMilliseconds) ms. $calibration; $skippedText."
+        $timingWarning = if ($isManual) {
             "Manual mode ignores the learned sleep multiplier. Switching back to Adaptive discards the stored calibration and relearns it from the next successful handshake."
         } else {
             "Adaptive mode learns the sleep multiplier from the first successful handshake with this monitor. Switching to Manual leaves that calibration unused."
         }
+        $verifyWarning = switch ([string]$timing.VerifyPolicy) {
+            "Lenient" { " Lenient verification waits for a second mismatch before failing or rolling back." }
+            "Off" { " Verification is off: successful writes are trusted and readback mismatches cannot trigger rollback." }
+            default { " Strict verification treats one in-range readback mismatch as a failure." }
+        }
+        $ddcTimingWarningText.Text = $timingWarning + $verifyWarning
     } finally {
         $script:UpdatingDdcTimingUI = $false
     }
@@ -4463,6 +4482,16 @@ function Set-DdcTimingRetryFromUi {
     }
     Save-DdcTimingSettings | Out-Null
     Update-Status "DDC $($Field.ToLowerInvariant()) retry budget set to $value for this monitor"
+    Update-DdcTimingControls
+}
+
+function Set-DdcVerifyPolicyFromUi {
+    param([string]$Policy)
+    $identityKey = Get-SelectedTimingIdentityKey
+    if ([string]::IsNullOrWhiteSpace($identityKey)) { return }
+    $timingProfile = Set-DdcVerifyPolicy -IdentityKey $identityKey -Policy $Policy
+    Save-DdcTimingSettings | Out-Null
+    Update-Status "DDC readback verification set to $([string]$timingProfile.VerifyPolicy) for this monitor"
     Update-DdcTimingControls
 }
 
@@ -6851,7 +6880,13 @@ function Apply-ProfileByName {
         $script:UpdatingUI = $false
     }
     $profilesList.SelectedItem = $Name
-    $verificationSuffix = if ($transaction.Outcome -eq "Unverified") { " (write applied; some readbacks unavailable)" } else { " (verified)" }
+    $verificationSuffix = switch ([string]$transaction.Outcome) {
+        "Unverified" { " (write applied; some readbacks unavailable)" }
+        "UnreliableReadback" { " (write applied; monitor readback is unreliable)" }
+        "VerificationOff" { " (write applied; verification off)" }
+        "VerifiedAfterRetry" { " (verified after delayed re-read)" }
+        default { " (verified)" }
+    }
     $capabilitySuffix = if ($plan.SkippedUnsupported -gt 0) { "; $($plan.SkippedUnsupported) unsupported values skipped" } else { "" }
     if ($targetIndex -ge 0) {
         Update-Status "$Reason '$Name' -> $(Get-MonitorDisplayLabel -Monitor $script:PhysicalMonitors[$targetIndex])$verificationSuffix$capabilitySuffix"
@@ -8106,6 +8141,10 @@ $ddcValuesRereadBtn.Add_Click({ Invoke-SelectedMonitorVcpReread | Out-Null })
 $ddcTimingReadRetriesBox.Add_LostFocus({ if (-not $script:UpdatingDdcTimingUI) { Set-DdcTimingRetryFromUi -Field "Read" -Text $ddcTimingReadRetriesBox.Text } })
 $ddcTimingWriteRetriesBox.Add_LostFocus({ if (-not $script:UpdatingDdcTimingUI) { Set-DdcTimingRetryFromUi -Field "Write" -Text $ddcTimingWriteRetriesBox.Text } })
 $ddcTimingCapabilityRetriesBox.Add_LostFocus({ if (-not $script:UpdatingDdcTimingUI) { Set-DdcTimingRetryFromUi -Field "Capability" -Text $ddcTimingCapabilityRetriesBox.Text } })
+$ddcVerifyPolicyCombo.Add_SelectionChanged({
+    if ($script:UpdatingDdcTimingUI -or $null -eq $ddcVerifyPolicyCombo.SelectedValue) { return }
+    Set-DdcVerifyPolicyFromUi -Policy ([string]$ddcVerifyPolicyCombo.SelectedValue)
+})
 $displayRestoreEnabledCheckbox.Add_Checked({
     if ($script:UpdatingDisplayStateRestoreUI) { return }
     Set-DisplayStateRestoreEnabled -Enabled $true

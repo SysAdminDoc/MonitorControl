@@ -1090,6 +1090,7 @@ function New-DdcTimingProfile {
         ReadRetries = [int][MonitorAPI]::VcpReadRetryCount
         WriteRetries = [int][MonitorAPI]::VcpWriteRetryCount
         CapabilityRetries = [int][MonitorAPI]::VcpReadRetryCount
+        VerifyPolicy = "Strict"
         NullMeansUnsupported = $false
         NullSemanticsClassifiedAt = ""
         NullProbeLastError = 0
@@ -1116,10 +1117,17 @@ function Get-DdcEffectiveTiming {
         [Math]::Min($script:DdcTimingMaxMultiplier, [Math]::Max($script:DdcTimingMinMultiplier, [double]$TimingProfile.SleepMultiplier))
     }
     $delay = [int][Math]::Round([MonitorAPI]::VcpRetryDelayMilliseconds * $multiplier, [System.MidpointRounding]::AwayFromZero)
+    $verificationDelay = [int][MonitorAPI]::ClampRetryDelay($delay)
+    $lenientDelay = [int][MonitorAPI]::ClampRetryDelay([Math]::Max($verificationDelay + 1, $verificationDelay * 2))
+    $verifyPolicy = if ($TimingProfile.PSObject.Properties.Name -contains "VerifyPolicy") { [string]$TimingProfile.VerifyPolicy } else { "Strict" }
+    if ($verifyPolicy -notin @("Strict", "Lenient", "Off")) { $verifyPolicy = "Strict" }
     return [PSCustomObject]@{
         Mode = $mode
         SleepMultiplier = [double]$multiplier
-        DelayMilliseconds = [int][MonitorAPI]::ClampRetryDelay($delay)
+        DelayMilliseconds = $verificationDelay
+        VerificationDelayMilliseconds = $verificationDelay
+        LenientVerificationDelayMilliseconds = $lenientDelay
+        VerifyPolicy = $verifyPolicy
         ReadRetries = [int][Math]::Min($script:DdcTimingMaxRetries, [Math]::Max(0, [int]$TimingProfile.ReadRetries))
         WriteRetries = [int][Math]::Min($script:DdcTimingMaxRetries, [Math]::Max(0, [int]$TimingProfile.WriteRetries))
         CapabilityRetries = [int][Math]::Min($script:DdcTimingMaxRetries, [Math]::Max(0, [int]$TimingProfile.CapabilityRetries))
@@ -1259,6 +1267,18 @@ function Set-DdcTimingMode {
     return $timingProfile
 }
 
+function Set-DdcVerifyPolicy {
+    param([string]$IdentityKey, [string]$Policy)
+    $timingProfile = Get-DdcTimingProfile -IdentityKey $IdentityKey
+    $normalized = switch ($Policy) {
+        "Lenient" { "Lenient" }
+        "Off" { "Off" }
+        default { "Strict" }
+    }
+    $timingProfile | Add-Member -NotePropertyName VerifyPolicy -NotePropertyValue $normalized -Force
+    return $timingProfile
+}
+
 function Clear-DdcTimingCalibration {
     param([string]$IdentityKey)
     $timingProfile = Get-DdcTimingProfile -IdentityKey $IdentityKey
@@ -1388,6 +1408,12 @@ function Set-VCPValueWithSync {
 
 function Get-VcpWriteOperation {
     param($Monitor, [int]$Code, [uint32]$Value, [string]$Backend = "DDC")
+    $reportedMaximum = [uint32]0
+    if ($Backend -eq "WMI") {
+        $reportedMaximum = [uint32]100
+    } elseif ($null -ne $Monitor -and $null -ne $Monitor.PSObject.Properties["VcpMaximums"] -and $null -ne $Monitor.VcpMaximums -and $Monitor.VcpMaximums.ContainsKey($Code)) {
+        $reportedMaximum = [uint32][Math]::Max(0, [int]$Monitor.VcpMaximums[$Code])
+    }
     return [PSCustomObject]@{
         Monitor = $Monitor
         MonitorName = if ($Monitor) { [string]$Monitor.Name } else { "Integrated display" }
@@ -1395,8 +1421,32 @@ function Get-VcpWriteOperation {
         Handle = if ($Monitor) { [IntPtr]$Monitor.Handle } else { [IntPtr]::Zero }
         Code = [int]$Code
         Value = [uint32]$Value
+        ReportedMaximum = $reportedMaximum
         Backend = $Backend
     }
+}
+
+function Get-DdcTransactionVerificationSettings {
+    param($Operation)
+    $identityKey = if ($null -ne $Operation -and $Operation.PSObject.Properties.Name -contains "IdentityKey") { [string]$Operation.IdentityKey } else { "" }
+    $timing = Get-DdcEffectiveTiming -TimingProfile (Get-DdcTimingProfile -IdentityKey $identityKey)
+    return [PSCustomObject]@{
+        Policy = [string]$timing.VerifyPolicy
+        DelayMilliseconds = [int]$timing.VerificationDelayMilliseconds
+        LenientDelayMilliseconds = [int]$timing.LenientVerificationDelayMilliseconds
+    }
+}
+
+function Test-VcpReadbackOutOfRange {
+    param($Readback, $Operation)
+    if ($null -eq $Readback -or -not [bool]$Readback.Success) { return $false }
+    $maximum = [uint32]0
+    if ($Readback.PSObject.Properties.Name -contains "Maximum" -and [uint32]$Readback.Maximum -gt 0) {
+        $maximum = [uint32]$Readback.Maximum
+    } elseif ($null -ne $Operation -and $Operation.PSObject.Properties.Name -contains "ReportedMaximum") {
+        $maximum = [uint32]$Operation.ReportedMaximum
+    }
+    return $maximum -gt 0 -and [uint32]$Readback.Current -gt $maximum
 }
 
 function Invoke-VerifiedVcpTransaction {
@@ -1405,7 +1455,7 @@ function Invoke-VerifiedVcpTransaction {
         [scriptblock]$ReadValue,
         [scriptblock]$WriteValue,
         [switch]$RollbackOnFailure,
-        [int]$VerificationDelayMs = 75
+        [scriptblock]$DelayAction
     )
     $items = @($Operations | Where-Object { $null -ne $_ })
     if ($items.Count -eq 0) {
@@ -1430,28 +1480,65 @@ function Invoke-VerifiedVcpTransaction {
             return (Set-VCPValue -Handle ([IntPtr]$Operation.Handle) -VCPCode ([byte]$Operation.Code) -Value $TargetValue -MonitorName ([string]$Operation.MonitorName))
         }
     }
+    if ($null -eq $DelayAction) {
+        $DelayAction = { param([int]$Milliseconds) if ($Milliseconds -gt 0) { Start-Sleep -Milliseconds $Milliseconds } }
+    }
 
     $results = New-Object System.Collections.Generic.List[object]
     $applied = New-Object System.Collections.Generic.List[object]
     $failureOutcome = ""
     foreach ($operation in $items) {
+        $verificationSettings = Get-DdcTransactionVerificationSettings -Operation $operation
+        $verifyPolicy = [string]$verificationSettings.Policy
         $snapshot = $null
         try { $snapshot = & $ReadValue $operation } catch { $snapshot = $null }
-        $snapshotReadable = $null -ne $snapshot -and [bool]$snapshot.Success
+        $snapshotReadable = $null -ne $snapshot -and [bool]$snapshot.Success -and -not (Test-VcpReadbackOutOfRange -Readback $snapshot -Operation $operation)
         $previousValue = if ($snapshotReadable) { [uint32]$snapshot.Current } else { [uint32]0 }
         $writeSucceeded = $false
         try { $writeSucceeded = [bool](& $WriteValue $operation ([uint32]$operation.Value)) } catch { $writeSucceeded = $false }
         $verification = "WriteFailed"
         $readbackValue = [uint32]0
+        $readbackMaximum = [uint32]0
+        $verificationReads = 0
         if ($writeSucceeded) {
-            if ($VerificationDelayMs -gt 0) { Start-Sleep -Milliseconds ([Math]::Min(1000, $VerificationDelayMs)) }
-            $readback = $null
-            try { $readback = & $ReadValue $operation } catch { $readback = $null }
-            if ($null -eq $readback -or -not [bool]$readback.Success) {
-                $verification = "Unverified"
+            if ($verifyPolicy -eq "Off") {
+                $verification = "Off"
             } else {
-                $readbackValue = [uint32]$readback.Current
-                $verification = if ($readbackValue -eq [uint32]$operation.Value) { "Verified" } else { "Mismatched" }
+                $null = & $DelayAction ([int]$verificationSettings.DelayMilliseconds)
+                $readback = $null
+                try { $readback = & $ReadValue $operation } catch { $readback = $null }
+                $verificationReads++
+                if ($null -eq $readback -or -not [bool]$readback.Success) {
+                    $verification = "Unverified"
+                } else {
+                    $readbackValue = [uint32]$readback.Current
+                    if ($readback.PSObject.Properties.Name -contains "Maximum") { $readbackMaximum = [uint32]$readback.Maximum }
+                    if (Test-VcpReadbackOutOfRange -Readback $readback -Operation $operation) {
+                        $verification = "UnreliableReadback"
+                    } elseif ($readbackValue -eq [uint32]$operation.Value) {
+                        $verification = "Verified"
+                    } elseif ($verifyPolicy -eq "Lenient") {
+                        $null = & $DelayAction ([int]$verificationSettings.LenientDelayMilliseconds)
+                        $secondReadback = $null
+                        try { $secondReadback = & $ReadValue $operation } catch { $secondReadback = $null }
+                        $verificationReads++
+                        if ($null -eq $secondReadback -or -not [bool]$secondReadback.Success) {
+                            $verification = "Unverified"
+                        } else {
+                            $readbackValue = [uint32]$secondReadback.Current
+                            if ($secondReadback.PSObject.Properties.Name -contains "Maximum") { $readbackMaximum = [uint32]$secondReadback.Maximum }
+                            if (Test-VcpReadbackOutOfRange -Readback $secondReadback -Operation $operation) {
+                                $verification = "UnreliableReadback"
+                            } elseif ($readbackValue -eq [uint32]$operation.Value) {
+                                $verification = "VerifiedAfterRetry"
+                            } else {
+                                $verification = "Mismatched"
+                            }
+                        }
+                    } else {
+                        $verification = "Mismatched"
+                    }
+                }
             }
         }
         $record = [PSCustomObject]@{
@@ -1459,8 +1546,12 @@ function Invoke-VerifiedVcpTransaction {
             PreviousReadable = [bool]$snapshotReadable
             PreviousValue = $previousValue
             WriteSuccess = [bool]$writeSucceeded
+            VerifyPolicy = $verifyPolicy
+            VerificationDelayMilliseconds = [int]$verificationSettings.DelayMilliseconds
             Verification = $verification
             ReadbackValue = $readbackValue
+            ReadbackMaximum = $readbackMaximum
+            VerificationReads = $verificationReads
             Rollback = "NotNeeded"
         }
         $results.Add($record)
@@ -1492,17 +1583,21 @@ function Invoke-VerifiedVcpTransaction {
                 $rollbackStatus = "Partial"
                 continue
             }
-            if ($VerificationDelayMs -gt 0) { Start-Sleep -Milliseconds ([Math]::Min(1000, $VerificationDelayMs)) }
-            $rollbackRead = $null
-            try { $rollbackRead = & $ReadValue $record.Operation } catch { $rollbackRead = $null }
-            if ($null -eq $rollbackRead -or -not [bool]$rollbackRead.Success) {
-                $record.Rollback = "Unverified"
-                $rollbackStatus = "Partial"
-            } elseif ([uint32]$rollbackRead.Current -ne [uint32]$record.PreviousValue) {
-                $record.Rollback = "Mismatched"
-                $rollbackStatus = "Partial"
+            if ([string]$record.VerifyPolicy -eq "Off") {
+                $record.Rollback = "RestoredUnverified"
             } else {
-                $record.Rollback = "Restored"
+                $null = & $DelayAction ([int]$record.VerificationDelayMilliseconds)
+                $rollbackRead = $null
+                try { $rollbackRead = & $ReadValue $record.Operation } catch { $rollbackRead = $null }
+                if ($null -eq $rollbackRead -or -not [bool]$rollbackRead.Success -or (Test-VcpReadbackOutOfRange -Readback $rollbackRead -Operation $record.Operation)) {
+                    $record.Rollback = "Unverified"
+                    $rollbackStatus = "Partial"
+                } elseif ([uint32]$rollbackRead.Current -ne [uint32]$record.PreviousValue) {
+                    $record.Rollback = "Mismatched"
+                    $rollbackStatus = "Partial"
+                } else {
+                    $record.Rollback = "Restored"
+                }
             }
         }
     }
@@ -1515,10 +1610,24 @@ function Invoke-VerifiedVcpTransaction {
             Rollback = $rollbackStatus
         }
     }
+    $unreliableCount = @($results | Where-Object Verification -eq "UnreliableReadback").Count
     $unverifiedCount = @($results | Where-Object Verification -eq "Unverified").Count
+    $verificationOffCount = @($results | Where-Object Verification -eq "Off").Count
+    $retriedCount = @($results | Where-Object Verification -eq "VerifiedAfterRetry").Count
+    $outcome = if ($unreliableCount -gt 0) {
+        "UnreliableReadback"
+    } elseif ($unverifiedCount -gt 0) {
+        "Unverified"
+    } elseif ($verificationOffCount -gt 0) {
+        "VerificationOff"
+    } elseif ($retriedCount -gt 0) {
+        "VerifiedAfterRetry"
+    } else {
+        "Verified"
+    }
     return [PSCustomObject]@{
         Success = $true
-        Outcome = if ($unverifiedCount -gt 0) { "Unverified" } else { "Verified" }
+        Outcome = $outcome
         Results = $results.ToArray()
         Rollback = "NotNeeded"
     }
@@ -1855,7 +1964,7 @@ function New-DdcCompatibilityReport {
             $timingProfile = Get-DdcTimingProfile -IdentityKey ([string]$target.IdentityKey)
             $timing = Get-DdcEffectiveTiming -TimingProfile $timingProfile
             $calibration = if ([string]::IsNullOrWhiteSpace([string]$timingProfile.CalibratedAt)) { "uncalibrated" } else { "calibrated $($timingProfile.CalibratedAt)" }
-            [void]$sb.AppendLine("- $($target.Label): mode=$($timing.Mode) multiplier=$($timing.SleepMultiplier) delay=$($timing.DelayMilliseconds)ms retries read=$($timing.ReadRetries) write=$($timing.WriteRetries) capability=$($timing.CapabilityRetries) ($calibration)")
+            [void]$sb.AppendLine("- $($target.Label): mode=$($timing.Mode) multiplier=$($timing.SleepMultiplier) delay=$($timing.DelayMilliseconds)ms retries read=$($timing.ReadRetries) write=$($timing.WriteRetries) capability=$($timing.CapabilityRetries) verify=$($timing.VerifyPolicy) after=$($timing.VerificationDelayMilliseconds)ms lenient-reread=$($timing.LenientVerificationDelayMilliseconds)ms ($calibration)")
             $nullSemantics = if ([string]::IsNullOrWhiteSpace([string]$timingProfile.NullSemanticsClassifiedAt)) {
                 "unclassified"
             } elseif ([bool]$timingProfile.NullMeansUnsupported) {
