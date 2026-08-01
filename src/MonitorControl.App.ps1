@@ -1177,6 +1177,8 @@ $script:UiStrings = @{
     "A11y.InputSource" = "Input source"
     "A11y.ProfileName" = "Profile name"
     "A11y.ProfilesList" = "Saved profiles"
+    "A11y.ProfileCaptureAll" = "Capture all connected displays"
+    "A11y.ProfileApplyPreview" = "Profile apply preview"
     "A11y.VcpCode" = "VCP code"
     "A11y.VcpPreset" = "VCP preset"
     "A11y.VcpSetValue" = "VCP set value"
@@ -2202,6 +2204,8 @@ function Initialize-LocalizationAndAccessibility {
     Set-AccessibleName -Control $inputSourceCombo -Key "A11y.InputSource"
     Set-AccessibleName -Control $profileNameBox -Key "A11y.ProfileName"
     Set-AccessibleName -Control $profilesList -Key "A11y.ProfilesList"
+    Set-AccessibleName -Control $profileCaptureAllCheckbox -Key "A11y.ProfileCaptureAll"
+    Set-AccessibleName -Control $profilePreviewText -Key "A11y.ProfileApplyPreview"
     Set-AccessibleName -Control $vcpCodeBox -Key "A11y.VcpCode"
     Set-AccessibleName -Control $vcpPresetCombo -Key "A11y.VcpPreset"
     Set-AccessibleName -Control $vcpSetValueBox -Key "A11y.VcpSetValue"
@@ -2272,7 +2276,7 @@ function Initialize-LocalizationAndAccessibility {
         $presetDay,$presetNight,$presetAutoMode,$presetAmbientMode,$presetReset,$dynamicContrastOff,$dynamicContrastOn,$pictureModeWeb,$pictureModeCinema,$pictureModeGame,
         $inputSourceCombo,$powerOffBtn,$powerStandbyBtn,$powerOnBtn,$volumeSlider,$muteCheckbox,$sharpnessSlider,$resetColorBtn,$factoryResetBtn,$allMonitorsStandbyBtn,
         $vcpCodeBox,$vcpPresetCombo,$vcpQueryBtn,$vcpSetValueBox,$vcpSetBtn,$vcpScanBtn,$vcpScanCapabilitiesOnlyCheckbox,$vcpResultBox,
-        $profileNameBox,$saveProfileBtn,$loadProfileBtn,$deleteProfileBtn,$profilesList,$exportProfilesBtn,$importProfilesBtn,$profileSyncFolderBtn,$profileLocalFolderBtn,
+        $profileNameBox,$profileCaptureAllCheckbox,$saveProfileBtn,$loadProfileBtn,$deleteProfileBtn,$profilesList,$exportProfilesBtn,$importProfilesBtn,$profileSyncFolderBtn,$profileLocalFolderBtn,
         $appProfileEnabledCheckbox,$appProfileExeBox,$appProfileCaptureBtn,$appProfileProfileCombo,$appProfileRiskyConsentCheckbox,$appProfileAddBtn,$appProfileRemoveBtn,$appProfileRulesList,
         $scheduleEnabledCheckbox,$scheduleTimeBox,$scheduleProfileCombo,$scheduleRiskyConsentCheckbox,$scheduleAddBtn,$scheduleRemoveBtn,$scheduleRulesList,
         $idleDimEnabledCheckbox,$idleDimMinutesBox,$idleDimBrightnessBox,$idleDimRestoreCheckbox,$idleDimSaveBtn,
@@ -3564,9 +3568,37 @@ function Set-ScaledVcpFromSlider {
     return Set-VCPValueWithSync -VCPCode $VCPCode -Value ([uint32]$percent) -Percent -UserInitiated
 }
 
+function Set-MonitorVcpObservation {
+    param($Result)
+    if ($null -eq $Result -or -not [bool]$Result.Success) { return }
+    $index = [int]$Result.MonitorIndex
+    if ($index -lt 0 -or $index -ge $script:PhysicalMonitors.Count) { return }
+    $monitor = $script:PhysicalMonitors[$index]
+    if ($null -eq $monitor) { return }
+    if ($null -eq $monitor.PSObject.Properties["VcpCurrentValues"] -or $null -eq $monitor.VcpCurrentValues) {
+        try { $monitor | Add-Member -NotePropertyName VcpCurrentValues -NotePropertyValue @{} -Force } catch { return }
+    }
+    $monitor.VcpCurrentValues[[int]$Result.Code] = [PSCustomObject]@{
+        Current = [uint32]$Result.Current
+        Maximum = [uint32]$Result.Maximum
+        ObservedAtUtc = [DateTime]::UtcNow
+    }
+    if ($null -ne $monitor.PSObject.Properties["VcpMaximums"] -and $null -ne $monitor.VcpMaximums) {
+        $monitor.VcpMaximums[[int]$Result.Code] = [int]$Result.Maximum
+    }
+}
+
+function Get-MonitorVcpObservation {
+    param($Monitor, [int]$Code)
+    if ($null -eq $Monitor -or $null -eq $Monitor.PSObject.Properties["VcpCurrentValues"] -or $null -eq $Monitor.VcpCurrentValues) { return $null }
+    if (-not $Monitor.VcpCurrentValues.ContainsKey($Code)) { return $null }
+    return $Monitor.VcpCurrentValues[$Code]
+}
+
 function Apply-MonitorSettingResult {
     param($Result)
     if (-not [bool]$Result.Success) { return }
+    Set-MonitorVcpObservation -Result $Result
     $code = [int]$Result.Code
     $current = [uint32]$Result.Current
     $maximum = [uint32]$Result.Maximum
@@ -3615,6 +3647,7 @@ function Update-MonitorSettingsWorkerOutput {
         $targetResults = @($settingResults | Where-Object { [string]$_.IdentityKey -eq [string]$target.IdentityKey })
         $successes = @($targetResults | Where-Object { [bool]$_.Success })
         $failures = @($targetResults | Where-Object { -not [bool]$_.Success })
+        foreach ($success in $successes) { Set-MonitorVcpObservation -Result $success }
         $timingProfile = Get-DdcTimingProfile -IdentityKey ([string]$target.IdentityKey)
         $otherCodesResponded = $successes.Count -gt 0 -or (Test-DdcMonitorResponded -IdentityKey ([string]$target.IdentityKey))
         foreach ($settingResult in $targetResults) {
@@ -4593,7 +4626,7 @@ if ($CliWorker) {
                         <TextBlock Grid.Row="2" Text="Profile name" FontSize="12" Foreground="{DynamicResource MutedTextBrush}"/>
                         <TextBox x:Name="ProfileNameBox" Grid.Row="4" Text="My Profile"/>
                         <Border Grid.Row="6" Background="{DynamicResource ControlBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="16">
-                            <StackPanel><TextBlock Text="Current display configuration" FontSize="13" FontWeight="SemiBold"/><TextBlock Text="Brightness, contrast, color, input, and supported panel settings will be captured for the selected display." TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,8,0,0"/></StackPanel>
+                            <StackPanel><TextBlock Text="Current display configuration" FontSize="13" FontWeight="SemiBold"/><TextBlock Text="Brightness, contrast, color, input, and supported panel settings will be captured for the selected display." TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,8,0,0"/><CheckBox x:Name="ProfileCaptureAllCheckbox" Content="Capture all connected displays" Margin="0,12,0,0" ToolTip="Capture one stable monitor record per connected display; unmatched displays are reported before apply."/><TextBox x:Name="ProfilePreviewText" Text="Select a saved profile to preview how it maps onto the connected displays." IsReadOnly="True" TextWrapping="Wrap" MinHeight="72" MaxHeight="132" VerticalScrollBarVisibility="Auto" FontSize="12" Background="{DynamicResource ControlBrush}" Margin="0,14,0,0" AutomationProperties.LiveSetting="Polite" AutomationProperties.HelpText="Preview of how the selected profile maps onto the connected displays before it is applied."/></StackPanel>
                         </Border>
                         <Button x:Name="SaveProfileBtn" Grid.Row="8" Content="Save" Style="{StaticResource AccBtn}" HorizontalAlignment="Right" MinWidth="130"/>
                     </Grid></Border>
@@ -4964,6 +4997,8 @@ $vcpSetValueSlider = $window.FindName("VCPSetValueSlider"); $vcpSetValueSliderTe
 $vcpSetBtn = $window.FindName("VCPSetBtn"); $vcpScanBtn = $window.FindName("VCPScanBtn")
 $vcpScanCapabilitiesOnlyCheckbox = $window.FindName("VCPScanCapabilitiesOnlyCheckbox")
 $profileNameBox = $window.FindName("ProfileNameBox"); $profilesList = $window.FindName("ProfilesList")
+$profileCaptureAllCheckbox = $window.FindName("ProfileCaptureAllCheckbox")
+$profilePreviewText = $window.FindName("ProfilePreviewText")
 $saveProfileBtn = $window.FindName("SaveProfileBtn"); $loadProfileBtn = $window.FindName("LoadProfileBtn"); $deleteProfileBtn = $window.FindName("DeleteProfileBtn")
 $restoreProfileBtn = $window.FindName("RestoreProfileBtn"); $purgeProfileTrashBtn = $window.FindName("PurgeProfileTrashBtn"); $profileTrashStatusText = $window.FindName("ProfileTrashStatusText")
 $exportProfilesBtn = $window.FindName("ExportProfilesBtn"); $importProfilesBtn = $window.FindName("ImportProfilesBtn")
@@ -5742,6 +5777,7 @@ function Update-ProfilesList {
     Get-UserProfileFiles | ForEach-Object { $profilesList.Items.Add($_.BaseName) | Out-Null }
     Update-AppProfileProfileCombo
     Update-ProfileTrashControls
+    Update-ProfilePreview
 }
 
 function Test-ProfileTrashRecordPath {
@@ -6037,37 +6073,100 @@ function Get-ProfilePercentValue {
     return [int]$value
 }
 
+# The selected index is -1 before the first enumeration and can outlive a topology change,
+# and PowerShell resolves a negative index to the end of the array instead of failing. Every
+# "is this the monitor whose sliders are on screen" test goes through here so a stale index
+# can never silently answer "yes" for the wrong panel.
+function Get-SelectedMonitorIdentityKey {
+    if ($null -eq $script:PhysicalMonitors) { return "" }
+    if ($script:CurrentMonitorIndex -lt 0 -or $script:CurrentMonitorIndex -ge $script:PhysicalMonitors.Count) { return "" }
+    return [string]$script:PhysicalMonitors[$script:CurrentMonitorIndex].IdentityKey
+}
+
+function Test-IsSelectedMonitor {
+    param($Monitor)
+    if ($null -eq $Monitor) { return $false }
+    $selectedKey = Get-SelectedMonitorIdentityKey
+    if ([string]::IsNullOrWhiteSpace($selectedKey)) { return $false }
+    return ($selectedKey -eq [string]$Monitor.IdentityKey)
+}
+
+function Get-ProfileCapturePercent {
+    param($Monitor, [int]$Code, [double]$SelectedRawValue, [double]$SelectedMaximum)
+    if (Test-IsSelectedMonitor -Monitor $Monitor) {
+        return [PSCustomObject]@{ Value = [int](ConvertTo-VcpPercent -RawValue $SelectedRawValue -Maximum $SelectedMaximum); Missing = $false }
+    }
+    $observation = Get-MonitorVcpObservation -Monitor $Monitor -Code $Code
+    if ($null -ne $observation) {
+        return [PSCustomObject]@{ Value = [int](ConvertTo-VcpPercent -RawValue ([double]$observation.Current) -Maximum ([double]$observation.Maximum)); Missing = $false }
+    }
+    return [PSCustomObject]@{ Value = [int](ConvertTo-VcpPercent -RawValue $SelectedRawValue -Maximum $SelectedMaximum); Missing = $true }
+}
+
 function New-ProfileSettingsObject {
     param($Monitor)
+    $warnings = New-Object System.Collections.Generic.List[string]
+    $captureFields = @(
+        [PSCustomObject]@{ Name = "Brightness"; Code = [int][MonitorAPI]::VCP_BRIGHTNESS; Raw = [double]$brightnessSlider.Value; Maximum = [double](Get-VcpMaximumForMonitor -Monitor $Monitor -Code ([int][MonitorAPI]::VCP_BRIGHTNESS)) },
+        [PSCustomObject]@{ Name = "Contrast"; Code = [int][MonitorAPI]::VCP_CONTRAST; Raw = [double]$contrastSlider.Value; Maximum = [double](Get-VcpMaximumForMonitor -Monitor $Monitor -Code ([int][MonitorAPI]::VCP_CONTRAST)) },
+        [PSCustomObject]@{ Name = "Red"; Code = [int][MonitorAPI]::VCP_RED_GAIN; Raw = [double]$redSlider.Value; Maximum = [double](Get-VcpMaximumForMonitor -Monitor $Monitor -Code ([int][MonitorAPI]::VCP_RED_GAIN)) },
+        [PSCustomObject]@{ Name = "Green"; Code = [int][MonitorAPI]::VCP_GREEN_GAIN; Raw = [double]$greenSlider.Value; Maximum = [double](Get-VcpMaximumForMonitor -Monitor $Monitor -Code ([int][MonitorAPI]::VCP_GREEN_GAIN)) },
+        [PSCustomObject]@{ Name = "Blue"; Code = [int][MonitorAPI]::VCP_BLUE_GAIN; Raw = [double]$blueSlider.Value; Maximum = [double](Get-VcpMaximumForMonitor -Monitor $Monitor -Code ([int][MonitorAPI]::VCP_BLUE_GAIN)) }
+    )
+    $values = @{}
+    foreach ($field in $captureFields) {
+        $captured = Get-ProfileCapturePercent -Monitor $Monitor -Code $field.Code -SelectedRawValue $field.Raw -SelectedMaximum $field.Maximum
+        $values[$field.Name] = [int]$captured.Value
+        if ($captured.Missing -and $null -ne $Monitor) {
+            $warnings.Add("$($field.Name) was not read for $([string]$Monitor.Name); selected-display value used")
+        }
+    }
     return [PSCustomObject]@{
         IdentityKey = if ($Monitor) { [string]$Monitor.IdentityKey } else { "" }
         MonitorLabel = if ($Monitor) { Get-MonitorDisplayLabel -Monitor $Monitor } else { "" }
         MonitorName = if ($Monitor) { [string]$Monitor.Name } else { "" }
         DevicePath = if ($Monitor) { [string]$Monitor.DevicePath } else { "" }
-        Brightness = [int](ConvertTo-VcpPercent -RawValue ([double]$brightnessSlider.Value) -Maximum (Get-VcpMaximumForMonitor -Monitor $Monitor -Code ([int][MonitorAPI]::VCP_BRIGHTNESS)))
-        Contrast = [int](ConvertTo-VcpPercent -RawValue ([double]$contrastSlider.Value) -Maximum (Get-VcpMaximumForMonitor -Monitor $Monitor -Code ([int][MonitorAPI]::VCP_CONTRAST)))
-        Red = [int](ConvertTo-VcpPercent -RawValue ([double]$redSlider.Value) -Maximum (Get-VcpMaximumForMonitor -Monitor $Monitor -Code ([int][MonitorAPI]::VCP_RED_GAIN)))
-        Green = [int](ConvertTo-VcpPercent -RawValue ([double]$greenSlider.Value) -Maximum (Get-VcpMaximumForMonitor -Monitor $Monitor -Code ([int][MonitorAPI]::VCP_GREEN_GAIN)))
-        Blue = [int](ConvertTo-VcpPercent -RawValue ([double]$blueSlider.Value) -Maximum (Get-VcpMaximumForMonitor -Monitor $Monitor -Code ([int][MonitorAPI]::VCP_BLUE_GAIN)))
+        Brightness = [int]$values.Brightness
+        Contrast = [int]$values.Contrast
+        Red = [int]$values.Red
+        Green = [int]$values.Green
+        Blue = [int]$values.Blue
         Gamma = [int]$gammaSlider.Value
         GammaRed = [int]$gammaRedSlider.Value
         GammaGreen = [int]$gammaGreenSlider.Value
         GammaBlue = [int]$gammaBlueSlider.Value
+        CaptureWarnings = @($warnings)
     }
 }
 
 function New-ProfileObject {
     param([string]$Name)
-    $monitor = if ($script:PhysicalMonitors.Count -gt 0 -and $script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) { $script:PhysicalMonitors[$script:CurrentMonitorIndex] } else { $null }
-    $setting = New-ProfileSettingsObject -Monitor $monitor
+    $selectedKey = Get-SelectedMonitorIdentityKey
+    $selectedMonitor = if ([string]::IsNullOrWhiteSpace($selectedKey)) { $null } else { $script:PhysicalMonitors[$script:CurrentMonitorIndex] }
+    $captureAll = $null -ne $profileCaptureAllCheckbox -and [bool]$profileCaptureAllCheckbox.IsChecked
+    $monitors = if ($captureAll) {
+        @($script:PhysicalMonitors | Where-Object { $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.IdentityKey) })
+    } elseif ($null -ne $selectedMonitor) {
+        @($selectedMonitor)
+    } else { @($null) }
+    if ($monitors.Count -eq 0) { $monitors = @($null) }
+    $settings = @($monitors | ForEach-Object { New-ProfileSettingsObject -Monitor $_ })
+    # The flat top-level fields stay a mirror of the selected display so an older reader that
+    # ignores MonitorSettings still restores the panel the user was actually looking at.
+    $setting = @($settings | Where-Object { -not [string]::IsNullOrWhiteSpace($selectedKey) -and [string]$_.IdentityKey -eq $selectedKey } | Select-Object -First 1)
+    if ($setting.Count -eq 0) { $setting = @($settings | Select-Object -First 1) }
+    $setting = if ($setting.Count -gt 0) { $setting[0] } else { New-ProfileSettingsObject -Monitor $null }
+    $captureWarnings = @($settings | ForEach-Object { $_.CaptureWarnings } | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
     return [PSCustomObject]@{
         SchemaVersion = $script:ProfileSchemaVersion
         Name = $Name
+        CaptureScope = if ($captureAll) { "AllMonitors" } else { "SelectedMonitor" }
+        CaptureWarnings = @($captureWarnings)
         MonitorIdentityKey = [string]$setting.IdentityKey
         MonitorLabel = [string]$setting.MonitorLabel
         MonitorName = [string]$setting.MonitorName
         MonitorDevicePath = [string]$setting.DevicePath
-        MonitorSettings = @($setting)
+        MonitorSettings = @($settings)
         Brightness = [int]$setting.Brightness
         Contrast = [int]$setting.Contrast
         Red = [int]$setting.Red
@@ -6134,6 +6233,7 @@ function ConvertTo-CurrentProfileSchema {
         GammaRed = Get-ProfileIntValue -Object $Profile -Property "GammaRed" -Default 100
         GammaGreen = Get-ProfileIntValue -Object $Profile -Property "GammaGreen" -Default 100
         GammaBlue = Get-ProfileIntValue -Object $Profile -Property "GammaBlue" -Default 100
+        CaptureWarnings = @((Get-ProfilePropertyValue -Object $Profile -Property "CaptureWarnings" -Default @()))
     }
     $settings = @()
     foreach ($setting in @((Get-ProfilePropertyValue -Object $Profile -Property "MonitorSettings" -Default @()))) {
@@ -6155,12 +6255,15 @@ function ConvertTo-CurrentProfileSchema {
             GammaRed = Get-ProfileIntValue -Object $setting -Property "GammaRed" -Default $topSetting.GammaRed
             GammaGreen = Get-ProfileIntValue -Object $setting -Property "GammaGreen" -Default $topSetting.GammaGreen
             GammaBlue = Get-ProfileIntValue -Object $setting -Property "GammaBlue" -Default $topSetting.GammaBlue
+            CaptureWarnings = @((Get-ProfilePropertyValue -Object $setting -Property "CaptureWarnings" -Default @()))
         }
     }
     if ($settings.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace([string]$topSetting.IdentityKey)) { $settings += $topSetting }
     return [PSCustomObject]@{
         SchemaVersion = $script:ProfileSchemaVersion
         Name = $name
+        CaptureScope = if (Get-ProfilePropertyValue -Object $Profile -Property "CaptureScope" -Default "") { [string]$Profile.CaptureScope } else { if (@($settings).Count -gt 1) { "AllMonitors" } else { "SelectedMonitor" } }
+        CaptureWarnings = @((Get-ProfilePropertyValue -Object $Profile -Property "CaptureWarnings" -Default @()))
         MonitorIdentityKey = [string]$topSetting.IdentityKey
         MonitorLabel = [string]$topSetting.MonitorLabel
         MonitorName = [string]$topSetting.MonitorName
@@ -7573,26 +7676,42 @@ function Update-AppProfileControls {
     }
 }
 
+function Get-ProfileVcpValueSet {
+    param($ProfileData, $Setting)
+    return [PSCustomObject]@{
+        Brightness = Get-ProfilePercentValue -Object $Setting -Property "Brightness" -Default (Get-ProfilePercentValue -Object $ProfileData -Property "Brightness" -Default 50)
+        Contrast = Get-ProfilePercentValue -Object $Setting -Property "Contrast" -Default (Get-ProfilePercentValue -Object $ProfileData -Property "Contrast" -Default 50)
+        Red = Get-ProfilePercentValue -Object $Setting -Property "Red" -Default (Get-ProfilePercentValue -Object $ProfileData -Property "Red" -Default 50)
+        Green = Get-ProfilePercentValue -Object $Setting -Property "Green" -Default (Get-ProfilePercentValue -Object $ProfileData -Property "Green" -Default 50)
+        Blue = Get-ProfilePercentValue -Object $Setting -Property "Blue" -Default (Get-ProfilePercentValue -Object $ProfileData -Property "Blue" -Default 50)
+        Gamma = Get-ProfileIntValue -Object $Setting -Property "Gamma" -Default (Get-ProfileIntValue -Object $ProfileData -Property "Gamma" -Default 100)
+        GammaRed = Get-ProfileIntValue -Object $Setting -Property "GammaRed" -Default (Get-ProfileIntValue -Object $ProfileData -Property "GammaRed" -Default 100)
+        GammaGreen = Get-ProfileIntValue -Object $Setting -Property "GammaGreen" -Default (Get-ProfileIntValue -Object $ProfileData -Property "GammaGreen" -Default 100)
+        GammaBlue = Get-ProfileIntValue -Object $Setting -Property "GammaBlue" -Default (Get-ProfileIntValue -Object $ProfileData -Property "GammaBlue" -Default 100)
+    }
+}
+
+# A captured record belongs to a monitor when its identity key, one of that monitor's identity
+# aliases, or its device path matches. The alias arm is what keeps profiles written under the
+# legacy EDID key targeting the right panel after the WinRT identity migration.
+function Find-ProfileSettingForMonitor {
+    param($ProfileSettings, $Monitor)
+    if ($null -eq $Monitor) { return $null }
+    $monitorKey = [string]$Monitor.IdentityKey
+    $aliases = @()
+    if ($Monitor.PSObject.Properties.Name -contains "IdentityAliases") { $aliases = @($Monitor.IdentityAliases | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }) }
+    $devicePath = [string]$Monitor.DevicePath
+    $match = @($ProfileSettings | Where-Object {
+        $settingKey = [string]$_.IdentityKey
+        (-not [string]::IsNullOrWhiteSpace($settingKey) -and ($settingKey -eq $monitorKey -or $aliases -contains $settingKey)) -or
+        (-not [string]::IsNullOrWhiteSpace([string]$_.DevicePath) -and [string]$_.DevicePath -eq $devicePath)
+    } | Select-Object -First 1)
+    if ($match.Count -gt 0) { return $match[0] }
+    return $null
+}
+
 function Get-ProfileVcpWritePlan {
     param($ProfileData, $ActiveProfile)
-    $values = [PSCustomObject]@{
-        Brightness = Get-ProfileIntValue -Object $ActiveProfile -Property "Brightness" -Default $ProfileData.Brightness
-        Contrast = Get-ProfileIntValue -Object $ActiveProfile -Property "Contrast" -Default $ProfileData.Contrast
-        Red = Get-ProfileIntValue -Object $ActiveProfile -Property "Red" -Default $ProfileData.Red
-        Green = Get-ProfileIntValue -Object $ActiveProfile -Property "Green" -Default $ProfileData.Green
-        Blue = Get-ProfileIntValue -Object $ActiveProfile -Property "Blue" -Default $ProfileData.Blue
-        Gamma = Get-ProfileIntValue -Object $ActiveProfile -Property "Gamma" -Default $ProfileData.Gamma
-        GammaRed = Get-ProfileIntValue -Object $ActiveProfile -Property "GammaRed" -Default $ProfileData.GammaRed
-        GammaGreen = Get-ProfileIntValue -Object $ActiveProfile -Property "GammaGreen" -Default $ProfileData.GammaGreen
-        GammaBlue = Get-ProfileIntValue -Object $ActiveProfile -Property "GammaBlue" -Default $ProfileData.GammaBlue
-    }
-    $codeValues = @(
-        [PSCustomObject]@{ Code = [int][MonitorAPI]::VCP_BRIGHTNESS; Value = [uint32]$values.Brightness },
-        [PSCustomObject]@{ Code = [int][MonitorAPI]::VCP_CONTRAST; Value = [uint32]$values.Contrast },
-        [PSCustomObject]@{ Code = [int][MonitorAPI]::VCP_RED_GAIN; Value = [uint32]$values.Red },
-        [PSCustomObject]@{ Code = [int][MonitorAPI]::VCP_GREEN_GAIN; Value = [uint32]$values.Green },
-        [PSCustomObject]@{ Code = [int][MonitorAPI]::VCP_BLUE_GAIN; Value = [uint32]$values.Blue }
-    )
     $targets = if ($script:ApplyToAll) {
         @($script:PhysicalMonitors)
     } elseif ($script:CurrentMonitorIndex -ge 0 -and $script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) {
@@ -7600,37 +7719,222 @@ function Get-ProfileVcpWritePlan {
     } else {
         @()
     }
+    $profileSettings = @((Get-ProfilePropertyValue -Object $ProfileData -Property "MonitorSettings" -Default @()) | Where-Object { $_ })
+    $hasPerMonitorSettings = $profileSettings.Count -gt 1 -or [string](Get-ProfilePropertyValue -Object $ProfileData -Property "CaptureScope" -Default "") -eq "AllMonitors"
     $operations = @()
+    $targetPlans = @()
+    $validationErrors = New-Object System.Collections.Generic.List[string]
+    # The slider refresh after apply describes the selected display only, so the plan's headline
+    # value set must be that display's - not whichever target happened to be enumerated first.
+    $selectedKey = Get-SelectedMonitorIdentityKey
+    $values = Get-ProfileVcpValueSet -ProfileData $ProfileData -Setting $ActiveProfile
     $skippedUnsupported = 0
     $wmiIncluded = $false
     foreach ($monitor in $targets) {
+        $setting = $null
+        if ($hasPerMonitorSettings) {
+            $setting = Find-ProfileSettingForMonitor -ProfileSettings $profileSettings -Monitor $monitor
+            if ($null -eq $setting) {
+                $validationErrors.Add("No captured profile setting matches $([string]$monitor.Name) ($([string]$monitor.IdentityKey))")
+                $targetPlans += [PSCustomObject]@{ Monitor = $monitor; MonitorName = [string]$monitor.Name; IdentityKey = [string]$monitor.IdentityKey; Setting = $null; Values = $null; Operations = @(); MissingSetting = $true; UnsupportedCodes = @() }
+                continue
+            }
+        } else { $setting = $ActiveProfile }
+        $targetValues = Get-ProfileVcpValueSet -ProfileData $ProfileData -Setting $setting
+        if (-not [string]::IsNullOrWhiteSpace($selectedKey) -and [string]$monitor.IdentityKey -eq $selectedKey) { $values = $targetValues }
+        $targetCodeValues = @(
+            [PSCustomObject]@{ Code = [int][MonitorAPI]::VCP_BRIGHTNESS; Value = [uint32]$targetValues.Brightness },
+            [PSCustomObject]@{ Code = [int][MonitorAPI]::VCP_CONTRAST; Value = [uint32]$targetValues.Contrast },
+            [PSCustomObject]@{ Code = [int][MonitorAPI]::VCP_RED_GAIN; Value = [uint32]$targetValues.Red },
+            [PSCustomObject]@{ Code = [int][MonitorAPI]::VCP_GREEN_GAIN; Value = [uint32]$targetValues.Green },
+            [PSCustomObject]@{ Code = [int][MonitorAPI]::VCP_BLUE_GAIN; Value = [uint32]$targetValues.Blue }
+        )
+        $targetOperations = @()
+        $targetUnsupported = New-Object System.Collections.Generic.List[int]
         if ($monitor.Handle -eq [IntPtr]::Zero) {
             if (-not $wmiIncluded -and $script:WmiBrightnessAvailable) {
-                $operations += Get-VcpWriteOperation -Monitor $monitor -Code ([MonitorAPI]::VCP_BRIGHTNESS) -Value ([uint32][Math]::Max(0, [Math]::Min(100, [int]$values.Brightness))) -Backend "WMI"
+                $targetOperations += Get-VcpWriteOperation -Monitor $monitor -Code ([MonitorAPI]::VCP_BRIGHTNESS) -Value ([uint32][Math]::Max(0, [Math]::Min(100, [int]$targetValues.Brightness))) -Backend "WMI"
                 $wmiIncluded = $true
             }
-            continue
-        }
-        foreach ($codeValue in $codeValues) {
+        } else { foreach ($codeValue in $targetCodeValues) {
             $rawValue = [uint32](ConvertTo-VcpRawValue -Percent ([double]$codeValue.Value) -Maximum (Get-VcpMaximumForMonitor -Monitor $monitor -Code ([int]$codeValue.Code)))
             if (Test-MonitorSupportsVcpValue -Monitor $monitor -Code ([int]$codeValue.Code) -Value ([int]$rawValue)) {
-                $operations += Get-VcpWriteOperation -Monitor $monitor -Code ([int]$codeValue.Code) -Value $rawValue
+                $targetOperations += Get-VcpWriteOperation -Monitor $monitor -Code ([int]$codeValue.Code) -Value $rawValue
             } else {
-                $skippedUnsupported++
+                $targetUnsupported.Add([int]$codeValue.Code)
             }
-        }
+        } }
+        $operations += @($targetOperations)
+        $skippedUnsupported += $targetUnsupported.Count
+        $targetPlans += [PSCustomObject]@{ Monitor = $monitor; MonitorName = [string]$monitor.Name; IdentityKey = [string]$monitor.IdentityKey; Setting = $setting; Values = $targetValues; Operations = @($targetOperations); MissingSetting = $false; UnsupportedCodes = @($targetUnsupported) }
     }
     return [PSCustomObject]@{
         Values = $values
-        Operations = @($operations)
+        Operations = @(Get-ProfileOrderedVcpOperations -Operations $operations)
         SkippedUnsupported = $skippedUnsupported
+        TargetPlans = @($targetPlans)
+        ValidationErrors = @($validationErrors)
+        IsPerMonitor = $hasPerMonitorSettings
     }
+}
+
+# A multi-monitor apply is one transaction, so the first operation that fails ends it and the
+# rest never run. Put every write that needs no risky-write consent first: if the transaction
+# dies it dies on a value nobody can be locked out by, and the reverse-order rollback then has
+# only benign writes to undo. Ordering is stable inside each group so a monitor's own codes
+# still go out in capture order.
+function Get-ProfileOrderedVcpOperations {
+    param($Operations)
+    $items = @($Operations | Where-Object { $null -ne $_ })
+    if ($items.Count -le 1) { return $items }
+    $safe = @($items | Where-Object { -not (Test-VcpWriteRequiresSafetyConsent -Code ([int]$_.Code)) })
+    $risky = @($items | Where-Object { Test-VcpWriteRequiresSafetyConsent -Code ([int]$_.Code) })
+    return @($safe) + @($risky)
+}
+
+# Joins the transaction's per-operation records back onto the planned targets so a partial
+# apply names which display got what, instead of collapsing to one pass/fail for the set.
+function Get-ProfileApplyTargetReport {
+    param($Plan, $Transaction)
+    $records = @()
+    if ($null -ne $Transaction -and $null -ne $Transaction.Results) { $records = @($Transaction.Results | Where-Object { $_ -and $_.Operation }) }
+    $report = @()
+    foreach ($targetPlan in @($Plan.TargetPlans)) {
+        $identityKey = [string]$targetPlan.IdentityKey
+        $targetRecords = @($records | Where-Object { [string]$_.Operation.IdentityKey -eq $identityKey })
+        $written = @($targetRecords | Where-Object { [bool]$_.WriteSuccess }).Count
+        $rolledBack = @($targetRecords | Where-Object { [string]$_.Rollback -ne "NotNeeded" }).Count
+        $failed = @($targetRecords | Where-Object { -not [bool]$_.WriteSuccess }).Count
+        $planned = @($targetPlan.Operations).Count
+        $outcome = if ([bool]$targetPlan.MissingSetting) {
+            "NoCapturedSetting"
+        } elseif ($planned -eq 0) {
+            "NoSupportedWrites"
+        } elseif ($targetRecords.Count -eq 0) {
+            "NotAttempted"
+        } elseif ($failed -gt 0) {
+            "Failed"
+        } elseif ($rolledBack -gt 0) {
+            "RolledBack"
+        } elseif ($written -lt $planned) {
+            "Partial"
+        } else {
+            "Applied"
+        }
+        $report += [PSCustomObject]@{
+            IdentityKey = $identityKey
+            MonitorName = [string]$targetPlan.MonitorName
+            Planned = $planned
+            Written = $written
+            RolledBack = $rolledBack
+            SkippedUnsupported = @($targetPlan.UnsupportedCodes).Count
+            Outcome = $outcome
+        }
+    }
+    return @($report)
+}
+
+# Read-only preview: which captured records land on a connected display, which connected
+# displays the profile says nothing about, which records describe a display that is gone, and
+# which captured values the matched panel will refuse. Performs no DDC I/O of its own - it
+# reads the capability state enumeration already cached.
+function Get-ProfileCoverageReport {
+    param($ProfileData)
+    $profileSettings = @((Get-ProfilePropertyValue -Object $ProfileData -Property "MonitorSettings" -Default @()) | Where-Object { $_ })
+    $captureScope = [string](Get-ProfilePropertyValue -Object $ProfileData -Property "CaptureScope" -Default "")
+    if ([string]::IsNullOrWhiteSpace($captureScope)) { $captureScope = if ($profileSettings.Count -gt 1) { "AllMonitors" } else { "SelectedMonitor" } }
+    $matched = @()
+    $unmatchedMonitors = @()
+    $matchedSettingKeys = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($monitor in @($script:PhysicalMonitors | Where-Object { $_ })) {
+        $setting = Find-ProfileSettingForMonitor -ProfileSettings $profileSettings -Monitor $monitor
+        if ($null -eq $setting) {
+            $unmatchedMonitors += [string]$monitor.Name
+            continue
+        }
+        $null = $matchedSettingKeys.Add([string]$setting.IdentityKey)
+        $values = Get-ProfileVcpValueSet -ProfileData $ProfileData -Setting $setting
+        $unsupported = @()
+        if ($monitor.Handle -ne [IntPtr]::Zero) {
+            $codeValues = @(
+                [PSCustomObject]@{ Name = "brightness"; Code = [int][MonitorAPI]::VCP_BRIGHTNESS; Percent = [int]$values.Brightness },
+                [PSCustomObject]@{ Name = "contrast"; Code = [int][MonitorAPI]::VCP_CONTRAST; Percent = [int]$values.Contrast },
+                [PSCustomObject]@{ Name = "red"; Code = [int][MonitorAPI]::VCP_RED_GAIN; Percent = [int]$values.Red },
+                [PSCustomObject]@{ Name = "green"; Code = [int][MonitorAPI]::VCP_GREEN_GAIN; Percent = [int]$values.Green },
+                [PSCustomObject]@{ Name = "blue"; Code = [int][MonitorAPI]::VCP_BLUE_GAIN; Percent = [int]$values.Blue }
+            )
+            foreach ($codeValue in $codeValues) {
+                $rawValue = [int](ConvertTo-VcpRawValue -Percent ([double]$codeValue.Percent) -Maximum (Get-VcpMaximumForMonitor -Monitor $monitor -Code ([int]$codeValue.Code)))
+                if (-not (Test-MonitorSupportsVcpValue -Monitor $monitor -Code ([int]$codeValue.Code) -Value $rawValue)) { $unsupported += [string]$codeValue.Name }
+            }
+        }
+        $matched += [PSCustomObject]@{ MonitorName = [string]$monitor.Name; IdentityKey = [string]$monitor.IdentityKey; UnsupportedNames = @($unsupported) }
+    }
+    $missingSettings = @($profileSettings |
+        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.IdentityKey) -and -not $matchedSettingKeys.Contains([string]$_.IdentityKey) } |
+        ForEach-Object { if ([string]::IsNullOrWhiteSpace([string]$_.MonitorName)) { [string]$_.IdentityKey } else { [string]$_.MonitorName } })
+    return [PSCustomObject]@{
+        CaptureScope = $captureScope
+        RecordCount = $profileSettings.Count
+        Matched = @($matched)
+        UnmatchedMonitors = @($unmatchedMonitors)
+        MissingSettings = @($missingSettings)
+        CaptureWarnings = @((Get-ProfilePropertyValue -Object $ProfileData -Property "CaptureWarnings" -Default @()))
+    }
+}
+
+function Format-ProfileCoverageReport {
+    param($Coverage)
+    if ($null -eq $Coverage) { return "Select a saved profile to preview how it maps onto the connected displays." }
+    $scopeText = if ([string]$Coverage.CaptureScope -eq "AllMonitors") { "all displays" } else { "one display" }
+    $lines = @("Captured for $scopeText ($([int]$Coverage.RecordCount) record(s)); $(@($Coverage.Matched).Count) of $(@($script:PhysicalMonitors).Count) connected display(s) matched.")
+    foreach ($entry in @($Coverage.Matched | Where-Object { @($_.UnsupportedNames).Count -gt 0 })) {
+        $lines += "$([string]$entry.MonitorName) will skip unsupported: $(@($entry.UnsupportedNames) -join ', ')."
+    }
+    if (@($Coverage.UnmatchedMonitors).Count -gt 0) {
+        $lines += "No captured setting for: $(@($Coverage.UnmatchedMonitors) -join ', '). Apply to all is refused until these are captured."
+    }
+    if (@($Coverage.MissingSettings).Count -gt 0) {
+        $lines += "Captured display not connected: $(@($Coverage.MissingSettings) -join ', ')."
+    }
+    if (@($Coverage.CaptureWarnings).Count -gt 0) {
+        $lines += "Capture warnings: $(@($Coverage.CaptureWarnings) -join '; ')."
+    }
+    return ($lines -join " ")
+}
+
+function Update-ProfilePreview {
+    if ($null -eq $profilePreviewText) { return }
+    $name = if ($null -eq $profilesList -or $null -eq $profilesList.SelectedItem) { "" } else { [string]$profilesList.SelectedItem }
+    if ([string]::IsNullOrWhiteSpace($name)) {
+        $profilePreviewText.Text = Format-ProfileCoverageReport -Coverage $null
+        return
+    }
+    $profileData = Read-ProfileObject -Name $name
+    if ($null -eq $profileData) {
+        $profilePreviewText.Text = "Profile '$name' could not be read."
+        return
+    }
+    $profilePreviewText.Text = Format-ProfileCoverageReport -Coverage (Get-ProfileCoverageReport -ProfileData $profileData)
+}
+
+function Format-ProfileApplyTargetReport {
+    param($Report)
+    $lines = @(@($Report) | ForEach-Object {
+        $detail = "$([string]$_.MonitorName): $([string]$_.Outcome) $([int]$_.Written)/$([int]$_.Planned)"
+        if ([int]$_.SkippedUnsupported -gt 0) { $detail += " (+$([int]$_.SkippedUnsupported) unsupported)" }
+        if ([int]$_.RolledBack -gt 0) { $detail += " (rolled back $([int]$_.RolledBack))" }
+        $detail
+    })
+    return ($lines -join "; ")
 }
 
 function Complete-ProfileApply {
     param($Transaction, $Plan, [string]$Name, [string]$Reason, [int]$TargetIndex, [bool]$TargetMissing)
+    $targetReport = Get-ProfileApplyTargetReport -Plan $Plan -Transaction $Transaction
+    $perTargetDetail = if (@($Plan.TargetPlans).Count -gt 1) { " [$(Format-ProfileApplyTargetReport -Report $targetReport)]" } else { "" }
     if (-not [bool]$Transaction.Success) {
-        Update-Status "Profile '$Name' failed ($($Transaction.Outcome)); rollback: $($Transaction.Rollback)"
+        Update-Status "Profile '$Name' failed ($($Transaction.Outcome)); rollback: $($Transaction.Rollback)$perTargetDetail" -Severity Error -Key "Status.ProfileApplyFailed"
         return $false
     }
     try {
@@ -7667,6 +7971,7 @@ function Complete-ProfileApply {
         default { " (verified)" }
     }
     $capabilitySuffix = if ($Plan.SkippedUnsupported -gt 0) { "; $($Plan.SkippedUnsupported) unsupported values skipped" } else { "" }
+    $capabilitySuffix += $perTargetDetail
     if ($TargetIndex -ge 0 -and $TargetIndex -lt $script:PhysicalMonitors.Count) {
         Update-Status "$Reason '$Name' -> $(Get-MonitorDisplayLabel -Monitor $script:PhysicalMonitors[$TargetIndex])$verificationSuffix$capabilitySuffix"
     } elseif ($TargetMissing) {
@@ -7712,6 +8017,13 @@ function Apply-ProfileByName {
         }
     }
     $plan = Get-ProfileVcpWritePlan -ProfileData $p -ActiveProfile $active
+    if (@($plan.ValidationErrors).Count -gt 0) {
+        Update-Status "Profile '$Name' is missing captured settings: $(@($plan.ValidationErrors) -join '; ')" -Severity Error -Key "Status.ProfileMissingMonitorSettings"
+        return $false
+    }
+    if ([int]$plan.SkippedUnsupported -gt 0) {
+        Update-Status "Profile '$Name' will skip $($plan.SkippedUnsupported) unsupported values" -Severity Warning -Key "Status.ProfileUnsupportedValues"
+    }
     $riskyOperations = @($plan.Operations | Where-Object { Test-VcpWriteRequiresSafetyConsent -Code ([int]$_.Code) })
     if ($riskyOperations.Count -gt 0) {
         if (-not [string]::IsNullOrWhiteSpace($AutomationRuleId) -and -not $AllowRiskyAutomation) {
@@ -8781,8 +9093,14 @@ $vcpScanBtn.Add_Click({
 $saveProfileBtn.Add_Click({
     $name = $profileNameBox.Text.Trim(); if ([string]::IsNullOrEmpty($name)) { return }
     $profileObject = New-ProfileObject -Name $name
-    if (Save-ProfileObject -Profile $profileObject) { Update-ProfilesList; Update-Status "Saved '$name'" }
+    if (Save-ProfileObject -Profile $profileObject) {
+        Update-ProfilesList
+        if (@($profileObject.CaptureWarnings).Count -gt 0) {
+            Update-Status "Saved '$name' with capture warnings: $(@($profileObject.CaptureWarnings) -join '; ')" -Severity Warning -Key "Status.ProfileCaptureWarnings"
+        } else { Update-Status "Saved '$name'" }
+    }
 })
+$profilesList.Add_SelectionChanged({ Update-ProfilePreview })
 $loadProfileBtn.Add_Click({
     if ($profilesList.SelectedItem -eq $null) { return }
     Apply-ProfileByName -Name ([string]$profilesList.SelectedItem) | Out-Null

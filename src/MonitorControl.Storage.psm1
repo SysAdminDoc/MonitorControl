@@ -230,7 +230,10 @@ function New-SettingsDocumentRegistry {
 
 function Initialize-MonitorControlSettingsDocumentRegistry {
     return (New-SettingsDocumentRegistry -Definitions @(
-        [PSCustomObject]@{ Name = "Profile"; FileName = "<profile>.json"; CurrentVersion = 4; LegacyVersion = 1; MigrationHandler = "ConvertTo-CurrentProfileSchema" }
+        # v5 added CaptureScope plus a per-monitor MonitorSettings record set that apply honours.
+        # A v4 reader ignores those records and writes the top-level values to every target, so a
+        # multi-monitor profile must not be readable by one - hence a version bump, not a field add.
+        [PSCustomObject]@{ Name = "Profile"; FileName = "<profile>.json"; CurrentVersion = 5; LegacyVersion = 1; MigrationHandler = "ConvertTo-CurrentProfileSchema" }
         [PSCustomObject]@{ Name = "ProfileBundle"; FileName = "<profile-bundle>.zip/manifest.json"; CurrentVersion = 2; LegacyVersion = 1; MigrationHandler = "Test-ProfileBundleArchive" }
         [PSCustomObject]@{ Name = "ProfileStorage"; FileName = "profile-storage.json"; CurrentVersion = 2; LegacyVersion = 1; MigrationHandler = "Resolve-ProfileStorageRootState" }
         [PSCustomObject]@{ Name = "MonitorIdentity"; FileName = "monitor-identities.json"; CurrentVersion = 1; LegacyVersion = 0; MigrationHandler = "Load-MonitorIdentitySettings" }

@@ -447,11 +447,35 @@ Profiles are saved as JSON files in `%APPDATA%\MonitorControlPro\`
 
 Deleting a profile also removes rules that depend on it, but keeps the profile bytes and removed-rule snapshot in local Trash. Use **Profiles > Restore Last** to undo the newest deletion, including after restarting the app. **Empty Trash** is the separately confirmed, permanent purge action. Trash retains at most 20 records within a 10 MiB total budget and remains local even when the active profile library uses a sync folder.
 
+### Multi-Monitor Profiles
+
+Tick **Capture all connected displays** before saving to store one record per connected display
+instead of only the selected one. Each display keeps its own brightness, contrast, and RGB gain,
+so a profile can set the left panel to 20% and the right to 70%. The checkbox is off by default,
+and a profile saved with it off behaves exactly as before.
+
+Selecting a saved profile shows a preview of how it maps onto what is currently connected: how
+many captured records matched, which connected displays have no captured setting, which captured
+displays are no longer connected, and which values a panel will refuse because it does not
+support that VCP code.
+
+Applying a multi-monitor profile validates every target first. If a connected target has no
+captured setting, nothing is written at all — the previous behavior of writing one display's
+values to every display is gone. Writes that need no risky-write consent are sent before any that
+do, so a transaction that fails rolls back over benign values only, and the result names the
+outcome for each display.
+
+Capturing a display other than the selected one uses the value last read from that display. If
+no value has been read yet, the selected display's value is used and the profile records a
+capture warning that is shown on save and in the preview.
+
 ### Profile Contents
 ```json
 {
-  "SchemaVersion": 4,
+  "SchemaVersion": 5,
   "Name": "Gaming",
+  "CaptureScope": "AllMonitors",
+  "CaptureWarnings": [],
   "MonitorIdentityKey": "edid:0123456789abcdef",
   "MonitorLabel": "Desk Left",
   "MonitorName": "Generic PnP Monitor",
@@ -468,7 +492,8 @@ Deleting a profile also removes rules that depend on it, but keeps the profile b
       "Gamma": 100,
       "GammaRed": 100,
       "GammaGreen": 100,
-      "GammaBlue": 100
+      "GammaBlue": 100,
+      "CaptureWarnings": []
     }
   ],
   "Brightness": 80,
@@ -485,6 +510,11 @@ Deleting a profile also removes rules that depend on it, but keeps the profile b
 ```
 
 Profiles without `SchemaVersion` are treated as v1 and migrated to the current schema on load.
+
+Schema v5 adds `CaptureScope` and makes each `MonitorSettings` entry authoritative for the display
+it names. Older builds ignore those entries and would write the top-level values to every target,
+so a v5 profile is deliberately not readable by a v4 build. Profiles written before v5 are migrated
+on load and keep their single-display behavior.
 
 Schema v4 stores every scaled DDC value (brightness, contrast, RGB gain, volume, sharpness) as a
 percentage rather than a raw VCP number. Monitors do not all use a 0-100 range — a panel may
