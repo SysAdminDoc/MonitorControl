@@ -359,6 +359,9 @@ public sealed class MonitorControlLiveRegionProbe : IDisposable
         if ($null -eq (Get-ControlByName -Root $root -Name "Reset DDC timing calibration for this monitor" -ControlType ([System.Windows.Automation.ControlType]::Button))) {
             throw "The DDC timing calibration reset control was not exposed through UI Automation."
         }
+        if ($null -eq (Get-ControlByName -Root $root -Name "Re-read selected monitor DDC values" -ControlType ([System.Windows.Automation.ControlType]::Button))) {
+            throw "The selected-monitor DDC re-read control was not exposed through UI Automation."
+        }
         $adaptivePattern = $null
         $manualPattern = $null
         if (-not $adaptiveRadio.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$adaptivePattern)) {

@@ -187,7 +187,9 @@ BeforeAll {
         "Drain-DdcWriteResults",
         "Register-DdcDiagnostic",
         "Get-VcpWriteRiskNote",
+        "Invoke-SelectedMonitorVcpReread",
         "Set-VCPValueWithSync",
+        "Set-ScaledVcpFromSlider",
         "ConvertTo-HelperVersion",
         "Get-OptionalHelperSourceCategory",
         "Test-OptionalHelperVersionSupported",
@@ -2422,6 +2424,15 @@ Describe "Redundant DDC write suppression" {
         [MonitorAPI]::ShouldSuppressVcpWrite($script:FakeHandleA, [byte]0x10, [uint32]40, $false) | Should -BeTrue
     }
 
+    It "expires a stale observation instead of suppressing against it" {
+        $expiredAt = [DateTime]::UtcNow.AddMilliseconds(-([MonitorAPI]::VcpValueCacheTtlMilliseconds + 1000))
+        [MonitorAPI]::RecordVcpValueAt($script:FakeHandleA, [byte]0x10, [uint32]40, $expiredAt)
+
+        [MonitorAPI]::ShouldSuppressVcpWrite($script:FakeHandleA, [byte]0x10, [uint32]40, $false) | Should -BeFalse
+        $value = [uint32]0
+        [MonitorAPI]::TryGetVcpValue($script:FakeHandleA, [byte]0x10, [ref]$value) | Should -BeFalse
+    }
+
     It "does not suppress a write when the value differs" {
         [MonitorAPI]::RecordVcpValue($script:FakeHandleA, [byte]0x10, [uint32]40)
         [MonitorAPI]::ShouldSuppressVcpWrite($script:FakeHandleA, [byte]0x10, [uint32]41, $false) | Should -BeFalse
@@ -2433,9 +2444,11 @@ Describe "Redundant DDC write suppression" {
         [MonitorAPI]::ShouldSuppressVcpWrite($script:FakeHandleA, [byte]0x12, [uint32]40, $false) | Should -BeFalse
     }
 
-    It "honours an explicit force even when the value is unchanged" {
+    It "never suppresses a user-initiated write even when the value is unchanged" {
         [MonitorAPI]::RecordVcpValue($script:FakeHandleA, [byte]0x10, [uint32]40)
         [MonitorAPI]::ShouldSuppressVcpWrite($script:FakeHandleA, [byte]0x10, [uint32]40, $true) | Should -BeFalse
+        (Get-Command Set-ScaledVcpFromSlider).Definition | Should -Match 'Set-VCPValueWithSync[^\r\n]+-UserInitiated'
+        (Get-Command Set-VCPValueWithSync).Definition | Should -Match 'Queue-VCPValue[^\r\n]+-ForceWrite:\$UserInitiated'
     }
 
     It "issues one write for a repeated ambient target and none after" {
@@ -2460,6 +2473,26 @@ Describe "Redundant DDC write suppression" {
 
     It "never suppresses a write to a null handle" {
         [MonitorAPI]::ShouldSuppressVcpWrite([IntPtr]::Zero, [byte]0x10, [uint32]40, $false) | Should -BeFalse
+    }
+
+    It "clears only the selected monitor before a manual re-read" {
+        $script:PhysicalMonitors = @(
+            [pscustomobject]@{ Handle = $script:FakeHandleA; IdentityKey = "edid:a"; UserLabel = "Left"; IdentityDefaultLabel = ""; Name = "A"; Index = 1 },
+            [pscustomobject]@{ Handle = $script:FakeHandleB; IdentityKey = "edid:b"; UserLabel = "Right"; IdentityDefaultLabel = ""; Name = "B"; Index = 2 }
+        )
+        $script:CurrentMonitorIndex = 0
+        $script:RereadInvocations = 0
+        [MonitorAPI]::RecordVcpValue($script:FakeHandleA, [byte]0x10, [uint32]40)
+        [MonitorAPI]::RecordVcpValue($script:FakeHandleB, [byte]0x10, [uint32]70)
+
+        Invoke-SelectedMonitorVcpReread -RefreshAction { $script:RereadInvocations++ } | Should -BeTrue
+
+        $value = [uint32]0
+        [MonitorAPI]::TryGetVcpValue($script:FakeHandleA, [byte]0x10, [ref]$value) | Should -BeFalse
+        [MonitorAPI]::TryGetVcpValue($script:FakeHandleB, [byte]0x10, [ref]$value) | Should -BeTrue
+        $value | Should -Be 70
+        $script:RereadInvocations | Should -Be 1
+        $script:LastStatusMessage | Should -Be "Re-reading DDC/CI values from Left..."
     }
 }
 
