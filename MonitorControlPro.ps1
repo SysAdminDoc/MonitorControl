@@ -3136,6 +3136,7 @@ function Start-CapabilitiesWorker {
         }
         if ($decision.Action -eq "Probe") {
             $mon.CapabilitiesPending = $true
+            $workerTiming = Get-DdcWorkerTiming -IdentityKey ([string]$mon.IdentityKey)
             $targets += [PSCustomObject]@{
                 Index = [int]$i
                 MonitorIndex = [int]$i
@@ -3144,6 +3145,8 @@ function Start-CapabilitiesWorker {
                 Name = [string]$mon.Name
                 IdentityKey = [string]$mon.IdentityKey
                 Generation = [int]$script:DisplayRecoveryGeneration
+                CapabilityRetries = [int]$workerTiming.CapabilityRetries
+                DelayMilliseconds = [int]$workerTiming.DelayMilliseconds
             }
         }
     }
@@ -3159,6 +3162,7 @@ function Start-CapabilitiesWorker {
         foreach ($target in $Targets) {
             $capabilities = ""
             $lastError = [int]0
+            $attempts = [int]0
             $sentinelReady = $false
             $sentinelTempPath = "$SentinelPath.$([guid]::NewGuid().ToString('N')).tmp"
             try {
@@ -3179,16 +3183,24 @@ function Start-CapabilitiesWorker {
                     $lastError = -2
                 }
                 if ($sentinelReady) {
-                    $capLen = [uint32]0
-                    if ([MonitorAPI]::GetCapabilitiesStringLength($target.Handle, [ref]$capLen) -and $capLen -gt 0) {
-                        $capStr = New-Object System.Text.StringBuilder -ArgumentList ([int]$capLen)
-                        if ([MonitorAPI]::CapabilitiesRequestAndCapabilitiesReply($target.Handle, $capStr, $capLen)) {
-                            $capabilities = $capStr.ToString()
+                    for ($attempt = 0; $attempt -le [int]$target.CapabilityRetries; $attempt++) {
+                        $attempts = $attempt + 1
+                        $capLen = [uint32]0
+                        if ([MonitorAPI]::GetCapabilitiesStringLength($target.Handle, [ref]$capLen) -and $capLen -gt 0) {
+                            $capStr = New-Object System.Text.StringBuilder -ArgumentList ([int]$capLen)
+                            if ([MonitorAPI]::CapabilitiesRequestAndCapabilitiesReply($target.Handle, $capStr, $capLen)) {
+                                $capabilities = $capStr.ToString()
+                                $lastError = 0
+                                break
+                            } else {
+                                $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                            }
                         } else {
                             $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
                         }
-                    } else {
-                        $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                        if ($attempt -lt [int]$target.CapabilityRetries) {
+                            Start-Sleep -Milliseconds ([int]$target.DelayMilliseconds)
+                        }
                     }
                 }
             } catch {
@@ -3211,6 +3223,8 @@ function Start-CapabilitiesWorker {
                 Capabilities = [string]$capabilities
                 Success = -not [string]::IsNullOrWhiteSpace($capabilities)
                 LastError = [int]$lastError
+                Attempts = [int]$attempts
+                RetryCount = [Math]::Max(0, $attempts - 1)
                 SentinelReady = [bool]$sentinelReady
             }
         }
@@ -3647,6 +3661,31 @@ function Get-DdcEffectiveTiming {
         ReadRetries = [int][Math]::Min($script:DdcTimingMaxRetries, [Math]::Max(0, [int]$TimingProfile.ReadRetries))
         WriteRetries = [int][Math]::Min($script:DdcTimingMaxRetries, [Math]::Max(0, [int]$TimingProfile.WriteRetries))
         CapabilityRetries = [int][Math]::Min($script:DdcTimingMaxRetries, [Math]::Max(0, [int]$TimingProfile.CapabilityRetries))
+    }
+}
+
+function Get-DdcWorkerTiming {
+    param(
+        [string]$IdentityKey,
+        [int]$ReadRetries = -1,
+        [int]$DelayMilliseconds = -1,
+        $RecoveryState = $null
+    )
+    $effective = Get-DdcEffectiveTiming -TimingProfile (Get-DdcTimingProfile -IdentityKey $IdentityKey)
+    $resolvedReadRetries = if ($ReadRetries -ge 0) {
+        [Math]::Min($script:DdcTimingMaxRetries, [Math]::Max(0, $ReadRetries))
+    } else {
+        Get-DisplayRecoveryReadRetryCount -State $RecoveryState -DefaultRetries ([int]$effective.ReadRetries)
+    }
+    $resolvedDelay = if ($DelayMilliseconds -ge 0) {
+        [MonitorAPI]::ClampRetryDelay($DelayMilliseconds)
+    } else {
+        [int]$effective.DelayMilliseconds
+    }
+    return [PSCustomObject]@{
+        ReadRetries = [int]$resolvedReadRetries
+        CapabilityRetries = [int]$effective.CapabilityRetries
+        DelayMilliseconds = [int]$resolvedDelay
     }
 }
 
@@ -4278,6 +4317,7 @@ function Start-VcpReadWorker {
         [string]$Mode,
         [string]$MonitorName,
         [int]$ReadRetries = -1,
+        [int]$DelayMilliseconds = -1,
         [string]$IdentityKey = "",
         [int]$MonitorIndex = -1
     )
@@ -4291,14 +4331,14 @@ function Start-VcpReadWorker {
         }
     }
     if ($MonitorIndex -lt 0 -or [string]::IsNullOrWhiteSpace($IdentityKey)) { return }
-    if ($ReadRetries -lt 0) {
-        $state = if ($script:DisplayRecoveryStates.ContainsKey($IdentityKey)) { $script:DisplayRecoveryStates[$IdentityKey] } else { $null }
-        $ReadRetries = Get-DisplayRecoveryReadRetryCount -State $state -DefaultRetries $script:DdcReadRetryCount
-    }
+    $state = if ($script:DisplayRecoveryStates.ContainsKey($IdentityKey)) { $script:DisplayRecoveryStates[$IdentityKey] } else { $null }
+    $workerTiming = Get-DdcWorkerTiming -IdentityKey $IdentityKey -ReadRetries $ReadRetries -DelayMilliseconds $DelayMilliseconds -RecoveryState $state
+    $ReadRetries = [int]$workerTiming.ReadRetries
+    $DelayMilliseconds = [int]$workerTiming.DelayMilliseconds
     $generation = [int]$script:DisplayRecoveryGeneration
     $handleValue = [int64]$Handle.ToInt64()
     $workerScript = {
-        param([IntPtr]$Handle, [int[]]$Codes, [string]$MonitorName, [int]$ReadRetries, [string]$IdentityKey, [int]$MonitorIndex, [int]$Generation, [int64]$HandleValue)
+        param([IntPtr]$Handle, [int[]]$Codes, [string]$MonitorName, [int]$ReadRetries, [int]$DelayMilliseconds, [string]$IdentityKey, [int]$MonitorIndex, [int]$Generation, [int64]$HandleValue)
         $index = 0
         foreach ($code in $Codes) {
             $index++
@@ -4307,7 +4347,7 @@ function Start-VcpReadWorker {
             $maximum = [uint32]0
             $lastError = [int]0
             $attempts = [int]0
-            $ok = [MonitorAPI]::ReadVCPWithRetry($Handle, [byte]$code, $ReadRetries, [ref]$vct, [ref]$current, [ref]$maximum, [ref]$lastError, [ref]$attempts)
+            $ok = [MonitorAPI]::ReadVCPWithRetry($Handle, [byte]$code, $ReadRetries, $DelayMilliseconds, [ref]$vct, [ref]$current, [ref]$maximum, [ref]$lastError, [ref]$attempts)
             [PSCustomObject]@{
                 Code = [int]$code
                 Success = [bool]$ok
@@ -4337,7 +4377,7 @@ function Start-VcpReadWorker {
     $script:VcpWorkerInput.Complete()
     $script:VcpWorkerOutput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
     $script:VcpWorker = [PowerShell]::Create()
-    $script:VcpWorker.AddScript($workerScript.ToString()).AddArgument($Handle).AddArgument($Codes).AddArgument($MonitorName).AddArgument($ReadRetries).AddArgument($IdentityKey).AddArgument($MonitorIndex).AddArgument($generation).AddArgument($handleValue) | Out-Null
+    $script:VcpWorker.AddScript($workerScript.ToString()).AddArgument($Handle).AddArgument($Codes).AddArgument($MonitorName).AddArgument($ReadRetries).AddArgument($DelayMilliseconds).AddArgument($IdentityKey).AddArgument($MonitorIndex).AddArgument($generation).AddArgument($handleValue) | Out-Null
     $script:VcpWorkerAsyncResult = $script:VcpWorker.BeginInvoke($script:VcpWorkerInput, $script:VcpWorkerOutput)
     $script:VcpWorkerLastOutputCount = 0
     if (-not $script:VcpWorkerTimer) {
@@ -10934,7 +10974,7 @@ $vcpScanBtn.Add_Click({
     } else {
         $codes = @($script:VCPCodeDescriptions.Keys | Sort-Object)
     }
-    Start-VcpReadWorker -Handle $mon.Handle -Codes $codes -Mode "Scan" -MonitorName $mon.Name -ReadRetries $script:DdcScanRetryCount -IdentityKey $mon.IdentityKey -MonitorIndex $script:CurrentMonitorIndex
+    Start-VcpReadWorker -Handle $mon.Handle -Codes $codes -Mode "Scan" -MonitorName $mon.Name -IdentityKey $mon.IdentityKey -MonitorIndex $script:CurrentMonitorIndex
 })
 
 $saveProfileBtn.Add_Click({

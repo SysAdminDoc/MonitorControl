@@ -190,6 +190,7 @@ public static class MonitorControlVcpWriteProbe
         "Test-CapabilityProbeAllowed",
         "Get-CapabilitiesSafetyStatusText",
         "Start-CapabilitiesWorker",
+        "Start-VcpReadWorker",
         "Test-VcpWriteRequiresSafetyConsent",
         "Get-VcpWriteSafetySettingsObject",
         "Write-VcpWriteSafetyState",
@@ -3025,7 +3026,7 @@ Describe "Named causes for unavailable DDC control" {
 Describe "Per-monitor DDC timing and null-message semantics" {
     BeforeAll {
         Import-MonitorControlFunctions -Name @(
-            "New-DdcTimingProfile", "Get-DdcTimingProfile", "Get-DdcEffectiveTiming",
+            "New-DdcTimingProfile", "Get-DdcTimingProfile", "Get-DdcEffectiveTiming", "Get-DdcWorkerTiming",
             "Get-DdcCalibratedSleepMultiplier", "Test-DdcCodeUnsupported", "Register-DdcCodeOutcome",
             "Set-DdcTimingMode", "Clear-DdcTimingCalibration", "Update-DdcTimingCalibration"
         )
@@ -3057,6 +3058,26 @@ Describe "Per-monitor DDC timing and null-message semantics" {
         $effective.ReadRetries | Should -Be 5
         $effective.WriteRetries | Should -Be 0
         $effective.CapabilityRetries | Should -Be $script:DdcTimingMaxRetries
+    }
+
+    It "passes each monitor's effective budgets and delay into both background workers" {
+        $timing = Get-DdcTimingProfile -IdentityKey "edid:a"
+        $timing.ReadRetries = 5
+        $timing.CapabilityRetries = 7
+        $timing.SleepMultiplier = 3.0
+        $arguments = Get-DdcWorkerTiming -IdentityKey "edid:a"
+
+        $arguments.ReadRetries | Should -Be 5
+        $arguments.CapabilityRetries | Should -Be 7
+        $arguments.DelayMilliseconds | Should -Be ([int][MonitorAPI]::VcpRetryDelayMilliseconds * 3)
+        $capabilityDefinition = (Get-Command Start-CapabilitiesWorker).Definition
+        $capabilityDefinition | Should -Match 'CapabilityRetries = \[int\]\$workerTiming\.CapabilityRetries'
+        $capabilityDefinition | Should -Match 'DelayMilliseconds = \[int\]\$workerTiming\.DelayMilliseconds'
+        $capabilityDefinition | Should -Match 'for \(\$attempt = 0; \$attempt -le \[int\]\$target\.CapabilityRetries; \$attempt\+\+\)'
+        $vcpDefinition = (Get-Command Start-VcpReadWorker).Definition
+        $vcpDefinition | Should -Match 'Get-DdcWorkerTiming -IdentityKey \$IdentityKey'
+        $vcpDefinition | Should -Match 'ReadVCPWithRetry\(\$Handle, \[byte\]\$code, \$ReadRetries, \$DelayMilliseconds,'
+        [System.IO.File]::ReadAllText($script:AppPath) | Should -Not -Match 'Start-VcpReadWorker[^\r\n]+-ReadRetries \$script:DdcScanRetryCount'
     }
 
     It "scales the retry delay by the calibrated multiplier and clamps at the native ceiling" {
