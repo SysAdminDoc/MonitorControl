@@ -173,6 +173,7 @@ function Load-MonitorIdentitySettings {
     try {
         $data = Read-JsonFileSafely -Path $script:MonitorIdentitySettingsPath -Label "Monitor identities" -ReadOnly:$script:ProfileStorageOffline
         if ($null -eq $data) { return }
+        if (-not (Test-SettingsDocumentSupported -Name "MonitorIdentity" -Document $data -Label "Monitor identities")) { return }
         foreach ($entry in @($data.Monitors)) {
             if ($null -eq $entry -or [string]::IsNullOrWhiteSpace([string]$entry.Key)) { continue }
             $script:MonitorIdentityRecords[[string]$entry.Key] = [PSCustomObject]@{
@@ -198,11 +199,87 @@ function Save-MonitorIdentitySettings {
     if (-not (Test-ProfileStorageWriteAllowed -Operation "monitor label changes")) { return $false }
     $entries = @($script:MonitorIdentityRecords.Values | Sort-Object -Property Label, Key)
     $payload = [PSCustomObject]@{
-        SchemaVersion = 1
+        SchemaVersion = [int]$script:MonitorIdentitySchemaVersion
         UpdatedAt = (Get-Date).ToString("o")
         Monitors = $entries
     }
     return (Write-JsonFileSafely -Path $script:MonitorIdentitySettingsPath -Data $payload -Depth 5)
+}
+
+function New-SettingsDocumentRegistry {
+    param([object[]]$Definitions)
+    $registry = [ordered]@{}
+    foreach ($definition in @($Definitions)) {
+        $name = [string]$definition.Name
+        $fileName = [string]$definition.FileName
+        $currentVersion = [int]$definition.CurrentVersion
+        $legacyVersion = [int]$definition.LegacyVersion
+        if ([string]::IsNullOrWhiteSpace($name) -or [string]::IsNullOrWhiteSpace($fileName)) { throw "Settings registry entries require a name and file name." }
+        if ($registry.Contains($name)) { throw "Duplicate settings registry entry: $name" }
+        if ($currentVersion -lt 1 -or $legacyVersion -lt 0 -or $legacyVersion -gt $currentVersion) { throw "Invalid settings schema range for $name." }
+        $registry[$name] = [PSCustomObject]@{
+            Name = $name
+            FileName = $fileName
+            CurrentVersion = $currentVersion
+            LegacyVersion = $legacyVersion
+            MigrationHandler = [string]$definition.MigrationHandler
+        }
+    }
+    return $registry
+}
+
+function Initialize-MonitorControlSettingsDocumentRegistry {
+    return (New-SettingsDocumentRegistry -Definitions @(
+        [PSCustomObject]@{ Name = "Profile"; FileName = "<profile>.json"; CurrentVersion = 4; LegacyVersion = 1; MigrationHandler = "ConvertTo-CurrentProfileSchema" }
+        [PSCustomObject]@{ Name = "ProfileBundle"; FileName = "<profile-bundle>.zip/manifest.json"; CurrentVersion = 2; LegacyVersion = 1; MigrationHandler = "Test-ProfileBundleArchive" }
+        [PSCustomObject]@{ Name = "ProfileStorage"; FileName = "profile-storage.json"; CurrentVersion = 2; LegacyVersion = 1; MigrationHandler = "Resolve-ProfileStorageRootState" }
+        [PSCustomObject]@{ Name = "MonitorIdentity"; FileName = "monitor-identities.json"; CurrentVersion = 1; LegacyVersion = 0; MigrationHandler = "Load-MonitorIdentitySettings" }
+        [PSCustomObject]@{ Name = "AppProfileRules"; FileName = "app-profile-rules.json"; CurrentVersion = 1; LegacyVersion = 0; MigrationHandler = "Load-AppProfileRules" }
+        [PSCustomObject]@{ Name = "ProfileSchedules"; FileName = "profile-schedules.json"; CurrentVersion = 1; LegacyVersion = 0; MigrationHandler = "Load-ProfileSchedules" }
+        [PSCustomObject]@{ Name = "IdleDim"; FileName = "idle-dim.json"; CurrentVersion = 1; LegacyVersion = 0; MigrationHandler = "Load-IdleDimSettings" }
+        [PSCustomObject]@{ Name = "BatteryProfile"; FileName = "battery-profile.json"; CurrentVersion = 1; LegacyVersion = 0; MigrationHandler = "Load-BatteryProfileSettings" }
+        [PSCustomObject]@{ Name = "AutomationBridge"; FileName = "automation-bridge.json"; CurrentVersion = 3; LegacyVersion = 0; MigrationHandler = "Load-AutomationBridgeSettings" }
+        [PSCustomObject]@{ Name = "CapabilitiesSafety"; FileName = "capabilities-safety.json"; CurrentVersion = 1; LegacyVersion = 0; MigrationHandler = "Import-CapabilitySafetyState" }
+        [PSCustomObject]@{ Name = "CapabilitiesProbeSentinel"; FileName = "capabilities-probe-pending.json"; CurrentVersion = 1; LegacyVersion = 1; MigrationHandler = "Import-CapabilitySafetyState" }
+        [PSCustomObject]@{ Name = "VcpWriteSafety"; FileName = "vcp-write-safety.json"; CurrentVersion = 1; LegacyVersion = 0; MigrationHandler = "Import-VcpWriteSafetyState" }
+        [PSCustomObject]@{ Name = "OptionalHelpers"; FileName = "optional-helpers.json"; CurrentVersion = 1; LegacyVersion = 0; MigrationHandler = "Import-OptionalHelperSettings" }
+        [PSCustomObject]@{ Name = "DisplayRestore"; FileName = "display-restore.json"; CurrentVersion = 1; LegacyVersion = 0; MigrationHandler = "Import-DisplayStateRestoreSettings" }
+        [PSCustomObject]@{ Name = "CapabilitiesCache"; FileName = "capabilities-cache.json"; CurrentVersion = 1; LegacyVersion = 0; MigrationHandler = "Import-CapabilitiesCache" }
+        [PSCustomObject]@{ Name = "DdcTiming"; FileName = "ddc-timing.json"; CurrentVersion = 3; LegacyVersion = 1; MigrationHandler = "Import-DdcTimingSettings" }
+        [PSCustomObject]@{ Name = "ProfileTrash"; FileName = "trash/<record>.json"; CurrentVersion = 1; LegacyVersion = 1; MigrationHandler = "Restore-ProfileFromTrash" }
+    ))
+}
+
+function Get-SettingsDocumentSchemaState {
+    param([System.Collections.IDictionary]$Registry, [string]$Name, $Document)
+    if ($null -eq $Registry -or -not $Registry.Contains($Name)) { throw "Settings document is not registered: $Name" }
+    $definition = $Registry[$Name]
+    $declaredVersion = [int]$definition.LegacyVersion
+    if ($null -ne $Document -and $Document.PSObject.Properties.Name -contains "SchemaVersion") {
+        $parsedVersion = 0
+        if (-not [int]::TryParse([string]$Document.SchemaVersion, [ref]$parsedVersion)) {
+            return [PSCustomObject]@{ Name = $Name; Supported = $false; NeedsMigration = $false; DeclaredVersion = -1; CurrentVersion = [int]$definition.CurrentVersion; MigrationHandler = [string]$definition.MigrationHandler; Reason = "schema version is not an integer" }
+        }
+        $declaredVersion = $parsedVersion
+    }
+    $supported = $declaredVersion -ge [int]$definition.LegacyVersion -and $declaredVersion -le [int]$definition.CurrentVersion
+    return [PSCustomObject]@{
+        Name = $Name
+        Supported = $supported
+        NeedsMigration = $supported -and $declaredVersion -lt [int]$definition.CurrentVersion
+        DeclaredVersion = $declaredVersion
+        CurrentVersion = [int]$definition.CurrentVersion
+        MigrationHandler = [string]$definition.MigrationHandler
+        Reason = if ($supported) { "" } elseif ($declaredVersion -gt [int]$definition.CurrentVersion) { "newer than this app" } else { "older than the supported migration range" }
+    }
+}
+
+function Test-SettingsDocumentSupported {
+    param([string]$Name, $Document, [string]$Label = "Settings")
+    $state = Get-SettingsDocumentSchemaState -Registry $script:SettingsDocumentRegistry -Name $Name -Document $Document
+    if ($state.Supported) { return $true }
+    Set-DeferredStatus "$Label schema is $($state.Reason); it was not loaded"
+    return $false
 }
 
 function Update-MonitorIdentityKeyedState {

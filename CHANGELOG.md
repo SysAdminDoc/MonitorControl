@@ -1,5 +1,7 @@
 # Changelog
 
+- Added: profile deletion now stores the exact profile and its removed application/schedule rules in bounded local Trash; the Profiles tab can restore the newest deletion across restarts or permanently empty Trash through a separate confirmation.
+- Changed: all persisted document formats are registered in one schema/migration table, and application rules, schedules, idle dim, and battery settings now write explicit schema versions while preserving legacy migration and future-version rejection.
 - Added: DDC diagnostics now export a ZIP support bundle containing the previewed text report, a schema-versioned JSON report, and a checksummed manifest; the diagnostics history keeps only the newest ten bundles within a 20 MiB budget.
 - Changed: support exports pseudonymize monitor identifiers and local names by default, offer separate one-build opt-ins for each raw category, and always redact local paths, Windows user and machine names, email/IP/MAC addresses, and credential-like tokens.
 - Changed: application name and version metadata now come from one canonical data file, and the launcher, UI, diagnostics, profile exports, release filenames, and artifact manifest consume that value.

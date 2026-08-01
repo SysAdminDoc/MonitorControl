@@ -49,6 +49,7 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
   - Night (9 PM - 7 AM): 40% brightness, warm/reduced blue light
 - **Profile System** — Save and load custom configurations
 - **Hardened Profile Storage** — Profile and automation JSON writes use atomic replacement, valid backups, corrupt-file quarantine, and filename validation
+- **Recoverable Profile Deletion** — Deleting a profile moves its exact bytes and dependent application/schedule rules into bounded local Trash. **Restore Last** works after restart; **Empty Trash** requires a separate permanent-delete confirmation
 - **Command-line Support** — Launch minimized or with a specific profile
 
 ### Advanced Features
@@ -392,6 +393,8 @@ The VCP Explorer tab allows you to query and set any DDC/CI VCP code. Common cod
 
 Profiles are saved as JSON files in `%APPDATA%\MonitorControlPro\`
 
+Deleting a profile also removes rules that depend on it, but keeps the profile bytes and removed-rule snapshot in local Trash. Use **Profiles > Restore Last** to undo the newest deletion, including after restarting the app. **Empty Trash** is the separately confirmed, permanent purge action. Trash retains at most 20 records within a 10 MiB total budget and remains local even when the active profile library uses a sync folder.
+
 ### Profile Contents
 ```json
 {
@@ -540,6 +543,7 @@ The full breakdown - every display path, its classification, and whether it answ
 - Automation bridge settings: `%APPDATA%\MonitorControlPro\automation-bridge.json` (API key protected with current-user DPAPI) and `%APPDATA%\MonitorControlPro\automation-bridge.entropy` (separate per-install entropy)
 - Automation bridge write log: `%APPDATA%\MonitorControlPro\automation-bridge-writes.jsonl` (redacted and size-rotated)
 - DDC support bundles: `%APPDATA%\MonitorControlPro\diagnostics\monitorcontrol-support-*.zip` (newest 10, bounded to 20 MiB total)
+- Deleted profile recovery: `%APPDATA%\MonitorControlPro\trash\profile-trash-*.json` (newest 20, bounded to 10 MiB total; local even when profile sync is enabled)
 - Risky VCP identity unlocks: `%APPDATA%\MonitorControlPro\vcp-write-safety.json`
 - No registry modifications
 - No admin rights required

@@ -144,9 +144,20 @@ public static class MonitorControlVcpWriteProbe
         "Move-CorruptJsonFile",
         "Read-JsonFileSafely",
         "Write-JsonFileSafely",
+        "New-SettingsDocumentRegistry",
+        "Initialize-MonitorControlSettingsDocumentRegistry",
+        "Get-SettingsDocumentSchemaState",
+        "Test-SettingsDocumentSupported",
         "Resolve-ProfileStorageRootState",
         "Get-SafeProfileName",
         "Get-UserProfileFiles",
+        "Test-ProfileTrashRecordPath",
+        "Get-ProfileTrashRecords",
+        "Remove-OldProfileTrashRecords",
+        "Save-ProfileTrashRecord",
+        "Remove-ProfileTrashRecord",
+        "Restore-ProfileFromTrash",
+        "Clear-ProfileTrash",
         "Remove-ProfileAndDependencies",
         "Get-ProfilePropertyValue",
         "Get-ProfileIntValue",
@@ -166,6 +177,10 @@ public static class MonitorControlVcpWriteProbe
         "Invoke-ProfileBundleImportCommit",
         "Export-ProfileBundle",
         "Import-ProfileBundle",
+        "Save-AppProfileRules",
+        "Save-ProfileSchedules",
+        "Save-IdleDimSettings",
+        "Save-BatteryProfileSettings",
         "Set-ProfileStoragePathBinding",
         "Set-ProfileStorageRoot",
         "Get-ProfileStoragePointer",
@@ -341,6 +356,7 @@ public static class MonitorControlVcpWriteProbe
         "Get-StatusMessageSeverity",
         "Get-NavigationShortcutTarget"
     )
+    $script:SettingsDocumentRegistry = Initialize-MonitorControlSettingsDocumentRegistry
 
     function Start-TestAutomationBridge {
         param(
@@ -740,6 +756,10 @@ Describe "Profile filename validation" {
 Describe "Atomic profile deletion" {
     BeforeEach {
         $script:ProfilesPath = Join-Path $TestDrive "profiles"
+        $script:ProfileTrashPath = Join-Path $TestDrive ("profile-trash-" + [guid]::NewGuid().ToString("N"))
+        $script:ProfileTrashSchemaVersion = [int]$script:SettingsDocumentRegistry.ProfileTrash.CurrentVersion
+        $script:ProfileTrashMaxRecords = 20
+        $script:ProfileTrashMaxBytes = 10485760
         New-Item -ItemType Directory -Path $script:ProfilesPath -Force | Out-Null
         $script:ProfileMetadataFiles = @("app-profile-rules.json", "profile-schedules.json")
         $script:ProfileStorageOffline = $false
@@ -788,6 +808,8 @@ Describe "Atomic profile deletion" {
         @($script:ProfileSchedules.Profile) | Should -Be @("Other")
         $script:AppRuleSaveCalls | Should -Be 1
         $script:ScheduleSaveCalls | Should -Be 1
+        @(Get-ProfileTrashRecords).Count | Should -Be 1
+        $script:LastStatusMessage | Should -Be "Moved 'Locked' and its dependent automation to Trash"
     }
 
     It "restores the profile and automation when dependent persistence fails" {
@@ -801,6 +823,88 @@ Describe "Atomic profile deletion" {
         $script:AppRuleSaveCalls | Should -Be 2
         $script:ScheduleSaveCalls | Should -Be 1
         $script:LastStatusMessage | Should -Match "and its automation were restored$"
+        @(Get-ProfileTrashRecords).Count | Should -Be 0
+    }
+
+    It "restores the profile and dependent rules from local trash after a restart" {
+        $originalBytes = [System.IO.File]::ReadAllBytes($script:ProfilePathUnderTest)
+        Remove-ProfileAndDependencies -Name "Locked" `
+            -SaveAppRulesAction { return $true } `
+            -SaveSchedulesAction { return $true } | Should -BeTrue
+        $record = @(Get-ProfileTrashRecords | Select-Object -First 1)
+        $record.Count | Should -Be 1
+
+        # Recreate only the state that a later process would load from disk.
+        $script:AppProfileRules = @([PSCustomObject]@{ Exe = "other.exe"; Profile = "Other"; AllowRiskyVcp = $false })
+        $script:ProfileSchedules = @([PSCustomObject]@{ Time = "18:00"; Profile = "Other"; AllowRiskyVcp = $false })
+        Restore-ProfileFromTrash -RecordPath $record[0].Path `
+            -SaveAppRulesAction { return $true } `
+            -SaveSchedulesAction { return $true } | Should -BeTrue
+
+        [System.IO.File]::ReadAllBytes($script:ProfilePathUnderTest) | Should -Be $originalBytes
+        @($script:AppProfileRules.Profile) | Should -Contain "Locked"
+        @($script:ProfileSchedules.Profile) | Should -Contain "Locked"
+        @(Get-ProfileTrashRecords).Count | Should -Be 0
+    }
+
+    It "keeps trash bounded and purges only through the explicit clear action" {
+        $script:ProfileTrashMaxRecords = 2
+        foreach ($name in @("One", "Two", "Three")) {
+            Save-ProfileTrashRecord -Name $name -ProfileBytes ([System.Text.Encoding]::UTF8.GetBytes("{`"Name`":`"$name`"}")) -AppRules @() -Schedules @() | Should -Not -BeNullOrEmpty
+            Start-Sleep -Milliseconds 20
+        }
+        @(Get-ProfileTrashRecords).Count | Should -Be 2
+        Clear-ProfileTrash | Should -Be 2
+        @(Get-ProfileTrashRecords).Count | Should -Be 0
+    }
+}
+
+Describe "Unified settings document registry" {
+    It "registers every persisted document with one current version and migration route" {
+        $expected = @(
+            "Profile", "ProfileBundle", "ProfileStorage", "MonitorIdentity", "AppProfileRules",
+            "ProfileSchedules", "IdleDim", "BatteryProfile", "AutomationBridge", "CapabilitiesSafety",
+            "CapabilitiesProbeSentinel", "VcpWriteSafety", "OptionalHelpers", "DisplayRestore",
+            "CapabilitiesCache", "DdcTiming", "ProfileTrash"
+        )
+        @($script:SettingsDocumentRegistry.Keys) | Should -Be $expected
+        foreach ($definition in $script:SettingsDocumentRegistry.Values) {
+            $definition.CurrentVersion | Should -BeGreaterOrEqual 1
+            $definition.MigrationHandler | Should -Not -BeNullOrEmpty
+        }
+    }
+
+    It "accepts registered legacy documents for migration and rejects future schemas" {
+        $legacy = Get-SettingsDocumentSchemaState -Registry $script:SettingsDocumentRegistry -Name "IdleDim" -Document ([PSCustomObject]@{ Enabled = $true })
+        $legacy.Supported | Should -BeTrue
+        $legacy.NeedsMigration | Should -BeTrue
+        $future = Get-SettingsDocumentSchemaState -Registry $script:SettingsDocumentRegistry -Name "IdleDim" -Document ([PSCustomObject]@{ SchemaVersion = 99 })
+        $future.Supported | Should -BeFalse
+        $future.Reason | Should -Be "newer than this app"
+    }
+
+    It "writes a schema version into every formerly unversioned settings document" {
+        $script:ProfileStorageOffline = $false
+        $script:AppProfileRulesSchemaVersion = [int]$script:SettingsDocumentRegistry.AppProfileRules.CurrentVersion
+        $script:ProfileSchedulesSchemaVersion = [int]$script:SettingsDocumentRegistry.ProfileSchedules.CurrentVersion
+        $script:IdleDimSchemaVersion = [int]$script:SettingsDocumentRegistry.IdleDim.CurrentVersion
+        $script:BatteryProfileSchemaVersion = [int]$script:SettingsDocumentRegistry.BatteryProfile.CurrentVersion
+        $script:AppProfileRulesPath = Join-Path $TestDrive "app-profile-rules.json"
+        $script:ProfileScheduleRulesPath = Join-Path $TestDrive "profile-schedules.json"
+        $script:IdleDimSettingsPath = Join-Path $TestDrive "idle-dim.json"
+        $script:BatteryProfileSettingsPath = Join-Path $TestDrive "battery-profile.json"
+        $script:AppProfileEnabled = $false; $script:AppProfileRules = @()
+        $script:ProfileScheduleEnabled = $false; $script:ProfileSchedules = @()
+        $script:IdleDimEnabled = $false; $script:IdleDimMinutes = 10; $script:IdleDimBrightness = 20; $script:IdleDimRestoreOnActivity = $true
+        $script:BatteryProfileEnabled = $false; $script:BatteryBrightness = 40; $script:AcBrightness = 70
+
+        Save-AppProfileRules | Should -BeTrue
+        Save-ProfileSchedules | Should -BeTrue
+        Save-IdleDimSettings | Should -BeTrue
+        Save-BatteryProfileSettings | Should -BeTrue
+        foreach ($path in @($script:AppProfileRulesPath, $script:ProfileScheduleRulesPath, $script:IdleDimSettingsPath, $script:BatteryProfileSettingsPath)) {
+            (Get-Content -LiteralPath $path -Raw | ConvertFrom-Json).SchemaVersion | Should -Be 1
+        }
     }
 }
 
