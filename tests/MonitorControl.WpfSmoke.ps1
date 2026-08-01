@@ -4,6 +4,7 @@ param(
     [string]$AppTheme = "System",
     [ValidateRange(100, 200)]
     [int]$TextScalePercent = 100,
+    [string]$UiCulture = "",
     [switch]$ResizeToMinimum,
     [switch]$ExerciseValidationAlert,
     [string]$ScreenshotPath = "",
@@ -21,6 +22,24 @@ if ($PSVersionTable.PSEdition -ne "Desktop" -or $PSVersionTable.PSVersion.Major 
 }
 if (-not (Test-Path -LiteralPath $appPath -PathType Leaf)) { throw "Application entry point not found: $appPath" }
 if (-not (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf)) { throw "Windows PowerShell not found: $windowsPowerShell" }
+
+$corePath = Join-Path $repoRoot "src\MonitorControl.Core.psm1"
+$coreTokens = $null
+$coreErrors = $null
+$coreAst = [System.Management.Automation.Language.Parser]::ParseFile($corePath, [ref]$coreTokens, [ref]$coreErrors)
+if ($coreErrors.Count -gt 0) { throw ($coreErrors | Out-String) }
+$pseudoFunction = @($coreAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq "ConvertTo-PseudoLocalizedText"
+}, $true) | Select-Object -First 1)
+if ($pseudoFunction.Count -ne 1) { throw "Pseudo-localization function not found: $corePath" }
+. ([scriptblock]::Create("function ConvertTo-SmokePseudoLocalizedText $($pseudoFunction[0].Body.Extent.Text)"))
+
+function Get-SmokeUiText {
+    param([string]$Text)
+    if ($UiCulture -eq "qps-ploc") { return ConvertTo-SmokePseudoLocalizedText -Text $Text }
+    return $Text
+}
 
 function Get-DirectorySnapshot {
     param([string]$Path)
@@ -194,6 +213,9 @@ try {
     $startInfo.FileName = $windowsPowerShell
     $escapedAppPath = $appPath.Replace('"', '\"')
     $startInfo.Arguments = "-NoLogo -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$escapedAppPath`" -Theme $AppTheme -TextScalePercent $TextScalePercent"
+    if (-not [string]::IsNullOrWhiteSpace($UiCulture)) {
+        $startInfo.Arguments += " -Culture $UiCulture"
+    }
     if (-not [string]::IsNullOrWhiteSpace($ScreenshotDirectory)) {
         $escapedRenderDirectory = ([System.IO.Path]::GetFullPath($ScreenshotDirectory)).Replace('"', '\"')
         $startInfo.Arguments += " -RenderDirectory `"$escapedRenderDirectory`""
@@ -259,11 +281,12 @@ public static class MonitorControlWindowProbe
     }
 
     $deadline = [DateTime]::UtcNow.AddSeconds($LaunchTimeoutSeconds)
+    $windowTitlePrefix = if ($UiCulture -eq "qps-ploc") { "[!!" } else { "MonitorControl Pro" }
     do {
         Start-Sleep -Milliseconds 100
         $process.Refresh()
         if ($process.HasExited) { throw "The WPF process exited during launch with code $($process.ExitCode)." }
-        $appWindowHandle = [MonitorControlWindowProbe]::Find($process.Id, "MonitorControl Pro")
+        $appWindowHandle = [MonitorControlWindowProbe]::Find($process.Id, $windowTitlePrefix)
     } while ($appWindowHandle -eq [IntPtr]::Zero -and [DateTime]::UtcNow -lt $deadline)
     if ($appWindowHandle -eq [IntPtr]::Zero) { throw "The WPF window did not appear within $LaunchTimeoutSeconds seconds." }
 
@@ -401,12 +424,14 @@ public sealed class MonitorControlLiveRegionProbe : IDisposable
 "@
     }
     $root = [System.Windows.Automation.AutomationElement]::FromHandle($appWindowHandle)
-    if ($null -eq $root -or $root.Current.Name -notlike "MonitorControl Pro*") {
+    $expectedMainWindowName = Get-SmokeUiText -Text "MonitorControl Pro main window"
+    if ($null -eq $root -or $root.Current.Name -ne $expectedMainWindowName) {
         $actualName = if ($null -eq $root) { "<null>" } else { [string]$root.Current.Name }
         throw "The launched window does not expose the expected MonitorControl Pro UI Automation root (actual: '$actualName', handle: $appWindowHandle)."
     }
-    $expectedThemeText = if ($AppTheme -eq "HighContrast") { "High contrast colors are active." } else { "Dark application colors are active." }
-    if ($root.Current.HelpText -notlike "$expectedThemeText*Text scale: $TextScalePercent%.*") {
+    $expectedThemeText = if ($AppTheme -eq "HighContrast") { "High contrast colors are active. Text scale: {0}%." } else { "Dark application colors are active. Text scale: {0}%." }
+    $expectedThemeText = (Get-SmokeUiText -Text $expectedThemeText) -f $TextScalePercent
+    if ($root.Current.HelpText -ne $expectedThemeText) {
         throw "The UI Automation root did not report the active theme and text scale."
     }
 
@@ -453,11 +478,11 @@ public sealed class MonitorControlLiveRegionProbe : IDisposable
         Start-Sleep -Milliseconds 250
     }
 
-    $persistentBrand = Get-ControlByName -Root $root -Name "MonitorControl Pro" -ControlType ([System.Windows.Automation.ControlType]::Text)
+    $persistentBrand = Get-ControlByName -Root $root -Name (Get-SmokeUiText -Text "MonitorControl Pro") -ControlType ([System.Windows.Automation.ControlType]::Text)
     if ($null -eq $persistentBrand) { throw "The persistent application brand was not exposed through UI Automation." }
 
     foreach ($name in @("Display", "Monitor", "VCP Explorer", "Profiles", "Automation", "System")) {
-        $tab = Get-TabByName -Root $root -Name $name
+        $tab = Get-TabByName -Root $root -Name (Get-SmokeUiText -Text $name)
         if ($null -eq $tab) { throw "Required navigation destination '$name' was not exposed through UI Automation." }
         $patternObject = $null
         if (-not $tab.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$patternObject)) {
@@ -467,19 +492,25 @@ public sealed class MonitorControlLiveRegionProbe : IDisposable
         $selection.Select()
         Start-Sleep -Milliseconds 125
         if (-not $selection.Current.IsSelected) { throw "Navigation destination '$name' did not become selected." }
-        if ($tab.Current.IsOffscreen) { throw "Navigation destination '$name' remained offscreen after selection." }
+        if ($tab.Current.IsOffscreen) { throw "Navigation destination '$name' remained offscreen after selection (bounds=$($tab.Current.BoundingRectangle), root=$($root.Current.BoundingRectangle))." }
+        $tabBounds = $tab.Current.BoundingRectangle
+        $navigationRootBounds = $root.Current.BoundingRectangle
+        if ($tabBounds.Left -lt $navigationRootBounds.Left -or $tabBounds.Top -lt $navigationRootBounds.Top -or
+            $tabBounds.Right -gt $navigationRootBounds.Right -or $tabBounds.Bottom -gt $navigationRootBounds.Bottom) {
+            throw "Navigation destination '$name' was only partially visible after selection (bounds=$tabBounds, root=$navigationRootBounds)."
+        }
         if ($persistentBrand.Current.IsOffscreen) { throw "The persistent header scrolled offscreen after selecting '$name'." }
         $navigated.Add($name)
     }
 
     # The DDC timing card is the only place adaptive and manual modes can be seen to be
     # mutually exclusive, so drive it rather than assert against the source text.
-    $systemTab = Get-TabByName -Root $root -Name "System"
+    $systemTab = Get-TabByName -Root $root -Name (Get-SmokeUiText -Text "System")
     $systemTabPattern = $null
     if ($systemTab.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$systemTabPattern)) {
         ([System.Windows.Automation.SelectionItemPattern]$systemTabPattern).Select()
         Start-Sleep -Milliseconds 150
-        $displayDdcCategory = Get-TabByName -Root $root -Name "Display and DDC system settings"
+        $displayDdcCategory = Get-TabByName -Root $root -Name (Get-SmokeUiText -Text "Display and DDC system settings")
         if ($null -eq $displayDdcCategory) { throw "The System page did not expose its Display and DDC category." }
         $displayDdcCategoryPattern = $null
         if (-not $displayDdcCategory.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$displayDdcCategoryPattern)) {
@@ -490,17 +521,17 @@ public sealed class MonitorControlLiveRegionProbe : IDisposable
         if (-not ([System.Windows.Automation.SelectionItemPattern]$displayDdcCategoryPattern).Current.IsSelected) {
             throw "The Display and DDC category did not become selected."
         }
-        $adaptiveRadio = Get-ControlByName -Root $root -Name "Adaptive DDC timing" -ControlType ([System.Windows.Automation.ControlType]::RadioButton)
-        $manualRadio = Get-ControlByName -Root $root -Name "Manual DDC timing" -ControlType ([System.Windows.Automation.ControlType]::RadioButton)
+        $adaptiveRadio = Get-ControlByName -Root $root -Name (Get-SmokeUiText -Text "Adaptive DDC timing") -ControlType ([System.Windows.Automation.ControlType]::RadioButton)
+        $manualRadio = Get-ControlByName -Root $root -Name (Get-SmokeUiText -Text "Manual DDC timing") -ControlType ([System.Windows.Automation.ControlType]::RadioButton)
         if ($null -eq $adaptiveRadio -or $null -eq $manualRadio) { throw "The DDC timing mode controls were not exposed through UI Automation." }
         foreach ($retryName in @("DDC read retry budget", "DDC write retry budget", "DDC capability retry budget")) {
-            $retryBox = Get-ControlByName -Root $root -Name $retryName -ControlType ([System.Windows.Automation.ControlType]::Edit)
+            $retryBox = Get-ControlByName -Root $root -Name (Get-SmokeUiText -Text $retryName) -ControlType ([System.Windows.Automation.ControlType]::Edit)
             if ($null -eq $retryBox) { throw "The retry budget control '$retryName' was not exposed through UI Automation." }
         }
-        if ($null -eq (Get-ControlByName -Root $root -Name "Reset DDC timing calibration for this monitor" -ControlType ([System.Windows.Automation.ControlType]::Button))) {
+        if ($null -eq (Get-ControlByName -Root $root -Name (Get-SmokeUiText -Text "Reset DDC timing calibration for this monitor") -ControlType ([System.Windows.Automation.ControlType]::Button))) {
             throw "The DDC timing calibration reset control was not exposed through UI Automation."
         }
-        if ($null -eq (Get-ControlByName -Root $root -Name "Re-read selected monitor DDC values" -ControlType ([System.Windows.Automation.ControlType]::Button))) {
+        if ($null -eq (Get-ControlByName -Root $root -Name (Get-SmokeUiText -Text "Re-read selected monitor DDC values") -ControlType ([System.Windows.Automation.ControlType]::Button))) {
             throw "The selected-monitor DDC re-read control was not exposed through UI Automation."
         }
         $adaptivePattern = $null
@@ -525,7 +556,7 @@ public sealed class MonitorControlLiveRegionProbe : IDisposable
             throw "Manual DDC timing stayed selected after switching back to adaptive."
         }
 
-        $diagnosticsCategory = Get-TabByName -Root $root -Name "Diagnostics system settings"
+        $diagnosticsCategory = Get-TabByName -Root $root -Name (Get-SmokeUiText -Text "Diagnostics system settings")
         if ($null -eq $diagnosticsCategory) { throw "The System page did not expose its Diagnostics category." }
         $diagnosticsCategoryPattern = $null
         if (-not $diagnosticsCategory.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$diagnosticsCategoryPattern)) {
@@ -533,21 +564,21 @@ public sealed class MonitorControlLiveRegionProbe : IDisposable
         }
         ([System.Windows.Automation.SelectionItemPattern]$diagnosticsCategoryPattern).Select()
         Start-Sleep -Milliseconds 150
-        if ($null -eq (Get-ControlByName -Root $root -Name "Build DDC compatibility report" -ControlType ([System.Windows.Automation.ControlType]::Button))) {
+        if ($null -eq (Get-ControlByName -Root $root -Name (Get-SmokeUiText -Text "Build DDC compatibility report") -ControlType ([System.Windows.Automation.ControlType]::Button))) {
             throw "The Diagnostics category did not expose its named DDC report action."
         }
         ([System.Windows.Automation.SelectionItemPattern]$displayDdcCategoryPattern).Select()
         Start-Sleep -Milliseconds 150
     }
 
-    $displayTab = Get-TabByName -Root $root -Name "Display"
+    $displayTab = Get-TabByName -Root $root -Name (Get-SmokeUiText -Text "Display")
     $displayPattern = $null
     if ($displayTab.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$displayPattern)) {
         ([System.Windows.Automation.SelectionItemPattern]$displayPattern).Select()
         Start-Sleep -Milliseconds 125
         $monitorButtonCondition = New-Object System.Windows.Automation.PropertyCondition(
             [System.Windows.Automation.AutomationElement]::HelpTextProperty,
-            "Select this display"
+            (Get-SmokeUiText -Text "Select this display")
         )
         $monitorButton = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $monitorButtonCondition)
         if ($null -ne $monitorButton) {
@@ -560,16 +591,36 @@ public sealed class MonitorControlLiveRegionProbe : IDisposable
         }
     }
 
+    if ($UiCulture -eq "qps-ploc") {
+        $textCondition = New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [System.Windows.Automation.ControlType]::Text
+        )
+        $visiblePseudoTextCount = 0
+        $rootBounds = $root.Current.BoundingRectangle
+        foreach ($textElement in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $textCondition)) {
+            if ($textElement.Current.IsOffscreen -or [string]::IsNullOrWhiteSpace([string]$textElement.Current.Name)) { continue }
+            $textBounds = $textElement.Current.BoundingRectangle
+            if ($textBounds.Width -le 0 -or $textBounds.Height -le 0 -or
+                $textBounds.Left -lt $rootBounds.Left -or $textBounds.Top -lt $rootBounds.Top -or
+                $textBounds.Right -gt $rootBounds.Right -or $textBounds.Bottom -gt $rootBounds.Bottom) { continue }
+            if ([string]$textElement.Current.Name -like "[[]!!*") { $visiblePseudoTextCount++ }
+        }
+        if ($visiblePseudoTextCount -lt 10) {
+            throw "Pseudo-localization did not reach enough visible text controls (found $visiblePseudoTextCount)."
+        }
+    }
+
     if ($ExerciseValidationAlert) {
-        $vcpTab = Get-TabByName -Root $root -Name "VCP Explorer"
+        $vcpTab = Get-TabByName -Root $root -Name (Get-SmokeUiText -Text "VCP Explorer")
         $vcpTabPattern = $null
         if (-not $vcpTab.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$vcpTabPattern)) {
             throw "VCP Explorer cannot be selected for validation testing."
         }
         ([System.Windows.Automation.SelectionItemPattern]$vcpTabPattern).Select()
         Start-Sleep -Milliseconds 125
-        $codeBox = Get-ControlByName -Root $root -Name "VCP code" -ControlType ([System.Windows.Automation.ControlType]::Edit)
-        $queryButton = Get-ControlByName -Root $root -Name "Query" -ControlType ([System.Windows.Automation.ControlType]::Button)
+        $codeBox = Get-ControlByName -Root $root -Name (Get-SmokeUiText -Text "VCP code") -ControlType ([System.Windows.Automation.ControlType]::Edit)
+        $queryButton = Get-ControlByName -Root $root -Name (Get-SmokeUiText -Text "Query") -ControlType ([System.Windows.Automation.ControlType]::Button)
         if ($null -eq $codeBox -or $null -eq $queryButton) {
             $editCondition = New-Object System.Windows.Automation.PropertyCondition(
                 [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
@@ -604,7 +655,12 @@ public sealed class MonitorControlLiveRegionProbe : IDisposable
         }
         Start-Sleep -Milliseconds 250
         $root = [System.Windows.Automation.AutomationElement]::FromHandle($appWindowHandle)
-        $alert = Get-ControlByName -Root $root -Name "Error: Invalid VCP code" -ControlType ([System.Windows.Automation.ControlType]::Text)
+        $expectedAlertName = if ($UiCulture -eq "qps-ploc") {
+            "$(Get-SmokeUiText -Text 'Error'): $(Get-SmokeUiText -Text 'Invalid VCP code')"
+        } else {
+            "Error: Invalid VCP code"
+        }
+        $alert = Get-ControlByName -Root $root -Name $expectedAlertName -ControlType ([System.Windows.Automation.ControlType]::Text)
         if ($null -eq $alert) {
             $textCondition = New-Object System.Windows.Automation.PropertyCondition(
                 [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
@@ -621,7 +677,7 @@ public sealed class MonitorControlLiveRegionProbe : IDisposable
             Save-WindowScreenshot -Root $root -Path $ScreenshotPath
             $screenshotWritten = $true
         }
-        $dismissButton = Get-ControlByName -Root $root -Name "Dismiss" -ControlType ([System.Windows.Automation.ControlType]::Button)
+        $dismissButton = Get-ControlByName -Root $root -Name (Get-SmokeUiText -Text "Dismiss") -ControlType ([System.Windows.Automation.ControlType]::Button)
         if ($null -eq $dismissButton) { throw "The inline validation alert has no keyboard-accessible dismiss action." }
         $dismissObject = $null
         if (-not $dismissButton.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$dismissObject)) {
@@ -631,7 +687,7 @@ public sealed class MonitorControlLiveRegionProbe : IDisposable
         Start-Sleep -Milliseconds 125
     }
 
-    $hardwareTab = Get-TabByName -Root $root -Name "Hardware"
+    $hardwareTab = Get-TabByName -Root $root -Name (Get-SmokeUiText -Text "Hardware")
     if ($null -ne $hardwareTab -and -not $hardwareTab.Current.IsOffscreen) {
         $patternObject = $null
         if ($hardwareTab.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$patternObject)) {
@@ -681,5 +737,5 @@ public sealed class MonitorControlLiveRegionProbe : IDisposable
 }
 
 if (-not $Quiet) {
-    Write-Host "WPF smoke passed: $AppTheme theme, $TextScalePercent% text, navigated $($navigated -join ', '); clean exit $exitCode; real profile unchanged."
+    Write-Host "WPF smoke passed: $AppTheme theme, $TextScalePercent% text, culture $(if ($UiCulture) { $UiCulture } else { 'Windows default' }), navigated $($navigated -join ', '); clean exit $exitCode; real profile unchanged."
 }

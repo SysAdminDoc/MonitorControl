@@ -833,28 +833,34 @@ Import-MonitorControlNativeApi -TypeDefinition $nativeCode | Out-Null
 try { [MonitorAPI]::SetProcessDpiAwarenessContext([IntPtr](-4)) | Out-Null } catch {}
 
 function Set-DeferredStatus {
-    param([string]$Message)
+    param([string]$Message, [ValidateSet("Info", "Warning", "Error")][string]$Severity = "Info", [string]$Key = "")
     if ([string]::IsNullOrWhiteSpace($Message)) { return }
     try {
-        if ($statusText) { Update-Status $Message; return }
+        if ($statusText) { Update-Status $Message -Severity $Severity -Key $Key; return }
     } catch {}
     $script:PendingStatusMessage = $Message
+    $script:PendingStatusSeverity = $Severity
+    $script:PendingStatusKey = $Key
 }
 
 function Update-Status {
-    param([string]$Message)
+    param([string]$Message, [ValidateSet("Info", "Warning", "Error")][string]$Severity = "Info", [string]$Key = "")
+    $localizedMessage = Get-UiRuntimeText -Category "Status" -DefaultText $Message -Key $Key
     if ($null -eq $statusText) {
         $script:PendingStatusMessage = $Message
+        $script:PendingStatusSeverity = $Severity
+        $script:PendingStatusKey = $Key
         return
     }
-    $statusText.Text = $Message
-    [System.Windows.Automation.AutomationProperties]::SetName($statusText, "Status: $Message")
-    $severity = Get-StatusMessageSeverity -Message $Message
-    if ($severity -ne "Info") {
-        $statusBannerText.Text = $Message
-        [System.Windows.Automation.AutomationProperties]::SetName($statusBannerText, "$severity`: $Message")
-        $surfaceKey = if ($severity -eq "Error") { "DangerSurfaceBrush" } else { "WarningSurfaceBrush" }
-        $borderKey = if ($severity -eq "Error") { "DangerBrush" } else { "WarningBrush" }
+    $statusText.Text = $localizedMessage
+    [System.Windows.Automation.AutomationProperties]::SetName($statusText, (Get-UiRuntimeText -Category "A11y" -DefaultText "Status: {0}" -Key "A11y.StatusMessage" -ArgumentList @($localizedMessage)))
+    $resolvedSeverity = Resolve-StatusSeverity -Severity $Severity
+    if ($resolvedSeverity -ne "Info") {
+        $statusBannerText.Text = $localizedMessage
+        $severityText = Get-UiRuntimeText -Category "Status" -DefaultText $resolvedSeverity -Key "Status.Severity.$resolvedSeverity"
+        [System.Windows.Automation.AutomationProperties]::SetName($statusBannerText, (Get-UiRuntimeText -Category "A11y" -DefaultText "{0}: {1}" -Key "A11y.StatusAlert" -ArgumentList @($severityText, $localizedMessage)))
+        $surfaceKey = if ($resolvedSeverity -eq "Error") { "DangerSurfaceBrush" } else { "WarningSurfaceBrush" }
+        $borderKey = if ($resolvedSeverity -eq "Error") { "DangerBrush" } else { "WarningBrush" }
         $statusBannerBorder.SetResourceReference([System.Windows.Controls.Border]::BackgroundProperty, $surfaceKey)
         $statusBannerBorder.SetResourceReference([System.Windows.Controls.Border]::BorderBrushProperty, $borderKey)
         $statusBannerBorder.Visibility = [System.Windows.Visibility]::Visible
@@ -877,6 +883,8 @@ function Update-Status {
 $script:PhysicalMonitors = @()
 $script:CurrentMonitorIndex = 0
 $script:PendingStatusMessage = ""
+$script:PendingStatusSeverity = "Info"
+$script:PendingStatusKey = ""
 $script:HasNvidia = $false
 $script:HasAmd = $false
 $script:HasCpuTempMonitor = $false
@@ -1112,7 +1120,9 @@ $script:ProfileExportsPath = Join-Path $script:ProfilesPath "exports"
 $script:ProfileMetadataFiles = @("app-profile-rules.json", "profile-schedules.json", "idle-dim.json", "battery-profile.json", "profile-storage.json", "monitor-identities.json", "automation-bridge.json", "capabilities-safety.json", "capabilities-probe-pending.json", "vcp-write-safety.json", "optional-helpers.json", "display-restore.json", "capabilities-cache.json", "ddc-timing.json")
 $script:MonitorIdentityRecords = @{}
 $script:UpdatingMonitorLabelUI = $false
-$script:UiCulture = "en-US"
+$windowsUiCulture = [System.Globalization.CultureInfo]::CurrentUICulture.Name
+$script:UiCulture = Resolve-UiCultureName -RequestedCulture $Culture -WindowsCulture $windowsUiCulture
+$script:UiCultureInfo = Get-UiCultureInfo -CultureName $script:UiCulture
 $script:ThemePreference = $Theme
 $script:TextScaleOverridePercent = $TextScalePercent
 $script:CurrentTextScaleFactor = 1.0
@@ -1215,6 +1225,7 @@ $script:UiStrings = @{
     "A11y.ScheduleTimeline" = "Profile schedule timeline"
     "A11y.ErrorBanner" = "Application alert"
 }
+$script:UiCultureResources = @{ "en-US" = $script:UiStrings }
 $script:UpdatingUI = $false
 $script:UpdatingVcpValueEditor = $false
 $script:VcpValueEditorMode = "FreeEntry"
@@ -1905,8 +1916,13 @@ function Update-SystemAccessibility {
         $shellScrollViewer.HorizontalScrollBarVisibility = "Disabled"
         $shellScrollViewer.VerticalScrollBarVisibility = "Disabled"
     }
-    $themeDescription = if ($useHighContrast) { "High contrast colors are active." } else { "Dark application colors are active." }
-    [System.Windows.Automation.AutomationProperties]::SetHelpText($window, "$themeDescription Text scale: $([int]($scale * 100))%.")
+    $textScalePercent = Format-UiNumber -Value ([int]($scale * 100)) -Format "N0"
+    $helpText = if ($useHighContrast) {
+        Get-UiRuntimeText -Category "A11y" -DefaultText "High contrast colors are active. Text scale: {0}%." -Key "A11y.Theme.HighContrast" -ArgumentList @($textScalePercent)
+    } else {
+        Get-UiRuntimeText -Category "A11y" -DefaultText "Dark application colors are active. Text scale: {0}%." -Key "A11y.Theme.Dark" -ArgumentList @($textScalePercent)
+    }
+    [System.Windows.Automation.AutomationProperties]::SetHelpText($window, $helpText)
 }
 
 function Initialize-SystemAccessibility {
@@ -1999,6 +2015,123 @@ function Set-AccessibleName {
     }
 }
 
+function Set-UiControlStringProperty {
+    param($Control, [string]$Property, [string]$ResourceKey, [string]$DefaultText)
+    if ($null -eq $Control -or [string]::IsNullOrEmpty($DefaultText)) { return }
+    $localized = Get-UiRuntimeText -Category "Control" -DefaultText $DefaultText -Key $ResourceKey
+    try {
+        switch ($Property) {
+            "AutomationName" { [System.Windows.Automation.AutomationProperties]::SetName($Control, $localized) }
+            "AutomationHelpText" { [System.Windows.Automation.AutomationProperties]::SetHelpText($Control, $localized) }
+            default { $Control.$Property = $localized }
+        }
+    } catch {}
+}
+
+function Show-UiMessage {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Message,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Title,
+        [System.Windows.MessageBoxButton]$Button = [System.Windows.MessageBoxButton]::OK,
+        [System.Windows.MessageBoxImage]$Image = [System.Windows.MessageBoxImage]::None,
+        [string]$MessageKey = "",
+        [string]$TitleKey = "",
+        [object[]]$MessageArgumentList = @(),
+        [object[]]$TitleArgumentList = @()
+    )
+    $localizedMessage = Get-UiRuntimeText -Category "Dialog.Body" -DefaultText $Message -Key $MessageKey -ArgumentList $MessageArgumentList
+    $localizedTitle = Get-UiRuntimeText -Category "Dialog.Title" -DefaultText $Title -Key $TitleKey -ArgumentList $TitleArgumentList
+    return [System.Windows.MessageBox]::Show($localizedMessage, $localizedTitle, $Button, $Image)
+}
+
+function Register-UiDynamicStringObserver {
+    param(
+        [System.Windows.DependencyObject]$Control,
+        [System.Windows.DependencyProperty]$DependencyProperty,
+        [string]$Category
+    )
+    if ($null -eq $Control -or $null -eq $DependencyProperty) { return }
+    try {
+        $descriptor = [System.ComponentModel.DependencyPropertyDescriptor]::FromProperty($DependencyProperty, $Control.GetType())
+        if ($null -eq $descriptor) { return }
+        $observedControl = $Control
+        $observedProperty = $DependencyProperty
+        $observedCategory = $Category
+        $handler = [System.EventHandler]{
+            param($sender, $eventArgs)
+            try {
+                $current = $observedControl.GetValue($observedProperty)
+                if ($current -isnot [string] -or [string]::IsNullOrEmpty([string]$current)) { return }
+                $localized = Get-UiRuntimeText -Category $observedCategory -DefaultText ([string]$current)
+                if ($localized -cne [string]$current) { $observedControl.SetValue($observedProperty, $localized) }
+            } catch {}
+        }.GetNewClosure()
+        $descriptor.AddValueChanged($Control, $handler)
+        if ($null -eq $script:UiDynamicStringObservers) { $script:UiDynamicStringObservers = New-Object System.Collections.ArrayList }
+        [void]$script:UiDynamicStringObservers.Add([PSCustomObject]@{ Control = $Control; Descriptor = $descriptor; Handler = $handler })
+    } catch {}
+}
+
+function Register-UiControlResources {
+    param($Root, [string]$RootKey = "Main")
+    if ($null -eq $Root) { return }
+    $pending = New-Object System.Collections.Queue
+    $pending.Enqueue([PSCustomObject]@{ Node = $Root; Path = $RootKey })
+    $visited = New-Object "System.Collections.Generic.HashSet[int]"
+    while ($pending.Count -gt 0) {
+        $entry = $pending.Dequeue()
+        $node = $entry.Node
+        if ($null -eq $node -or $node -is [string] -or $node -isnot [System.Windows.DependencyObject]) { continue }
+        $identity = [System.Runtime.CompilerServices.RuntimeHelpers]::GetHashCode($node)
+        if (-not $visited.Add($identity)) { continue }
+        $name = ""
+        try { $name = [string]$node.Name } catch {}
+        $controlKey = if ([string]::IsNullOrWhiteSpace($name)) { [string]$entry.Path } else { "$RootKey.$name" }
+        foreach ($propertyName in @("Text", "Content", "Header", "ToolTip")) {
+            if ($node.PSObject.Properties.Name -notcontains $propertyName) { continue }
+            if ($propertyName -eq "Text" -and $node -isnot [System.Windows.Controls.TextBlock] -and -not ($node -is [System.Windows.Controls.TextBox] -and $node.IsReadOnly)) { continue }
+            if ($propertyName -eq "Content" -and ($node -is [System.Windows.Controls.ListBoxItem] -or $node -is [System.Windows.Controls.ComboBoxItem])) { continue }
+            $propertyValue = $null
+            try { $propertyValue = $node.$propertyName } catch {}
+            if ($propertyValue -is [string] -and -not [string]::IsNullOrEmpty([string]$propertyValue)) {
+                Set-UiControlStringProperty -Control $node -Property $propertyName -ResourceKey "Control.$controlKey.$propertyName" -DefaultText ([string]$propertyValue)
+            }
+        }
+        $automationName = [System.Windows.Automation.AutomationProperties]::GetName($node)
+        if (-not [string]::IsNullOrWhiteSpace($automationName)) {
+            Set-UiControlStringProperty -Control $node -Property "AutomationName" -ResourceKey "Control.$controlKey.AutomationName" -DefaultText $automationName
+        }
+        $automationHelp = [System.Windows.Automation.AutomationProperties]::GetHelpText($node)
+        if (-not [string]::IsNullOrWhiteSpace($automationHelp)) {
+            Set-UiControlStringProperty -Control $node -Property "AutomationHelpText" -ResourceKey "Control.$controlKey.AutomationHelpText" -DefaultText $automationHelp
+        }
+        if ($node -is [System.Windows.Controls.TextBlock] -or ($node -is [System.Windows.Controls.TextBox] -and $node.IsReadOnly)) {
+            $textProperty = if ($node -is [System.Windows.Controls.TextBlock]) { [System.Windows.Controls.TextBlock]::TextProperty } else { [System.Windows.Controls.TextBox]::TextProperty }
+            Register-UiDynamicStringObserver -Control $node -DependencyProperty $textProperty -Category "Control.Dynamic.Text"
+        }
+        if ($node -is [System.Windows.Controls.ContentControl] -and $node -isnot [System.Windows.Controls.ListBoxItem] -and $node -isnot [System.Windows.Controls.ComboBoxItem]) {
+            Register-UiDynamicStringObserver -Control $node -DependencyProperty ([System.Windows.Controls.ContentControl]::ContentProperty) -Category "Control.Dynamic.Content"
+        }
+        if ($node -is [System.Windows.Controls.HeaderedContentControl]) {
+            Register-UiDynamicStringObserver -Control $node -DependencyProperty ([System.Windows.Controls.HeaderedContentControl]::HeaderProperty) -Category "Control.Dynamic.Header"
+        }
+        if ($node -is [System.Windows.FrameworkElement]) {
+            Register-UiDynamicStringObserver -Control $node -DependencyProperty ([System.Windows.FrameworkElement]::ToolTipProperty) -Category "Control.Dynamic.ToolTip"
+        }
+        Register-UiDynamicStringObserver -Control $node -DependencyProperty ([System.Windows.Automation.AutomationProperties]::NameProperty) -Category "A11y.Dynamic.Name"
+        Register-UiDynamicStringObserver -Control $node -DependencyProperty ([System.Windows.Automation.AutomationProperties]::HelpTextProperty) -Category "A11y.Dynamic.HelpText"
+        $childIndex = 0
+        try {
+            foreach ($child in [System.Windows.LogicalTreeHelper]::GetChildren($node)) {
+                if ($null -eq $child -or $child -is [string]) { continue }
+                $childType = $child.GetType().Name
+                $pending.Enqueue([PSCustomObject]@{ Node = $child; Path = "$controlKey.$childType.$childIndex" })
+                $childIndex++
+            }
+        } catch {}
+    }
+}
+
 function Set-TabOrder {
     param([object[]]$Controls)
     $index = 0
@@ -2013,8 +2146,8 @@ function Set-TabOrder {
 
 function Initialize-LocalizationAndAccessibility {
     if ($window) {
-        $window.Title = "$(Get-UiString -Key 'App.Title') v$script:AppVersion"
-        [System.Windows.Automation.AutomationProperties]::SetName($window, "$(Get-UiString -Key 'App.Title') main window")
+        $window.Title = Get-UiRuntimeText -Category "Window" -DefaultText "MonitorControl Pro v{0}" -Key "Window.Main.Title" -ArgumentList @($script:AppVersion)
+        [System.Windows.Automation.AutomationProperties]::SetName($window, (Get-UiRuntimeText -Category "A11y" -DefaultText "MonitorControl Pro main window" -Key "A11y.MainWindow"))
     }
     Set-LocalizedText -Control $appTitleText -Key "App.Title" -Property "Text"
     Set-LocalizedText -Control $appSubtitleText -Key "App.Subtitle" -Property "Text"
@@ -2129,7 +2262,7 @@ function Initialize-LocalizationAndAccessibility {
         [PSCustomObject]@{ Control = $systemTab; Text = "Alt+S" }
     )) {
         if ($null -ne $shortcut.Control) {
-            [System.Windows.Automation.AutomationProperties]::SetHelpText($shortcut.Control, "Keyboard shortcut: $($shortcut.Text)")
+            [System.Windows.Automation.AutomationProperties]::SetHelpText($shortcut.Control, (Get-UiRuntimeText -Category "A11y" -DefaultText "Keyboard shortcut: {0}" -Key "A11y.KeyboardShortcut" -ArgumentList @($shortcut.Text)))
         }
     }
 
@@ -2180,18 +2313,16 @@ function Initialize-LocalizationAndAccessibility {
 function Confirm-AutomationRuleRiskyWriteConsent {
     param([string]$RuleLabel)
     $message = @"
-This rule-level permission allows '$RuleLabel' to use risky VCP values if a profile supports them in the future.
+This rule-level permission allows '{0}' to use risky VCP values if a profile supports them in the future.
 
 Power, input, reset, and arbitrary VCP writes can blank the display, change its input, or erase monitor settings. The target monitor must also be unlocked separately in System. Each write is still verified when the monitor supports readback.
 
 Allow risky writes for this automation rule?
 "@
-    $result = [System.Windows.MessageBox]::Show(
-        $message,
-        "Automation risky-write consent",
-        [System.Windows.MessageBoxButton]::YesNo,
-        [System.Windows.MessageBoxImage]::Warning
-    )
+    $result = Show-UiMessage -Message $message -Title "Automation risky-write consent" `
+        -Button ([System.Windows.MessageBoxButton]::YesNo) -Image ([System.Windows.MessageBoxImage]::Warning) `
+        -MessageKey "Dialog.AutomationRiskyWrite.Body" -TitleKey "Dialog.AutomationRiskyWrite.Title" `
+        -MessageArgumentList @($RuleLabel)
     return $result -eq [System.Windows.MessageBoxResult]::Yes
 }
 
@@ -2225,12 +2356,9 @@ Some non-compliant monitors and adapters have returned malformed data that can d
 
 Enable capability discovery? Choose No to keep controls in maximum-safety fallback mode. You can change this later in System.
 "@
-    $result = [System.Windows.MessageBox]::Show(
-        $message,
-        "Capability discovery safety",
-        [System.Windows.MessageBoxButton]::YesNo,
-        [System.Windows.MessageBoxImage]::Warning
-    )
+    $result = Show-UiMessage -Message $message -Title "Capability discovery safety" `
+        -Button ([System.Windows.MessageBoxButton]::YesNo) -Image ([System.Windows.MessageBoxImage]::Warning) `
+        -MessageKey "Dialog.CapabilityDiscovery.Body" -TitleKey "Dialog.CapabilityDiscovery.Title"
     $script:CapabilitiesConsentRecorded = $true
     $script:CapabilitiesDiscoveryEnabled = ($result -eq [System.Windows.MessageBoxResult]::Yes)
     Write-CapabilitySafetyState | Out-Null
@@ -2822,12 +2950,9 @@ function Invoke-ManualVcpWrite {
     if ($null -eq $ConfirmWrite) {
         $ConfirmWrite = {
             param([string]$Message)
-            return ([System.Windows.MessageBox]::Show(
-                $Message,
-                "Confirm exact VCP write",
-                [System.Windows.MessageBoxButton]::YesNo,
-                [System.Windows.MessageBoxImage]::Warning
-            ) -eq [System.Windows.MessageBoxResult]::Yes)
+            return ((Show-UiMessage -Message $Message -Title "Confirm exact VCP write" `
+                -Button ([System.Windows.MessageBoxButton]::YesNo) -Image ([System.Windows.MessageBoxImage]::Warning) `
+                -TitleKey "Dialog.ExactVcpWrite.Title") -eq [System.Windows.MessageBoxResult]::Yes)
         }
     }
     $monitors = if ($AllMonitors) {
@@ -3175,14 +3300,12 @@ This bind address exposes the automation bridge beyond this PC.
 
 All routes except the minimal health check require an API key, but the bridge uses unencrypted HTTP. A client or network observer could capture that key. Only continue on a trusted network with an appropriate Windows Firewall rule.
 
-Expose the bridge on $($Address.ToString())?
+Expose the bridge on {0}?
 "@
-    $result = [System.Windows.MessageBox]::Show(
-        $message,
-        "Expose automation bridge to the network?",
-        [System.Windows.MessageBoxButton]::YesNo,
-        [System.Windows.MessageBoxImage]::Warning
-    )
+    $result = Show-UiMessage -Message $message -Title "Expose automation bridge to the network?" `
+        -Button ([System.Windows.MessageBoxButton]::YesNo) -Image ([System.Windows.MessageBoxImage]::Warning) `
+        -MessageKey "Dialog.AutomationBridgeExposure.Body" -TitleKey "Dialog.AutomationBridgeExposure.Title" `
+        -MessageArgumentList @($Address.ToString())
     if ($result -ne [System.Windows.MessageBoxResult]::Yes) { return $false }
     $script:AutomationBridgeNetworkExposureApproved = $true
     $script:AutomationBridgeNetworkExposureApprovedFor = $Address.ToString()
@@ -4010,8 +4133,8 @@ if ($CliWorker) {
                 <Border Grid.Column="1" Background="{DynamicResource CanvasBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="30,24,30,20">
                     <Grid>
                         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="18"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-                        <TextBlock Text="{Binding SelectedItem.Header, RelativeSource={RelativeSource TemplatedParent}}" FontSize="28" FontWeight="SemiBold" Foreground="{DynamicResource TextBrush}"/>
-                        <TextBlock Grid.Row="1" Text="{Binding SelectedItem.ToolTip, RelativeSource={RelativeSource TemplatedParent}}" FontSize="13" Foreground="{DynamicResource MutedTextBrush}" Margin="0,4,0,0"/>
+                        <TextBlock Text="{Binding SelectedItem.Header, RelativeSource={RelativeSource TemplatedParent}}" FontSize="28" FontWeight="SemiBold" Foreground="{DynamicResource TextBrush}" TextWrapping="Wrap"/>
+                        <TextBlock Grid.Row="1" Text="{Binding SelectedItem.ToolTip, RelativeSource={RelativeSource TemplatedParent}}" FontSize="13" Foreground="{DynamicResource MutedTextBrush}" Margin="0,4,0,0" TextWrapping="Wrap"/>
                         <ScrollViewer Grid.Row="3" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto"
                                       CanContentScroll="False" Focusable="False">
                             <ContentPresenter x:Name="PART_SelectedContentHost" ContentSource="SelectedContent"
@@ -4034,7 +4157,9 @@ if ($CliWorker) {
                     <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                     <Border x:Name="Indicator" Width="3" Height="22" CornerRadius="2" Background="{DynamicResource AccentBrush}" HorizontalAlignment="Left" Margin="-18,0,0,0" Visibility="Collapsed"/>
                     <TextBlock Text="{TemplateBinding Tag}" FontFamily="Segoe MDL2 Assets" FontSize="18" Foreground="{TemplateBinding Foreground}" VerticalAlignment="Center"/>
-                    <ContentPresenter Grid.Column="1" ContentSource="Header" HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                    <ContentPresenter Grid.Column="1" ContentSource="Header" HorizontalAlignment="Stretch" VerticalAlignment="Center">
+                        <ContentPresenter.ContentTemplate><DataTemplate><TextBlock Text="{Binding}" TextWrapping="Wrap"/></DataTemplate></ContentPresenter.ContentTemplate>
+                    </ContentPresenter>
                 </Grid>
             </Border>
             <ControlTemplate.Triggers>
@@ -4224,11 +4349,9 @@ if ($CliWorker) {
                     <TextBlock x:Name="SelectedMonitorInfo" Grid.Column="1" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="10,0,0,0" TextTrimming="CharacterEllipsis"/>
                 </Grid>
             </StackPanel>
-            <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,4,0,4">
-                <CheckBox x:Name="ApplyAllCheckbox" Content="All displays" VerticalAlignment="Center" Margin="0,0,16,0"/>
-                <Button x:Name="IdentifyBtn" Content="Identify" Style="{StaticResource Btn}" Margin="0,0,8,0"/>
-                <Button x:Name="RefreshBtn" Content="Refresh" Style="{StaticResource Btn}"/>
-            </StackPanel>
+            <CheckBox x:Name="ApplyAllCheckbox" Content="All displays" VerticalAlignment="Center" Margin="0,4,16,4"/>
+            <Button x:Name="IdentifyBtn" Content="Identify" Style="{StaticResource Btn}" VerticalAlignment="Center" Margin="0,4,8,4"/>
+            <Button x:Name="RefreshBtn" Content="Refresh" Style="{StaticResource Btn}" VerticalAlignment="Center" Margin="0,4,0,4"/>
         </WrapPanel>
     </Border>
     <Border x:Name="StatusBannerBorder" Grid.Row="1" Grid.ColumnSpan="2" Visibility="Collapsed"
@@ -4885,7 +5008,12 @@ $statusText = $window.FindName("StatusText"); $autoModeText = $window.FindName("
 $transactionProgressPanel = $window.FindName("TransactionProgressPanel"); $transactionProgressText = $window.FindName("TransactionProgressText")
 $transactionProgressBar = $window.FindName("TransactionProgressBar"); $transactionCancelBtn = $window.FindName("TransactionCancelBtn")
 
-if ($script:PendingStatusMessage) { Update-Status $script:PendingStatusMessage; $script:PendingStatusMessage = "" }
+if ($script:PendingStatusMessage) {
+    Update-Status $script:PendingStatusMessage -Severity $script:PendingStatusSeverity -Key $script:PendingStatusKey
+    $script:PendingStatusMessage = ""
+    $script:PendingStatusSeverity = "Info"
+    $script:PendingStatusKey = ""
+}
 Initialize-LocalizationAndAccessibility
 Initialize-SystemAccessibility
 Start-DdcWriteResultTimer
@@ -6767,10 +6895,10 @@ function Import-ProfileBundle {
             $skipPreview = Format-ProfileBundleImportPreview -Plan $plan -ConflictMode "Skip"
             $message = @"
 Replace-conflicts plan:
-$replacePreview
+{0}
 
 Skip-conflicts plan:
-$skipPreview
+{1}
 
 Yes: create new profiles and replace conflicts.
 No: create new profiles and skip conflicts.
@@ -6778,24 +6906,20 @@ Cancel: import nothing.
 
 All accepted profiles are staged and committed together.
 "@
-            $choice = [System.Windows.MessageBox]::Show(
-                $message,
-                "Preview profile bundle import",
-                [System.Windows.MessageBoxButton]::YesNoCancel,
-                [System.Windows.MessageBoxImage]::Question
-            )
+            $choice = Show-UiMessage -Message $message -Title "Preview profile bundle import" `
+                -Button ([System.Windows.MessageBoxButton]::YesNoCancel) -Image ([System.Windows.MessageBoxImage]::Question) `
+                -MessageKey "Dialog.ProfileBundleConflictPreview.Body" -TitleKey "Dialog.ProfileBundlePreview.Title" `
+                -MessageArgumentList @($replacePreview, $skipPreview)
             if ($choice -eq [System.Windows.MessageBoxResult]::Cancel) {
                 Update-Status "Profile bundle import cancelled"
                 return 0
             }
             $ConflictMode = if ($choice -eq [System.Windows.MessageBoxResult]::Yes) { "Replace" } else { "Skip" }
         } else {
-            $choice = [System.Windows.MessageBox]::Show(
-                "$replacePreview`n`nImport these profiles as one transaction?",
-                "Preview profile bundle import",
-                [System.Windows.MessageBoxButton]::OKCancel,
-                [System.Windows.MessageBoxImage]::Question
-            )
+            $choice = Show-UiMessage -Message "{0}`n`nImport these profiles as one transaction?" `
+                -Title "Preview profile bundle import" -Button ([System.Windows.MessageBoxButton]::OKCancel) `
+                -Image ([System.Windows.MessageBoxImage]::Question) -MessageKey "Dialog.ProfileBundlePreview.Body" `
+                -TitleKey "Dialog.ProfileBundlePreview.Title" -MessageArgumentList @($replacePreview)
             if ($choice -ne [System.Windows.MessageBoxResult]::OK) {
                 Update-Status "Profile bundle import cancelled"
                 return 0
@@ -7264,12 +7388,12 @@ function Invoke-ProfileStorageMigration {
     if ($ConflictMode -eq "Prompt") {
         $copyPreview = Format-ProfileStorageMigrationPreview -Plan $copyPlan
         $mergePreview = Format-ProfileStorageMigrationPreview -Plan $mergePlan
-        $choice = [System.Windows.MessageBox]::Show(
-            "Source: $($copyPlan.SourceRoot)`nDestination: $($copyPlan.DestinationRoot)`n`n$copyPreview`n`n$mergePreview`n`nYes: Copy`nNo: Merge`nCancel: no changes",
-            "Preview profile storage migration",
-            [System.Windows.MessageBoxButton]::YesNoCancel,
-            [System.Windows.MessageBoxImage]::Question
-        )
+        $choice = Show-UiMessage `
+            -Message "Source: {0}`nDestination: {1}`n`n{2}`n`n{3}`n`nYes: Copy`nNo: Merge`nCancel: no changes" `
+            -Title "Preview profile storage migration" -Button ([System.Windows.MessageBoxButton]::YesNoCancel) `
+            -Image ([System.Windows.MessageBoxImage]::Question) -MessageKey "Dialog.ProfileStorageMigration.Body" `
+            -TitleKey "Dialog.ProfileStorageMigration.Title" `
+            -MessageArgumentList @($copyPlan.SourceRoot, $copyPlan.DestinationRoot, $copyPreview, $mergePreview)
         if ($choice -eq [System.Windows.MessageBoxResult]::Cancel) {
             Update-Status "Profile storage migration cancelled"
             return [PSCustomObject]@{ Success = $false; ErrorCode = "cancelled"; Cancelled = $true }
@@ -8026,16 +8150,16 @@ function Start-BatteryProfileWatcher {
 }
 
 function Get-CurrentMonitorLabel {
-    if ($script:ApplyToAll) { return "All monitors" }
-    if ($script:PhysicalMonitors.Count -eq 0 -or $script:CurrentMonitorIndex -ge $script:PhysicalMonitors.Count) { return "No monitor" }
+    if ($script:ApplyToAll) { return Get-UiRuntimeText -Category "Tray" -DefaultText "All monitors" -Key "Tray.AllMonitors" }
+    if ($script:PhysicalMonitors.Count -eq 0 -or $script:CurrentMonitorIndex -ge $script:PhysicalMonitors.Count) { return Get-UiRuntimeText -Category "Tray" -DefaultText "No monitor" -Key "Tray.NoMonitor" }
     $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
-    return "$($mon.Index): $(Get-MonitorDisplayLabel -Monitor $mon)"
+    return Get-UiRuntimeText -Category "Tray" -DefaultText "{0}: {1}" -Key "Tray.MonitorLabel" -ArgumentList @((Format-UiNumber -Value $mon.Index -Format "N0"), (Get-MonitorDisplayLabel -Monitor $mon))
 }
 
 function Update-TrayIconText {
     if ($null -eq $script:TrayIcon) { return }
     $brightness = [int](Get-SelectedBrightnessPercent)
-    $text = "MonitorControl Pro - $(Get-CurrentMonitorLabel) - $brightness%"
+    $text = Get-UiRuntimeText -Category "Tray" -DefaultText "MonitorControl Pro - {0} - {1}%" -Key "Tray.IconText" -ArgumentList @((Get-CurrentMonitorLabel), (Format-UiNumber -Value $brightness -Format "N0"))
     if ($text.Length -gt 63) { $text = $text.Substring(0, 63) }
     $script:TrayIcon.Text = $text
 }
@@ -8043,8 +8167,8 @@ function Update-TrayIconText {
 function Show-TrayNotification {
     param([string]$Message)
     if ($null -eq $script:TrayIcon -or -not $script:TrayIcon.Visible) { return }
-    $script:TrayIcon.BalloonTipTitle = "MonitorControl Pro"
-    $script:TrayIcon.BalloonTipText = $Message
+    $script:TrayIcon.BalloonTipTitle = Get-UiRuntimeText -Category "Tray" -DefaultText "MonitorControl Pro" -Key "Tray.Notification.Title"
+    $script:TrayIcon.BalloonTipText = Get-UiRuntimeText -Category "Tray" -DefaultText $Message
     $script:TrayIcon.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Info
     $script:TrayIcon.ShowBalloonTip(1500)
 }
@@ -8067,7 +8191,7 @@ function Update-TrayPopupState {
         $script:TrayBrightnessSlider.Maximum = $brightnessSlider.Maximum
         $value = [Math]::Min($brightnessSlider.Maximum, [Math]::Max($brightnessSlider.Minimum, [double]$brightnessSlider.Value))
         $script:TrayBrightnessSlider.Value = $value
-        $script:TrayBrightnessValue.Text = ([int]$value).ToString()
+        $script:TrayBrightnessValue.Text = Format-UiNumber -Value ([int]$value) -Format "N0"
         $script:TrayMonitorText.Text = Get-CurrentMonitorLabel
         $script:TrayLinkCheckbox.IsChecked = [bool]$script:ApplyToAll
     } finally {
@@ -8128,7 +8252,7 @@ function New-TrayPopup {
     $script:TrayBrightnessSlider.Add_ValueChanged({
         if ($script:TrayPopupUpdating) { return }
         $value = [int]$script:TrayBrightnessSlider.Value
-        $script:TrayBrightnessValue.Text = $value.ToString()
+        $script:TrayBrightnessValue.Text = Format-UiNumber -Value $value -Format "N0"
         $script:UpdatingUI = $true
         try {
             $brightnessSlider.Value = $value
@@ -8146,6 +8270,7 @@ function New-TrayPopup {
     $trayProfileButton.Add_Click({ Invoke-NextProfile })
     $trayHideButton.Add_Click({ if ($script:TrayPopup -and $script:TrayPopup.IsVisible) { $script:TrayPopup.Hide() } })
     $script:TrayPopup.Add_Deactivated({ if ($script:TrayPopup -and $script:TrayPopup.IsVisible) { $script:TrayPopup.Hide() } })
+    Register-UiControlResources -Root $script:TrayPopup -RootKey "Tray"
 }
 
 function Show-TrayPopup {
@@ -8225,12 +8350,12 @@ function Initialize-TrayIcon {
     $script:TrayIcon.Visible = $true
 
     $menu = New-Object System.Windows.Forms.ContextMenuStrip
-    $openItem = New-Object System.Windows.Forms.ToolStripMenuItem("Open MonitorControl")
-    $brightnessItem = New-Object System.Windows.Forms.ToolStripMenuItem("Brightness Slider")
-    $script:TrayLinkMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem("Link Monitors")
-    $profileItem = New-Object System.Windows.Forms.ToolStripMenuItem("Next Profile")
-    $refreshItem = New-Object System.Windows.Forms.ToolStripMenuItem("Refresh Monitors")
-    $exitItem = New-Object System.Windows.Forms.ToolStripMenuItem("Exit")
+    $openItem = New-Object System.Windows.Forms.ToolStripMenuItem((Get-UiRuntimeText -Category "Tray.Menu" -DefaultText "Open MonitorControl" -Key "Tray.Menu.Open"))
+    $brightnessItem = New-Object System.Windows.Forms.ToolStripMenuItem((Get-UiRuntimeText -Category "Tray.Menu" -DefaultText "Brightness Slider" -Key "Tray.Menu.Brightness"))
+    $script:TrayLinkMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem((Get-UiRuntimeText -Category "Tray.Menu" -DefaultText "Link Monitors" -Key "Tray.Menu.Link"))
+    $profileItem = New-Object System.Windows.Forms.ToolStripMenuItem((Get-UiRuntimeText -Category "Tray.Menu" -DefaultText "Next Profile" -Key "Tray.Menu.NextProfile"))
+    $refreshItem = New-Object System.Windows.Forms.ToolStripMenuItem((Get-UiRuntimeText -Category "Tray.Menu" -DefaultText "Refresh Monitors" -Key "Tray.Menu.Refresh"))
+    $exitItem = New-Object System.Windows.Forms.ToolStripMenuItem((Get-UiRuntimeText -Category "Tray.Menu" -DefaultText "Exit" -Key "Tray.Menu.Exit"))
 
     $script:TrayLinkMenuItem.CheckOnClick = $true
     $script:TrayLinkMenuItem.Checked = [bool]$script:ApplyToAll
@@ -8392,17 +8517,26 @@ function Get-PresentMonFpsSnapshot {
                 $frameTimes += $parsed
             }
         }
-        if ($frameTimes.Count -eq 0) { return @{ Success = $false; Text = "FPS --"; Status = "No active PresentMon frames" } }
+        if ($frameTimes.Count -eq 0) { return @{ Success = $false; Text = (Get-UiRuntimeText -Category "Overlay.Fps" -DefaultText "FPS --" -Key "Overlay.Fps.Unavailable"); Status = (Get-UiRuntimeText -Category "Status" -DefaultText "No active PresentMon frames" -Key "Status.NoPresentMonFrames") } }
         $avgMs = ($frameTimes | Measure-Object -Average).Average
         $fps = [math]::Round(1000 / $avgMs, 1)
-        $appName = "Active app"
+        $appName = Get-UiRuntimeText -Category "Overlay.Fps" -DefaultText "Active app" -Key "Overlay.Fps.ActiveApp"
         if ($appColumn) {
             $topApp = $rows | Where-Object { $_.$appColumn } | Group-Object -Property $appColumn | Sort-Object Count -Descending | Select-Object -First 1
             if ($topApp) { $appName = [string]$topApp.Name }
         }
-        return @{ Success = $true; Text = "$fps FPS`n$appName"; Status = "$fps FPS - $appName" }
+        $fpsText = Format-UiNumber -Value $fps -Format "N1"
+        return @{
+            Success = $true
+            Text = Get-UiRuntimeText -Category "Overlay.Fps" -DefaultText "{0} FPS`n{1}" -Key "Overlay.Fps.Reading" -ArgumentList @($fpsText, $appName)
+            Status = Get-UiRuntimeText -Category "Status" -DefaultText "{0} FPS - {1}" -Key "Status.FpsReading" -ArgumentList @($fpsText, $appName)
+        }
     } catch {
-        return @{ Success = $false; Text = "FPS --"; Status = "PresentMon error: $_" }
+        return @{
+            Success = $false
+            Text = Get-UiRuntimeText -Category "Overlay.Fps" -DefaultText "FPS --" -Key "Overlay.Fps.Unavailable"
+            Status = Get-UiRuntimeText -Category "Status" -DefaultText "PresentMon error: {0}" -Key "Status.PresentMonError" -ArgumentList @([string]$_)
+        }
     }
 }
 
@@ -8436,9 +8570,10 @@ function Show-FpsOverlay {
         $border.BorderBrush = Get-ThemeBrush -Key "SuccessBrush"
         $border.BorderThickness = New-Object System.Windows.Thickness(1); $border.CornerRadius = New-Object System.Windows.CornerRadius(6); $border.Padding = New-Object System.Windows.Thickness(12, 8, 12, 8)
         $text = New-Object System.Windows.Controls.TextBlock
-        $text.Text = "FPS --"; $text.Foreground = Get-ThemeBrush -Key "TextBrush"; $text.FontFamily = "Segoe UI"; $text.FontSize = 14; $text.FontWeight = "SemiBold"
+        $text.Text = Get-UiRuntimeText -Category "Overlay.Fps" -DefaultText "FPS --" -Key "Overlay.Fps.Unavailable"; $text.Foreground = Get-ThemeBrush -Key "TextBrush"; $text.FontFamily = "Segoe UI"; $text.FontSize = 14; $text.FontWeight = "SemiBold"
         $border.Child = $text; $overlay.Content = $border
         $script:FpsOverlayWindow = $overlay; $script:FpsOverlayText = $text
+        Register-UiControlResources -Root $overlay -RootKey "FpsOverlay"
     }
     $script:FpsOverlayWindow.Show()
     if (-not $script:FpsOverlayTimer) {
@@ -8596,25 +8731,25 @@ $vcpQueryBtn.Add_Click({
     try {
         $code = ConvertTo-VcpCode -Text $vcpCodeBox.Text
         if ($null -eq $code) {
-            $vcpResultBox.Text = "Invalid VCP code"
-            Update-Status "Invalid VCP code"
+            $vcpResultBox.Text = Get-UiRuntimeText -Category "Vcp.Result" -DefaultText "Invalid VCP code" -Key "Vcp.Result.InvalidCode"
+            Update-Status "Invalid VCP code" -Severity Error -Key "Status.InvalidVcpCode"
             return
         }
         if ($script:PhysicalMonitors.Count -eq 0 -or $script:CurrentMonitorIndex -lt 0 -or $script:CurrentMonitorIndex -ge $script:PhysicalMonitors.Count) {
-            $vcpResultBox.Text = "No monitor selected"
-            Update-Status "No monitor selected"
+            $vcpResultBox.Text = Get-UiRuntimeText -Category "Vcp.Result" -DefaultText "No monitor selected" -Key "Vcp.Result.NoMonitorSelected"
+            Update-Status "No monitor selected" -Severity Error -Key "Status.NoMonitorSelected"
             return
         }
         $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
         if ($mon.Handle -eq [IntPtr]::Zero) {
-            $vcpResultBox.Text = "No DDC/CI"
-            Update-Status "No DDC/CI read target"
+            $vcpResultBox.Text = Get-UiRuntimeText -Category "Vcp.Result" -DefaultText "No DDC/CI" -Key "Vcp.Result.NoDdc"
+            Update-Status "No DDC/CI read target" -Severity Error -Key "Status.NoDdcReadTarget"
             return
         }
         Start-VcpReadWorker -Handle $mon.Handle -Codes @($code) -Mode "Query" -MonitorName $mon.Name -IdentityKey $mon.IdentityKey -MonitorIndex $script:CurrentMonitorIndex
     } catch {
-        $vcpResultBox.Text = "Query failed"
-        Update-Status "VCP query failed"
+        $vcpResultBox.Text = Get-UiRuntimeText -Category "Vcp.Result" -DefaultText "Query failed" -Key "Vcp.Result.QueryFailed"
+        Update-Status "VCP query failed" -Severity Error -Key "Status.VcpQueryFailed"
     }
 })
 $vcpSetBtn.Add_Click({
@@ -8628,12 +8763,12 @@ $vcpSetBtn.Add_Click({
     } catch { Update-Status "Error: $_" }
 })
 $vcpScanBtn.Add_Click({
-    $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]; if ($mon.Handle -eq [IntPtr]::Zero) { $vcpResultBox.Text = "No DDC/CI"; return }
+    $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]; if ($mon.Handle -eq [IntPtr]::Zero) { $vcpResultBox.Text = Get-UiRuntimeText -Category "Vcp.Result" -DefaultText "No DDC/CI" -Key "Vcp.Result.NoDdc"; return }
     $capabilitiesOnly = [bool]$vcpScanCapabilitiesOnlyCheckbox.IsChecked
     if ($capabilitiesOnly) {
         if (-not [bool]$mon.CapabilitiesKnown -or $mon.SupportedVcpCodes.Count -eq 0) {
-            $vcpResultBox.Text = "Capabilities VCP list is not available for $($mon.Name). Clear Caps only to probe the full table."
-            Update-Status "Capabilities VCP list unavailable"
+            $vcpResultBox.Text = Get-UiRuntimeText -Category "Vcp.Result" -DefaultText "Capabilities VCP list is not available for {0}. Clear Caps only to probe the full table." -Key "Vcp.Result.CapabilitiesUnavailable" -ArgumentList @($mon.Name)
+            Update-Status "Capabilities VCP list unavailable" -Severity Warning -Key "Status.CapabilitiesVcpListUnavailable"
             return
         }
         $codes = @($mon.SupportedVcpCodes.Keys | Sort-Object)
@@ -8654,7 +8789,13 @@ $loadProfileBtn.Add_Click({
 })
 $deleteProfileBtn.Add_Click({
     if (-not (Test-ProfileStorageWriteAllowed -Operation "profile deletion")) { return }
-    if ($profilesList.SelectedItem -ne $null -and [System.Windows.MessageBox]::Show("Move '$($profilesList.SelectedItem)' and its dependent automation to local Trash?", "Move profile to Trash", "YesNo", "Question") -eq "Yes") {
+    $deleteChoice = if ($profilesList.SelectedItem -eq $null) { [System.Windows.MessageBoxResult]::None } else {
+        Show-UiMessage -Message "Move '{0}' and its dependent automation to local Trash?" -Title "Move profile to Trash" `
+            -Button ([System.Windows.MessageBoxButton]::YesNo) -Image ([System.Windows.MessageBoxImage]::Question) `
+            -MessageKey "Dialog.DeleteProfile.Body" -TitleKey "Dialog.DeleteProfile.Title" `
+            -MessageArgumentList @([string]$profilesList.SelectedItem)
+    }
+    if ($deleteChoice -eq [System.Windows.MessageBoxResult]::Yes) {
         $deletedProfile = [string]$profilesList.SelectedItem
         if (Remove-ProfileAndDependencies -Name $deletedProfile) {
             Update-ProfilesList
@@ -8673,8 +8814,12 @@ $restoreProfileBtn.Add_Click({
 $purgeProfileTrashBtn.Add_Click({
     $count = @(Get-ProfileTrashRecords).Count
     if ($count -le 0) { Update-ProfileTrashControls; return }
-    $message = "Permanently delete all $count recoverable profile record$(if ($count -eq 1) { '' } else { 's' })? This cannot be undone."
-    if ([System.Windows.MessageBox]::Show($message, "Empty Profile Trash", "YesNo", "Warning") -eq "Yes") {
+    $countText = Format-UiNumber -Value $count -Format "N0"
+    $message = if ($count -eq 1) { "Permanently delete the {0} recoverable profile record? This cannot be undone." } else { "Permanently delete all {0} recoverable profile records? This cannot be undone." }
+    $messageKey = if ($count -eq 1) { "Dialog.EmptyProfileTrash.One.Body" } else { "Dialog.EmptyProfileTrash.Many.Body" }
+    if ((Show-UiMessage -Message $message -Title "Empty Profile Trash" `
+        -Button ([System.Windows.MessageBoxButton]::YesNo) -Image ([System.Windows.MessageBoxImage]::Warning) `
+        -MessageKey $messageKey -TitleKey "Dialog.EmptyProfileTrash.Title" -MessageArgumentList @($countText)) -eq [System.Windows.MessageBoxResult]::Yes) {
         $removed = Clear-ProfileTrash
         Update-ProfileTrashControls
         Update-Status "Permanently deleted $removed profile trash record$(if ($removed -eq 1) { '' } else { 's' })"
@@ -8685,8 +8830,8 @@ $exportProfilesBtn.Add_Click({
 })
 $importProfilesBtn.Add_Click({
     $dialog = New-Object System.Windows.Forms.OpenFileDialog
-    $dialog.Title = "Import profile bundle"
-    $dialog.Filter = "MonitorControl profile bundles (*.zip)|*.zip|All files (*.*)|*.*"
+    $dialog.Title = Get-UiRuntimeText -Category "Dialog.Title" -DefaultText "Import profile bundle" -Key "Dialog.ImportProfileBundle.Title"
+    $dialog.Filter = Get-UiRuntimeText -Category "Dialog.Filter" -DefaultText "MonitorControl profile bundles (*.zip)|*.zip|All files (*.*)|*.*" -Key "Dialog.ImportProfileBundle.Filter"
     $dialog.CheckFileExists = $true
     $dialog.Multiselect = $false
     $dialog.InitialDirectory = if (Test-Path $script:ProfileExportsPath) { $script:ProfileExportsPath } else { $script:ProfilesPath }
@@ -8696,7 +8841,7 @@ $importProfilesBtn.Add_Click({
 })
 $profileSyncFolderBtn.Add_Click({
     $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-    $dialog.Description = "Select a OneDrive or Dropbox folder for MonitorControl profiles"
+    $dialog.Description = Get-UiRuntimeText -Category "Dialog.Body" -DefaultText "Select a OneDrive or Dropbox folder for MonitorControl profiles" -Key "Dialog.ProfileSyncFolder.Body"
     $dialog.ShowNewFolderButton = $true
     $dialog.SelectedPath = if (Test-Path $script:ProfileStorageConfiguredPath) { $script:ProfileStorageConfiguredPath } elseif (Test-Path $script:ProfilesPath) { $script:ProfilesPath } else { $script:DefaultProfilesPath }
     if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
@@ -8904,13 +9049,12 @@ $displayRestoreEnabledCheckbox.Add_Unchecked({
 })
 $cpuMonitorEnabledCheckbox.Add_Checked({
     if ($script:UpdatingOptionalHelperUI) { return }
-    $answer = [System.Windows.MessageBox]::Show(
-        "MonitorControl Pro will load a CPU temperature library from disk into this process." + [Environment]::NewLine + [Environment]::NewLine +
+    $message = "MonitorControl Pro will load a CPU temperature library from disk into this process." + [Environment]::NewLine + [Environment]::NewLine +
         "It looks beside this script, in Program Files, and reports the resolved path, version, and SHA-256 in System. Only enable this if you placed that DLL there yourself." + [Environment]::NewLine + [Environment]::NewLine +
-        "Load the CPU temperature library?",
-        "Optional hardware helper",
-        [System.Windows.MessageBoxButton]::YesNo,
-        [System.Windows.MessageBoxImage]::Warning)
+        "Load the CPU temperature library?"
+    $answer = Show-UiMessage -Message $message -Title "Optional hardware helper" `
+        -Button ([System.Windows.MessageBoxButton]::YesNo) -Image ([System.Windows.MessageBoxImage]::Warning) `
+        -MessageKey "Dialog.CpuHelper.Body" -TitleKey "Dialog.OptionalHelper.Title"
     if ($answer -ne [System.Windows.MessageBoxResult]::Yes) {
         Update-OptionalHelperControls
         Update-Status "CPU temperature library stays disabled"
@@ -8924,13 +9068,12 @@ $cpuMonitorEnabledCheckbox.Add_Unchecked({
 })
 $presentMonEnabledCheckbox.Add_Checked({
     if ($script:UpdatingOptionalHelperUI) { return }
-    $answer = [System.Windows.MessageBox]::Show(
-        "MonitorControl Pro will run PresentMon.exe as a child process to sample frame times." + [Environment]::NewLine + [Environment]::NewLine +
+    $message = "MonitorControl Pro will run PresentMon.exe as a child process to sample frame times." + [Environment]::NewLine + [Environment]::NewLine +
         "It prefers a copy beside this script or in Program Files over one found on PATH, and reports the resolved path, version, and SHA-256 in System. Only enable this if you installed PresentMon yourself." + [Environment]::NewLine + [Environment]::NewLine +
-        "Allow PresentMon to run?",
-        "Optional hardware helper",
-        [System.Windows.MessageBoxButton]::YesNo,
-        [System.Windows.MessageBoxImage]::Warning)
+        "Allow PresentMon to run?"
+    $answer = Show-UiMessage -Message $message -Title "Optional hardware helper" `
+        -Button ([System.Windows.MessageBoxButton]::YesNo) -Image ([System.Windows.MessageBoxImage]::Warning) `
+        -MessageKey "Dialog.PresentMonHelper.Body" -TitleKey "Dialog.OptionalHelper.Title"
     if ($answer -ne [System.Windows.MessageBoxResult]::Yes) {
         Update-OptionalHelperControls
         Update-Status "PresentMon stays disabled"
@@ -8989,12 +9132,11 @@ $capabilitiesExcludeCurrentBtn.Add_Click({
 })
 $capabilitiesClearExclusionsBtn.Add_Click({
     if ($script:CapabilitiesExcludedIdentityKeys.Count -eq 0) { return }
-    $result = [System.Windows.MessageBox]::Show(
-        "Clear all capability-discovery exclusions? Previously failing monitors may be probed again if discovery is enabled.",
-        "Clear capability exclusions",
-        [System.Windows.MessageBoxButton]::YesNo,
-        [System.Windows.MessageBoxImage]::Warning
-    )
+    $result = Show-UiMessage `
+        -Message "Clear all capability-discovery exclusions? Previously failing monitors may be probed again if discovery is enabled." `
+        -Title "Clear capability exclusions" -Button ([System.Windows.MessageBoxButton]::YesNo) `
+        -Image ([System.Windows.MessageBoxImage]::Warning) -MessageKey "Dialog.ClearCapabilityExclusions.Body" `
+        -TitleKey "Dialog.ClearCapabilityExclusions.Title"
     if ($result -ne [System.Windows.MessageBoxResult]::Yes) { return }
     $script:CapabilitiesExcludedIdentityKeys = @{}
     $script:CapabilitiesLastIncidentIdentityKey = ""
@@ -9009,18 +9151,16 @@ $riskyVcpEnabledCheckbox.Add_Checked({
     $monitor = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
     if ([string]::IsNullOrWhiteSpace([string]$monitor.IdentityKey)) { Sync-VcpWriteSafetyUi; return }
     $message = @"
-Enable risky VCP writes for $(Get-MonitorDisplayLabel -Monitor $monitor)?
+Enable risky VCP writes for {0}?
 
 This unlock is stored only for this stable monitor identity. Power, input, reset, PiP/PbP, and arbitrary writes can blank the display, switch away from this computer, or erase monitor settings.
 
 Every direct command will still show its exact VCP code and value for confirmation. Automation rules require separate rule-level consent.
 "@
-    $choice = [System.Windows.MessageBox]::Show(
-        $message,
-        "Enable risky VCP writes",
-        [System.Windows.MessageBoxButton]::YesNo,
-        [System.Windows.MessageBoxImage]::Warning
-    )
+    $choice = Show-UiMessage -Message $message -Title "Enable risky VCP writes" `
+        -Button ([System.Windows.MessageBoxButton]::YesNo) -Image ([System.Windows.MessageBoxImage]::Warning) `
+        -MessageKey "Dialog.EnableRiskyVcp.Body" -TitleKey "Dialog.EnableRiskyVcp.Title" `
+        -MessageArgumentList @((Get-MonitorDisplayLabel -Monitor $monitor))
     if ($choice -ne [System.Windows.MessageBoxResult]::Yes) {
         Sync-VcpWriteSafetyUi
         Update-Status "Risky VCP writes remain disabled"
@@ -9241,21 +9381,35 @@ Update-OptionalHelperControls
 Update-DisplayStateRestoreControls
 Update-DdcTimingControls
 Update-HardwareTabVisibility
+Register-UiControlResources -Root $window -RootKey "Main"
 
 Initialize-TrayIcon
+Register-UiControlResources -Root $script:TrayPopup -RootKey "Tray"
 
 $mainNavigationTabs.Add_SelectionChanged({
     param($sender, $eventArgs)
     if (-not [object]::ReferenceEquals($eventArgs.OriginalSource, $sender)) { return }
+    $selectedNavigationItem = $sender.SelectedItem
     $anchorShell = [Action]{
         if ($shellScrollViewer) {
             $shellScrollViewer.ScrollToHorizontalOffset(0)
             $shellScrollViewer.ScrollToVerticalOffset(0)
         }
-    }
+        if ($selectedNavigationItem -is [System.Windows.FrameworkElement]) { $selectedNavigationItem.BringIntoView() }
+    }.GetNewClosure()
     $window.Dispatcher.BeginInvoke(
         [System.Windows.Threading.DispatcherPriority]::ContextIdle,
         $anchorShell
+    ) | Out-Null
+})
+
+$window.Add_SizeChanged({
+    $selectedNavigationItem = $mainNavigationTabs.SelectedItem
+    if ($selectedNavigationItem -isnot [System.Windows.FrameworkElement]) { return }
+    $bringSelectedNavigationItemIntoView = [Action]{ $selectedNavigationItem.BringIntoView() }.GetNewClosure()
+    $window.Dispatcher.BeginInvoke(
+        [System.Windows.Threading.DispatcherPriority]::ContextIdle,
+        $bringSelectedNavigationItemIntoView
     ) | Out-Null
 })
 
@@ -9264,6 +9418,7 @@ $window.Add_SourceInitialized({
 })
 
 $window.Add_ContentRendered({
+    if ($mainNavigationTabs.SelectedItem -is [System.Windows.FrameworkElement]) { $mainNavigationTabs.SelectedItem.BringIntoView() }
     if ($script:CapabilitiesConsentPromptHandled) { return }
     $script:CapabilitiesConsentPromptHandled = $true
     if (-not $script:CapabilitiesConsentRecorded -and -not $script:CapabilitiesMaximumCompatibility) {

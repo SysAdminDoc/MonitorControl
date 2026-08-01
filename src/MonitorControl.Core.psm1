@@ -89,16 +89,72 @@ function Get-SystemTextScalePercent {
     }
 }
 
-function Get-StatusMessageSeverity {
-    param([string]$Message)
-    if ([string]::IsNullOrWhiteSpace($Message)) { return "Info" }
-    if ($Message -match '(?i)\b(fail(?:ed|ure)?|error|invalid|denied|blocked|offline|corrupt|mismatch(?:ed)?|newer than|not found|unavailable|could not|no (?:DDC/CI )?(?:write )?target)\b') {
-        return "Error"
-    }
-    if ($Message -match '(?i)\b(warn(?:ing)?|cancel(?:ed|led)?|busy|waiting|unsupported|stale|retry(?:ing)?|disabled|partly|partial(?:ly)?)\b') {
-        return "Warning"
-    }
+function Resolve-StatusSeverity {
+    param([string]$Severity)
+    if ($Severity -in @("Info", "Warning", "Error")) { return $Severity }
     return "Info"
+}
+
+function Resolve-UiCultureName {
+    param([string]$RequestedCulture = "", [string]$WindowsCulture = "")
+    $candidate = if (-not [string]::IsNullOrWhiteSpace($RequestedCulture)) {
+        $RequestedCulture.Trim()
+    } elseif (-not [string]::IsNullOrWhiteSpace($WindowsCulture)) {
+        $WindowsCulture.Trim()
+    } else {
+        [System.Globalization.CultureInfo]::CurrentUICulture.Name
+    }
+    if ($candidate -eq "qps-ploc") { return $candidate }
+    try { return [System.Globalization.CultureInfo]::GetCultureInfo($candidate).Name } catch {
+        throw "Unknown UI culture '$candidate'."
+    }
+}
+
+function Get-UiCultureInfo {
+    param([string]$CultureName = "")
+    $name = if ([string]::IsNullOrWhiteSpace($CultureName)) { [string]$script:UiCulture } else { $CultureName }
+    if ($name -eq "qps-ploc") { return [System.Globalization.CultureInfo]::GetCultureInfo("en-US") }
+    try { return [System.Globalization.CultureInfo]::GetCultureInfo($name) } catch {
+        return [System.Globalization.CultureInfo]::GetCultureInfo("en-US")
+    }
+}
+
+function ConvertTo-PseudoLocalizedText {
+    param([AllowEmptyString()][string]$Text)
+    if ([string]::IsNullOrEmpty($Text) -or $Text.StartsWith("[!!", [System.StringComparison]::Ordinal)) { return $Text }
+    if ($Text -cmatch "^[A-Z]{1,3}$") { return $Text }
+    if ($Text -notmatch '[A-Za-z]') { return $Text }
+    $upperCodePoints = @(0x00C0,0x0181,0x00C7,0x00D0,0x00CB,0x0191,0x011C,0x0124,0x00CF,0x0134,0x0136,0x013B,0x1E40,0x00D1,0x00D6,0x01A4,0x024A,0x0154,0x0160,0x0162,0x00DC,0x1E7C,0x0174,0x1E8C,0x0178,0x017D)
+    $lowerCodePoints = @(0x00E0,0x0180,0x00E7,0x010F,0x00EB,0x0192,0x011D,0x0125,0x00EF,0x0135,0x0137,0x013C,0x1E41,0x00F1,0x00F6,0x01A5,0x024B,0x0155,0x0161,0x0163,0x00FC,0x1E7D,0x0175,0x1E8D,0x00FF,0x017E)
+    $builder = New-Object System.Text.StringBuilder
+    $insideFormatItem = $false
+    foreach ($character in $Text.ToCharArray()) {
+        if ($character -eq '{') { $insideFormatItem = $true }
+        $characterCode = [int]$character
+        if (-not $insideFormatItem -and $characterCode -ge 65 -and $characterCode -le 90) {
+            [void]$builder.Append([char]$upperCodePoints[$characterCode - 65])
+        } elseif (-not $insideFormatItem -and $characterCode -ge 97 -and $characterCode -le 122) {
+            [void]$builder.Append([char]$lowerCodePoints[$characterCode - 97])
+        } else {
+            [void]$builder.Append($character)
+        }
+        if ($character -eq '}') { $insideFormatItem = $false }
+    }
+    $paddingLength = [Math]::Max(2, [int][Math]::Ceiling($Text.Length * 0.3))
+    return "[!! $($builder.ToString()) $('~' * $paddingLength) !!]"
+}
+
+function Get-UiResourceKey {
+    param([string]$Category, [string]$DefaultText)
+    $sha = $null
+    try {
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes("$Category`n$DefaultText")
+        $hash = (($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString("x2") }) -join "").Substring(0, 16)
+        return "$Category.$hash"
+    } finally {
+        if ($null -ne $sha) { $sha.Dispose() }
+    }
 }
 
 function Get-NavigationShortcutTarget {
@@ -116,9 +172,43 @@ function Get-NavigationShortcutTarget {
 }
 
 function Get-UiString {
-    param([string]$Key)
-    if ($script:UiStrings.ContainsKey($Key)) { return [string]$script:UiStrings[$Key] }
-    return $Key
+    param([string]$Key, [object[]]$ArgumentList = @())
+    $text = $Key
+    if ($null -ne $script:UiCultureResources -and $script:UiCultureResources.ContainsKey([string]$script:UiCulture)) {
+        $cultureTable = $script:UiCultureResources[[string]$script:UiCulture]
+        if ($null -ne $cultureTable -and $cultureTable.ContainsKey($Key)) { $text = [string]$cultureTable[$Key] }
+    }
+    if ($text -eq $Key -and $null -ne $script:UiCultureResources -and $script:UiCultureResources.ContainsKey("en-US")) {
+        $englishTable = $script:UiCultureResources["en-US"]
+        if ($null -ne $englishTable -and $englishTable.ContainsKey($Key)) { $text = [string]$englishTable[$Key] }
+    }
+    if ([string]$script:UiCulture -eq "qps-ploc") { $text = ConvertTo-PseudoLocalizedText -Text $text }
+    if (@($ArgumentList).Count -gt 0) {
+        return [string]::Format((Get-UiCultureInfo), $text, $ArgumentList)
+    }
+    return $text
+}
+
+function Get-UiRuntimeText {
+    param([string]$Category, [string]$DefaultText, [string]$Key = "", [object[]]$ArgumentList = @())
+    $resourceKey = if ([string]::IsNullOrWhiteSpace($Key)) { Get-UiResourceKey -Category $Category -DefaultText $DefaultText } else { $Key }
+    if ($null -eq $script:UiCultureResources) { $script:UiCultureResources = @{} }
+    if (-not $script:UiCultureResources.ContainsKey("en-US")) { $script:UiCultureResources["en-US"] = @{} }
+    if (-not $script:UiCultureResources["en-US"].ContainsKey($resourceKey)) {
+        $script:UiCultureResources["en-US"][$resourceKey] = $DefaultText
+    }
+    return Get-UiString -Key $resourceKey -ArgumentList $ArgumentList
+}
+
+function Format-UiNumber {
+    param($Value, [string]$Format = "G")
+    if ($Value -is [System.IFormattable]) { return $Value.ToString($Format, (Get-UiCultureInfo)) }
+    return [string]$Value
+}
+
+function Format-UiDateTime {
+    param([DateTime]$Value, [string]$Format = "g")
+    return $Value.ToString($Format, (Get-UiCultureInfo))
 }
 
 function Get-CapabilityProbeDecision {

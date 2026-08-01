@@ -103,6 +103,7 @@ function Get-CliChildArguments {
         [string]$Value,
         [long]$Delta,
         [string]$Cycle,
+        [string]$Culture,
         [switch]$IfNeeded,
         [switch]$Json,
         [switch]$AllowRisky,
@@ -117,7 +118,8 @@ function Get-CliChildArguments {
         [PSCustomObject]@{ Name = "-Monitor"; Value = $Monitor },
         [PSCustomObject]@{ Name = "-Vcp"; Value = $Vcp },
         [PSCustomObject]@{ Name = "-Value"; Value = $Value },
-        [PSCustomObject]@{ Name = "-Cycle"; Value = $Cycle }
+        [PSCustomObject]@{ Name = "-Cycle"; Value = $Cycle },
+        [PSCustomObject]@{ Name = "-Culture"; Value = $Culture }
     )) {
         if (-not [string]::IsNullOrWhiteSpace([string]$pair.Value)) {
             $arguments.Add([string]$pair.Name)
@@ -146,6 +148,7 @@ function Invoke-CliChildProcess {
         [string]$Value,
         [long]$Delta,
         [string]$Cycle,
+        [string]$Culture,
         [switch]$IfNeeded,
         [switch]$Json,
         [switch]$AllowRisky,
@@ -162,7 +165,7 @@ function Invoke-CliChildProcess {
     try {
         $startInfo = New-Object System.Diagnostics.ProcessStartInfo
         $startInfo.FileName = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
-        $startInfo.Arguments = Get-CliChildArguments -EntryPath $EntryPath -Command $Command -Argument $Argument -Monitor $Monitor -Vcp $Vcp -Value $Value -Delta $Delta -Cycle $Cycle -IfNeeded:$IfNeeded -Json:$Json -AllowRisky:$AllowRisky -TimeoutSeconds $TimeoutSeconds
+        $startInfo.Arguments = Get-CliChildArguments -EntryPath $EntryPath -Command $Command -Argument $Argument -Monitor $Monitor -Vcp $Vcp -Value $Value -Delta $Delta -Cycle $Cycle -Culture $Culture -IfNeeded:$IfNeeded -Json:$Json -AllowRisky:$AllowRisky -TimeoutSeconds $TimeoutSeconds
         $startInfo.UseShellExecute = $false
         $startInfo.CreateNoWindow = $true
         $startInfo.RedirectStandardOutput = $true
@@ -600,6 +603,6 @@ function Invoke-MonitorControlCli {
 }
 
 if (-not [string]::IsNullOrWhiteSpace([string]$Command) -and -not $CliWorker) {
-    $cliExitCode = Invoke-CliChildProcess -EntryPath ([string]$script:MonitorControlEntryPath) -Command $Command -Argument $Argument -Monitor $Monitor -Vcp $Vcp -Value $Value -Delta $Delta -Cycle $Cycle -IfNeeded:$IfNeeded -Json:$Json -AllowRisky:$AllowRisky -TimeoutSeconds $TimeoutSeconds
+    $cliExitCode = Invoke-CliChildProcess -EntryPath ([string]$script:MonitorControlEntryPath) -Command $Command -Argument $Argument -Monitor $Monitor -Vcp $Vcp -Value $Value -Delta $Delta -Cycle $Cycle -Culture $Culture -IfNeeded:$IfNeeded -Json:$Json -AllowRisky:$AllowRisky -TimeoutSeconds $TimeoutSeconds
     exit $cliExitCode
 }
