@@ -1975,10 +1975,9 @@ function ConvertTo-ThemeBrush {
     return $brush
 }
 
-function Set-SystemAwareTheme {
+function Get-ThemeBrushMap {
     param([bool]$HighContrast)
-    if ($null -eq $window) { return }
-    $resources = if ($HighContrast) {
+    if ($HighContrast) {
         [ordered]@{
             CanvasBrush = [System.Windows.SystemColors]::WindowBrush
             SidebarBrush = [System.Windows.SystemColors]::ControlBrush
@@ -2030,6 +2029,63 @@ function Set-SystemAwareTheme {
             DangerSurfaceBrush = ConvertTo-ThemeBrush $palette.DangerSurface
         }
     }
+}
+
+# The tray popup, identify overlays, and FPS overlay are separate top-level windows, so a
+# DynamicResource in their markup never reaches the main window's dictionary. They get the
+# resolved brushes copied in, and refreshed whenever the theme changes.
+$script:DetachedThemedWindows = New-Object System.Collections.ArrayList
+
+function Register-DetachedThemedWindow {
+    param($Target)
+    if ($null -eq $Target) { return }
+    if (-not $script:DetachedThemedWindows.Contains($Target)) { [void]$script:DetachedThemedWindows.Add($Target) }
+    Update-DetachedWindowTheme -Target $Target
+}
+
+function Unregister-DetachedThemedWindow {
+    param($Target)
+    if ($null -eq $Target) { return }
+    if ($script:DetachedThemedWindows.Contains($Target)) { $script:DetachedThemedWindows.Remove($Target) }
+}
+
+function Update-DetachedWindowTheme {
+    param($Target)
+    if ($null -eq $Target) { return }
+    $brushes = Get-ThemeBrushMap -HighContrast ([bool]$script:IsHighContrastTheme)
+    foreach ($key in $brushes.Keys) {
+        $value = $brushes[$key]
+        if ($null -ne $value -and $value.PSObject.BaseObject -is [System.Windows.Media.Brush]) {
+            $value = $value.PSObject.BaseObject
+        }
+        try { $Target.Resources[$key] = $value } catch {}
+    }
+}
+
+function Get-ThemeBrush {
+    param([string]$Key)
+    if ($null -ne $window -and $null -ne $window.Resources -and $window.Resources.Contains($Key)) {
+        return $window.Resources[$Key]
+    }
+    $brushes = Get-ThemeBrushMap -HighContrast ([bool]$script:IsHighContrastTheme)
+    if ($brushes.Contains($Key)) {
+        $value = $brushes[$Key]
+        if ($null -ne $value -and $value.PSObject.BaseObject -is [System.Windows.Media.Brush]) {
+            return $value.PSObject.BaseObject
+        }
+        return $value
+    }
+    return [System.Windows.Media.Brushes]::Gray
+}
+
+function Update-DetachedWindowThemes {
+    foreach ($target in @($script:DetachedThemedWindows)) { Update-DetachedWindowTheme -Target $target }
+}
+
+function Set-SystemAwareTheme {
+    param([bool]$HighContrast)
+    if ($null -eq $window) { return }
+    $resources = Get-ThemeBrushMap -HighContrast $HighContrast
     foreach ($key in $resources.Keys) {
         $resourceValue = $resources[$key]
         if ($null -ne $resourceValue -and $resourceValue.PSObject.BaseObject -is [System.Windows.Media.Brush]) {
@@ -2038,6 +2094,7 @@ function Set-SystemAwareTheme {
         $window.Resources[$key] = $resourceValue
     }
     $script:IsHighContrastTheme = $HighContrast
+    Update-DetachedWindowThemes
     [System.Windows.Automation.AutomationProperties]::SetHelpText(
         $window,
         $(if ($HighContrast) { "High contrast colors are active." } else { "Dark application colors are active." })
@@ -8621,7 +8678,7 @@ function Update-ScheduleTimeline {
 
         $marker = New-Object System.Windows.Shapes.Ellipse
         $marker.Width = 8; $marker.Height = 8; $marker.Fill = $markerBrush
-        $marker.Stroke = [System.Windows.Media.Brushes]::White; $marker.StrokeThickness = 1
+        $marker.Stroke = Get-ThemeBrush -Key "TextBrush"; $marker.StrokeThickness = 1
         $marker.ToolTip = "$($rule.Time) - $($rule.Profile)"
         [System.Windows.Controls.Canvas]::SetLeft($marker, $x - 4)
         [System.Windows.Controls.Canvas]::SetTop($marker, $axisY - 4)
@@ -8978,7 +9035,7 @@ function New-TrayPopup {
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Width="300" Height="172" WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         ResizeMode="NoResize" ShowInTaskbar="False" Topmost="True">
-    <Border Background="#111111" BorderBrush="#333333" BorderThickness="1" CornerRadius="8" Padding="12">
+    <Border Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="12">
         <Grid>
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
@@ -8990,11 +9047,11 @@ function New-TrayPopup {
                 <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
             <Grid>
-                <TextBlock x:Name="TrayMonitorText" Text="Monitor" FontSize="12" Foreground="#ffffff" FontFamily="Segoe UI" FontWeight="SemiBold"/>
-                <TextBlock x:Name="TrayBrightnessValue" Text="50" FontSize="12" Foreground="#f5b800" FontFamily="Segoe UI" FontWeight="SemiBold" HorizontalAlignment="Right"/>
+                <TextBlock x:Name="TrayMonitorText" Text="Monitor" FontSize="12" Foreground="{DynamicResource TextBrush}" FontFamily="Segoe UI" FontWeight="SemiBold"/>
+                <TextBlock x:Name="TrayBrightnessValue" Text="50" FontSize="12" Foreground="{DynamicResource WarningBrush}" FontFamily="Segoe UI" FontWeight="SemiBold" HorizontalAlignment="Right"/>
             </Grid>
             <Slider x:Name="TrayBrightnessSlider" Grid.Row="2" Minimum="0" Maximum="100" Value="50" Height="24"/>
-            <CheckBox x:Name="TrayLinkCheckbox" Grid.Row="4" Content="Link monitors" Foreground="#d0d0d0" FontFamily="Segoe UI" FontSize="11"/>
+            <CheckBox x:Name="TrayLinkCheckbox" Grid.Row="4" Content="Link monitors" Foreground="{DynamicResource TextBrush}" FontFamily="Segoe UI" FontSize="12"/>
             <Grid Grid.Row="6">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
@@ -9003,9 +9060,9 @@ function New-TrayPopup {
                     <ColumnDefinition Width="8"/>
                     <ColumnDefinition Width="*"/>
                 </Grid.ColumnDefinitions>
-                <Button x:Name="TrayOpenButton" Content="Open" Padding="8,5" Background="#1a1a1a" Foreground="#e0e0e0" BorderBrush="#333333"/>
-                <Button x:Name="TrayProfileButton" Grid.Column="2" Content="Profile" Padding="8,5" Background="#0078d4" Foreground="#ffffff" BorderBrush="#0078d4"/>
-                <Button x:Name="TrayHideButton" Grid.Column="4" Content="Hide" Padding="8,5" Background="#1a1a1a" Foreground="#e0e0e0" BorderBrush="#333333"/>
+                <Button x:Name="TrayOpenButton" Content="Open" Padding="8,5" Background="{DynamicResource CardBrush}" Foreground="{DynamicResource TextBrush}" BorderBrush="{DynamicResource BorderBrush}"/>
+                <Button x:Name="TrayProfileButton" Grid.Column="2" Content="Profile" Padding="8,5" Background="{DynamicResource AccentBrush}" Foreground="{DynamicResource OnAccentBrush}" BorderBrush="{DynamicResource AccentBrush}"/>
+                <Button x:Name="TrayHideButton" Grid.Column="4" Content="Hide" Padding="8,5" Background="{DynamicResource CardBrush}" Foreground="{DynamicResource TextBrush}" BorderBrush="{DynamicResource BorderBrush}"/>
             </Grid>
         </Grid>
     </Border>
@@ -9013,6 +9070,7 @@ function New-TrayPopup {
 "@
     $trayReader = New-Object System.Xml.XmlNodeReader $trayPopupXaml
     $script:TrayPopup = [System.Windows.Markup.XamlReader]::Load($trayReader)
+    Register-DetachedThemedWindow -Target $script:TrayPopup
     $script:TrayBrightnessSlider = $script:TrayPopup.FindName("TrayBrightnessSlider")
     $script:TrayBrightnessValue = $script:TrayPopup.FindName("TrayBrightnessValue")
     $script:TrayMonitorText = $script:TrayPopup.FindName("TrayMonitorText")
@@ -9179,10 +9237,12 @@ function Show-IdentifyOverlays {
         $overlay.Background = [System.Windows.Media.Brushes]::Transparent; $overlay.Topmost = $true; $overlay.ShowInTaskbar = $false
         $overlay.Left = $mon.Left + 30; $overlay.Top = $mon.Top + 30; $overlay.Width = 100; $overlay.Height = 100
         $border = New-Object System.Windows.Controls.Border
-        $border.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(230,0,120,212))
+        $border.Background = Get-ThemeBrush -Key "AccentBrush"
+        $border.BorderBrush = Get-ThemeBrush -Key "BorderBrush"
+        $border.BorderThickness = New-Object System.Windows.Thickness(2)
         $border.CornerRadius = New-Object System.Windows.CornerRadius(10)
         $tb = New-Object System.Windows.Controls.TextBlock; $tb.Text = $mon.Index.ToString(); $tb.FontSize = 44; $tb.FontWeight = "Bold"
-        $tb.Foreground = [System.Windows.Media.Brushes]::White; $tb.HorizontalAlignment = "Center"; $tb.VerticalAlignment = "Center"
+        $tb.Foreground = Get-ThemeBrush -Key "OnAccentBrush"; $tb.HorizontalAlignment = "Center"; $tb.VerticalAlignment = "Center"
         $border.Child = $tb; $overlay.Content = $border; $overlay.Show()
         $timer = New-Object System.Windows.Threading.DispatcherTimer; $timer.Interval = [TimeSpan]::FromSeconds(2)
         $currentOverlay = $overlay; $currentTimer = $timer
@@ -9326,11 +9386,11 @@ function Show-FpsOverlay {
         $workArea = [System.Windows.SystemParameters]::WorkArea
         $overlay.Left = $workArea.Right - 210; $overlay.Top = $workArea.Top + 20
         $border = New-Object System.Windows.Controls.Border
-        $border.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromArgb(230, 10, 10, 10))
-        $border.BorderBrush = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb(118, 185, 0))
+        $border.Background = Get-ThemeBrush -Key "SurfaceBrush"
+        $border.BorderBrush = Get-ThemeBrush -Key "SuccessBrush"
         $border.BorderThickness = New-Object System.Windows.Thickness(1); $border.CornerRadius = New-Object System.Windows.CornerRadius(6); $border.Padding = New-Object System.Windows.Thickness(12, 8, 12, 8)
         $text = New-Object System.Windows.Controls.TextBlock
-        $text.Text = "FPS --"; $text.Foreground = [System.Windows.Media.Brushes]::White; $text.FontFamily = "Segoe UI"; $text.FontSize = 14; $text.FontWeight = "SemiBold"
+        $text.Text = "FPS --"; $text.Foreground = Get-ThemeBrush -Key "TextBrush"; $text.FontFamily = "Segoe UI"; $text.FontSize = 14; $text.FontWeight = "SemiBold"
         $border.Child = $text; $overlay.Content = $border
         $script:FpsOverlayWindow = $overlay; $script:FpsOverlayText = $text
     }
