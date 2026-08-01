@@ -918,7 +918,6 @@ $script:AutomationBridgeEnabled = $false
 $script:AutomationBridgeBindAddress = "127.0.0.1"
 $script:AutomationBridgePort = 34291
 $script:AutomationBridgeApiKey = ""
-$script:AutomationBridgeMqttEnabled = $false
 $script:AutomationBridgeSettingsSchemaVersion = 2
 $script:AutomationBridgeNetworkExposureApproved = $false
 $script:AutomationBridgeNetworkExposureApprovedFor = ""
@@ -4614,7 +4613,6 @@ function Get-AutomationBridgeSettingsObject {
         ApiKeyProtected = Protect-AutomationBridgeApiKey -ApiKey $script:AutomationBridgeApiKey
         NetworkExposureApproved = [bool]$script:AutomationBridgeNetworkExposureApproved
         NetworkExposureApprovedFor = [string]$script:AutomationBridgeNetworkExposureApprovedFor
-        MqttEnabled = [bool]$script:AutomationBridgeMqttEnabled
         AllowedCommands = @($script:AutomationBridgeAllowedCommands)
         UpdatedAt = (Get-Date).ToString("o")
     }
@@ -4643,8 +4641,7 @@ function Load-AutomationBridgeSettings {
     $script:AutomationBridgeBindAddress = "127.0.0.1"
     $script:AutomationBridgePort = 34291
     $script:AutomationBridgeApiKey = New-AutomationBridgeApiKey
-    $script:AutomationBridgeMqttEnabled = $false
-    $script:AutomationBridgeNetworkExposureApproved = $false
+        $script:AutomationBridgeNetworkExposureApproved = $false
     $script:AutomationBridgeNetworkExposureApprovedFor = ""
     $script:AutomationBridgeLastError = ""
     $settingsExists = Test-Path -LiteralPath $script:AutomationBridgeSettingsPath
@@ -4686,7 +4683,6 @@ function Load-AutomationBridgeSettings {
                     if ($data.PSObject.Properties.Name -contains "NetworkExposureApprovedFor") {
                         $script:AutomationBridgeNetworkExposureApprovedFor = [string]$data.NetworkExposureApprovedFor
                     }
-                    $script:AutomationBridgeMqttEnabled = [bool]$data.MqttEnabled
                 }
             }
         } catch {
@@ -4779,8 +4775,7 @@ function Read-AutomationBridgeSettingsFromUI {
     $script:AutomationBridgePort = $port
     $script:AutomationBridgeApiKey = $key
     $script:AutomationBridgeEnabled = [bool]$automationBridgeEnabledCheckbox.IsChecked
-    $script:AutomationBridgeMqttEnabled = $false
-    $script:AutomationBridgeLastError = ""
+        $script:AutomationBridgeLastError = ""
     return $true
 }
 
@@ -4802,8 +4797,7 @@ function Update-AutomationBridgeControls {
         } else {
             "Off"
         }
-        $mqtt = if ($script:AutomationBridgeMqttEnabled) { "MQTT on" } else { "MQTT off" }
-        $automationBridgeStatusText.Text = "$state - http://$script:AutomationBridgeBindAddress`:$script:AutomationBridgePort ($mqtt)"
+        $automationBridgeStatusText.Text = "$state - http://$script:AutomationBridgeBindAddress`:$script:AutomationBridgePort"
     } finally {
         $script:UpdatingAutomationBridgeUI = $false
     }
@@ -6054,13 +6048,99 @@ function Get-AmbientLux {
     return $null
 }
 
-function Get-BrightnessForAmbientLux {
-    param([double]$Lux)
-    if ($Lux -lt 20) { return 25 }
-    if ($Lux -lt 100) { return 40 }
-    if ($Lux -lt 300) { return 55 }
-    if ($Lux -lt 800) { return 70 }
-    return 85
+# Microsoft's adaptive-brightness guidance uses deliberately overlapping lux buckets so that a
+# reading sitting on a boundary cannot flip the display. Each level is entered once the reading
+# rises above RiseAbove and left only once it falls below the lower FallBelow of the level it is
+# already in, which is a Schmitt trigger: the overlap between the two is the hysteresis band.
+# The lowest level is floored well above zero so the screen never becomes unreadable.
+$script:AmbientLuxLadder = @(
+    [PSCustomObject]@{ Brightness = 15;  RiseAbove = 0;    FallBelow = 0 }
+    [PSCustomObject]@{ Brightness = 25;  RiseAbove = 10;   FallBelow = 6 }
+    [PSCustomObject]@{ Brightness = 40;  RiseAbove = 50;   FallBelow = 30 }
+    [PSCustomObject]@{ Brightness = 55;  RiseAbove = 200;  FallBelow = 130 }
+    [PSCustomObject]@{ Brightness = 70;  RiseAbove = 600;  FallBelow = 400 }
+    [PSCustomObject]@{ Brightness = 85;  RiseAbove = 1500; FallBelow = 1000 }
+    [PSCustomObject]@{ Brightness = 100; RiseAbove = 5000; FallBelow = 3500 }
+)
+$script:AmbientMaxStepPercent = 10
+$script:AmbientMinWriteIntervalSeconds = 20
+$script:AmbientLevelIndex = -1
+$script:AmbientAppliedBrightness = -1
+$script:AmbientLastWriteUtc = [DateTime]::MinValue
+
+function Get-AmbientLevelIndex {
+    param([int]$CurrentIndex, [double]$Lux, [object[]]$Ladder)
+    if ($null -eq $Ladder -or @($Ladder).Count -eq 0) { $Ladder = @($script:AmbientLuxLadder) }
+    $ladderEntries = @($Ladder)
+    $last = $ladderEntries.Count - 1
+    if ($CurrentIndex -lt 0) {
+        # No previous reading, so there is nothing to be sticky about: take the plain ladder.
+        $index = 0
+        for ($i = 1; $i -le $last; $i++) {
+            if ($Lux -ge [double]$ladderEntries[$i].RiseAbove) { $index = $i }
+        }
+        return $index
+    }
+    $index = [Math]::Min($last, [Math]::Max(0, $CurrentIndex))
+    while ($index -lt $last -and $Lux -ge [double]$ladderEntries[$index + 1].RiseAbove) { $index++ }
+    while ($index -gt 0 -and $Lux -lt [double]$ladderEntries[$index].FallBelow) { $index-- }
+    return $index
+}
+
+function Get-AmbientBrightnessDecision {
+    param(
+        [double]$Lux,
+        [int]$CurrentIndex = -1,
+        [int]$CurrentBrightness = -1,
+        [DateTime]$LastWriteUtc = [DateTime]::MinValue,
+        [DateTime]$NowUtc = [DateTime]::MinValue,
+        [int]$MaxStep = 0,
+        [int]$MinIntervalSeconds = -1,
+        [object[]]$Ladder
+    )
+    if ($null -eq $Ladder -or @($Ladder).Count -eq 0) { $Ladder = @($script:AmbientLuxLadder) }
+    if ($MaxStep -le 0) { $MaxStep = [int]$script:AmbientMaxStepPercent }
+    if ($MinIntervalSeconds -lt 0) { $MinIntervalSeconds = [int]$script:AmbientMinWriteIntervalSeconds }
+    if ($NowUtc -eq [DateTime]::MinValue) { $NowUtc = [DateTime]::UtcNow }
+    $levelIndex = Get-AmbientLevelIndex -CurrentIndex $CurrentIndex -Lux $Lux -Ladder $Ladder
+    $target = [int]@($Ladder)[$levelIndex].Brightness
+    $result = [PSCustomObject]@{
+        LevelIndex = [int]$levelIndex
+        TargetBrightness = [int]$target
+        NextBrightness = [int]$target
+        ShouldWrite = $false
+        Reason = ""
+    }
+    if ($CurrentIndex -lt 0 -or $CurrentBrightness -lt 0) {
+        # The first application after enabling ambient mode goes straight to the target: a slow
+        # crawl from whatever the panel happened to be at is worse than one correct write.
+        $result.ShouldWrite = $true
+        $result.Reason = "first reading"
+        return $result
+    }
+    if ($target -eq $CurrentBrightness) {
+        $result.NextBrightness = [int]$CurrentBrightness
+        $result.Reason = "already at the target for this light level"
+        return $result
+    }
+    if (($NowUtc - $LastWriteUtc).TotalSeconds -lt $MinIntervalSeconds) {
+        $result.NextBrightness = [int]$CurrentBrightness
+        $result.Reason = "rate limited"
+        return $result
+    }
+    $delta = $target - $CurrentBrightness
+    if ($delta -gt $MaxStep) { $delta = $MaxStep }
+    if ($delta -lt (-1 * $MaxStep)) { $delta = -1 * $MaxStep }
+    $result.NextBrightness = [int]($CurrentBrightness + $delta)
+    $result.ShouldWrite = $result.NextBrightness -ne $CurrentBrightness
+    $result.Reason = if ($result.ShouldWrite) { "ramping toward $target" } else { "no change" }
+    return $result
+}
+
+function Reset-AmbientBrightnessState {
+    $script:AmbientLevelIndex = -1
+    $script:AmbientAppliedBrightness = -1
+    $script:AmbientLastWriteUtc = [DateTime]::MinValue
 }
 
 function Apply-AmbientLightSettings {
@@ -6070,10 +6150,18 @@ function Apply-AmbientLightSettings {
         Update-Status "Ambient light sensor unavailable"
         return
     }
-    $brightness = Get-BrightnessForAmbientLux -Lux $lux
+    $decision = Get-AmbientBrightnessDecision -Lux $lux -CurrentIndex $script:AmbientLevelIndex -CurrentBrightness $script:AmbientAppliedBrightness -LastWriteUtc $script:AmbientLastWriteUtc -NowUtc ([DateTime]::UtcNow)
+    $script:AmbientLevelIndex = [int]$decision.LevelIndex
+    $autoModeText.Text = "Ambient: $([math]::Round($lux, 0)) lx"
+    if (-not [bool]$decision.ShouldWrite) {
+        Update-Status "Ambient brightness held at $($script:AmbientAppliedBrightness): $($decision.Reason)"
+        return
+    }
+    $brightness = [int]$decision.NextBrightness
     Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value $brightness -Force -Percent
     Set-BrightnessSliderFromPercent -Percent $brightness | Out-Null
-    $autoModeText.Text = "Ambient: $([math]::Round($lux, 0)) lx"
+    $script:AmbientAppliedBrightness = $brightness
+    $script:AmbientLastWriteUtc = [DateTime]::UtcNow
     Update-Status "Ambient brightness: $brightness"
 }
 
@@ -6094,6 +6182,7 @@ function Start-AmbientLightWatcher {
         $script:AmbientLightTimer.Add_Tick({ if ($script:AmbientLightEnabled) { Apply-AmbientLightSettings } })
     }
     $script:AmbientLightTimer.Start()
+    Reset-AmbientBrightnessState
     Apply-AmbientLightSettings
 }
 

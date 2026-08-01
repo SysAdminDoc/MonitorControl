@@ -198,7 +198,7 @@ This is the same pinned lane used by CI. It gates a pure-ASCII check across ever
 - The listener enforces request-line, header-count, header-size, body-size, response-size, concurrency, and socket-deadline limits; malformed framing receives a deterministic 4xx response
 - Supported endpoints are `GET /api/health`, `GET /api/monitors`, `GET /api/profiles`, `GET /api/brightness`, `POST /api/brightness`, and `POST /api/profile`
 - Brightness is expressed as a percentage in both directions. `GET /api/brightness` also returns the `raw` DDC value and the monitor's reported `maximum`, and `GET /api/monitors` reports `BrightnessMaximum` per display
-- MQTT/Home Assistant integration remains disabled; use the bridge as the local foundation before enabling network integrations
+- The bridge is HTTP only. There is no MQTT or Home Assistant transport; a settings file from an older version that still carries the unused `MqttEnabled` field loads normally and the field is dropped on the next save
 
 ### Restoring Brightness After Sleep
 
