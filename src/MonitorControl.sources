@@ -3,4 +3,5 @@ src\MonitorControl.Storage.psm1
 src\MonitorControl.Ddc.psm1
 src\MonitorControl.Automation.psm1
 src\MonitorControl.Bridge.psm1
+src\MonitorControl.Cli.psm1
 src\MonitorControl.App.ps1

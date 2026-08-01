@@ -841,6 +841,27 @@ function Set-DeferredStatus {
     $script:PendingStatusMessage = $Message
 }
 
+function Update-Status {
+    param([string]$Message)
+    if ($null -eq $statusText) {
+        $script:PendingStatusMessage = $Message
+        return
+    }
+    $statusText.Text = $Message
+    [System.Windows.Automation.AutomationProperties]::SetName($statusText, "Status: $Message")
+    $severity = Get-StatusMessageSeverity -Message $Message
+    if ($severity -ne "Info") {
+        $statusBannerText.Text = $Message
+        [System.Windows.Automation.AutomationProperties]::SetName($statusBannerText, "$severity`: $Message")
+        $surfaceKey = if ($severity -eq "Error") { "DangerSurfaceBrush" } else { "WarningSurfaceBrush" }
+        $borderKey = if ($severity -eq "Error") { "DangerBrush" } else { "WarningBrush" }
+        $statusBannerBorder.SetResourceReference([System.Windows.Controls.Border]::BackgroundProperty, $surfaceKey)
+        $statusBannerBorder.SetResourceReference([System.Windows.Controls.Border]::BorderBrushProperty, $borderKey)
+        $statusBannerBorder.Visibility = [System.Windows.Visibility]::Visible
+        Invoke-LiveRegionAnnouncement -Control $statusBannerText
+    }
+}
+
 
 
 
@@ -3810,6 +3831,31 @@ try {
     if (-not (Test-Path -LiteralPath $script:ProfilesPath)) { New-Item -ItemType Directory -Path $script:ProfilesPath -Force | Out-Null }
 }
 
+if ($CliWorker) {
+    $workerExitCode = (Get-CliExitCodes).Internal
+    try {
+        $cliResult = Invoke-MonitorControlCli -Command $Command -Argument $Argument -Monitor $Monitor -Vcp $Vcp -Value $Value -Delta $Delta -Cycle $Cycle -IfNeeded:$IfNeeded -AllowRisky:$AllowRisky
+        $workerExitCode = [int]$cliResult.ExitCode
+        if ($Json) {
+            [Console]::Out.WriteLine(($cliResult.Envelope | ConvertTo-Json -Depth 10 -Compress))
+        } elseif ($workerExitCode -eq (Get-CliExitCodes).Success) {
+            [Console]::Out.WriteLine([string]$cliResult.Text)
+        } else {
+            [Console]::Error.WriteLine([string]$cliResult.Text)
+        }
+    } catch {
+        $message = "MonitorControl CLI failed: $($_.Exception.Message)"
+        if ($Json) {
+            [Console]::Out.WriteLine((New-CliEnvelope -Command $Command -Success $false -ExitCode $workerExitCode -ErrorCode "internal_error" -ErrorMessage $message | ConvertTo-Json -Depth 10 -Compress))
+        } else {
+            [Console]::Error.WriteLine($message)
+        }
+    } finally {
+        try { Clear-PhysicalMonitorHandles -ClearList -KeepWritesCancelled | Out-Null } catch {}
+    }
+    exit $workerExitCode
+}
+
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="MonitorControl Pro" Width="1320" Height="800" MinWidth="1024" MinHeight="720"
@@ -4839,22 +4885,6 @@ $statusText = $window.FindName("StatusText"); $autoModeText = $window.FindName("
 $transactionProgressPanel = $window.FindName("TransactionProgressPanel"); $transactionProgressText = $window.FindName("TransactionProgressText")
 $transactionProgressBar = $window.FindName("TransactionProgressBar"); $transactionCancelBtn = $window.FindName("TransactionCancelBtn")
 
-function Update-Status {
-    param([string]$Message)
-    $statusText.Text = $Message
-    [System.Windows.Automation.AutomationProperties]::SetName($statusText, "Status: $Message")
-    $severity = Get-StatusMessageSeverity -Message $Message
-    if ($severity -ne "Info") {
-        $statusBannerText.Text = $Message
-        [System.Windows.Automation.AutomationProperties]::SetName($statusBannerText, "$severity`: $Message")
-        $surfaceKey = if ($severity -eq "Error") { "DangerSurfaceBrush" } else { "WarningSurfaceBrush" }
-        $borderKey = if ($severity -eq "Error") { "DangerBrush" } else { "WarningBrush" }
-        $statusBannerBorder.SetResourceReference([System.Windows.Controls.Border]::BackgroundProperty, $surfaceKey)
-        $statusBannerBorder.SetResourceReference([System.Windows.Controls.Border]::BorderBrushProperty, $borderKey)
-        $statusBannerBorder.Visibility = [System.Windows.Visibility]::Visible
-        Invoke-LiveRegionAnnouncement -Control $statusBannerText
-    }
-}
 if ($script:PendingStatusMessage) { Update-Status $script:PendingStatusMessage; $script:PendingStatusMessage = "" }
 Initialize-LocalizationAndAccessibility
 Initialize-SystemAccessibility

@@ -1,5 +1,7 @@
 # Changelog
 
+- Added: a headless `list`, `get`, `set`, `profile`, and `diagnostics` command line runs without WPF, targets stable monitor identities, supports human text or a schema-v1 JSON envelope, and terminates a hung native worker at a documented timeout.
+- Added: CLI writes share capability validation, per-identity risky-write unlocks, verified readback, and rollback with the GUI; set-if-needed, relative delta, comma-list cycling, and terse percentage-brightness/input aliases cover one-shot automation without prompts.
 - Added: profile deletion now stores the exact profile and its removed application/schedule rules in bounded local Trash; the Profiles tab can restore the newest deletion across restarts or permanently empty Trash through a separate confirmation.
 - Changed: all persisted document formats are registered in one schema/migration table, and application rules, schedules, idle dim, and battery settings now write explicit schema versions while preserving legacy migration and future-version rejection.
 - Added: DDC diagnostics now export a ZIP support bundle containing the previewed text report, a schema-versioned JSON report, and a checksummed manifest; the diagnostics history keeps only the newest ten bundles within a 20 MiB budget.
