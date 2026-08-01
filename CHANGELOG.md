@@ -1,5 +1,7 @@
 # Changelog
 
+- Added: DDC diagnostics now export a ZIP support bundle containing the previewed text report, a schema-versioned JSON report, and a checksummed manifest; the diagnostics history keeps only the newest ten bundles within a 20 MiB budget.
+- Changed: support exports pseudonymize monitor identifiers and local names by default, offer separate one-build opt-ins for each raw category, and always redact local paths, Windows user and machine names, email/IP/MAC addresses, and credential-like tokens.
 - Changed: application name and version metadata now come from one canonical data file, and the launcher, UI, diagnostics, profile exports, release filenames, and artifact manifest consume that value.
 - Changed: portable releases are pinned to Windows PowerShell 5.1 and use an ordinal ZIP entry order plus `SOURCE_DATE_EPOCH` timestamps for byte-identical rebuilds; release output cleanup is restricted to validated exact targets.
 - Changed: the support matrix now distinguishes current Windows 11 releases from Windows 10 ESU and LTSC compatibility lanes.

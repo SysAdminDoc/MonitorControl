@@ -3619,6 +3619,102 @@ Describe "System-aware accessibility contract" {
     }
 }
 
+Describe "Privacy-redacted DDC support bundles" {
+    BeforeAll {
+        Import-MonitorControlFunctions -Name @(
+            "Get-DdcReportSafeTarget", "Get-DdcSupportSensitiveValues", "Protect-DdcSupportContent",
+            "Get-DdcReportPrivacyDescription", "New-DdcCompatibilityReportJson", "Get-DdcSupportContentHash",
+            "Remove-OldDdcSupportBundles", "Save-DdcSupportBundle"
+        )
+        $script:AppName = "MonitorControl Pro"
+        $script:AppVersion = "3.37.0"
+        $script:DisplayPathInventory = @()
+    }
+
+    It "pseudonymizes monitor identity and local names unless each category is explicitly selected" {
+        $target = [PSCustomObject]@{
+            Index = 0; Label = "Alice Office"; Name = "Alice Panel"; DeviceName = "\\.\DISPLAY9"
+            DevicePath = "\\?\DISPLAY#DEL4098#SERIAL-ABC"; HardwareId = "MONITOR\DEL4098\SERIAL-ABC"
+            IdentityKey = "winrt:SERIAL-ABC"; EdidSerial = "SERIAL-ABC"; EdidName = "Alice Monitor"
+        }
+        $safe = Get-DdcReportSafeTarget -Target $target -Ordinal 1
+        $safe.Label | Should -Be "Display 1"
+        $safe.IdentityKey | Should -Be "[monitor-identity-1]"
+        $safe.DevicePath | Should -Be "[device-path-1]"
+        $safe.EdidSerial | Should -Be "[serial-1]"
+
+        $raw = Get-DdcReportSafeTarget -Target $target -Ordinal 1 -IncludeRawMonitorIdentifiers -IncludeRawNames
+        $raw.Label | Should -Be $target.Label
+        $raw.IdentityKey | Should -Be $target.IdentityKey
+        $raw.DevicePath | Should -Be $target.DevicePath
+        $raw.EdidSerial | Should -Be $target.EdidSerial
+    }
+
+    It "removes known PII address and credential fixtures from default support content" {
+        $fixture = @"
+User=Alice Profile=QuarterlyPlan App=Teams.exe Serial=SERIAL-ABC
+Path=C:\Users\Alice\AppData\Roaming\MonitorControlPro\profiles\QuarterlyPlan.json
+Email=alice@example.test IPv4=192.168.10.24 IPv6=2001:db8::42 MAC=AA-BB-CC-DD-EE-FF
+Authorization: Bearer secret-token-value api_key=another-secret
+"@
+        $protected = Protect-DdcSupportContent -Text $fixture -SensitiveValues @("Alice", "QuarterlyPlan", "Teams.exe", "SERIAL-ABC", "C:\Users\Alice")
+        foreach ($secret in @("Alice", "QuarterlyPlan", "Teams.exe", "SERIAL-ABC", "alice@example.test", "192.168.10.24", "2001:db8::42", "AA-BB-CC-DD-EE-FF", "secret-token-value", "another-secret")) {
+            $protected | Should -Not -Match ([regex]::Escape($secret))
+        }
+        $protected | Should -Match "\[redacted\]"
+    }
+
+    It "emits a structured default report without fixture identifiers" {
+        $target = [PSCustomObject]@{
+            Index = 0; Label = "Alice Office"; Name = "Alice Panel"; DeviceName = "\\.\DISPLAY9"
+            DevicePath = "\\?\DISPLAY#DEL4098#SERIAL-ABC"; LegacyDevicePath = "legacy:SERIAL-ABC"
+            HardwareId = "MONITOR\DEL4098\SERIAL-ABC"; IdentityKey = "winrt:SERIAL-ABC"; IdentitySource = "WinRT"
+            Manufacturer = "DEL"; EdidModel = "4098"; EdidSerial = "SERIAL-ABC"; EdidName = "Alice Monitor"
+            PhysicalConnector = "DisplayPort"; Resolution = "2560x1440@60Hz"; Primary = $true
+            CapabilityStatus = "Known"; SupportedCodes = @(16, 18); RecoveryState = "Fresh"
+        }
+        $probe = [PSCustomObject]@{ TargetIndex = 0; ProbeIndex = 1; Code = 16; Success = $true; Current = 50; Maximum = 100; Type = 0; LastError = 0; Attempts = 1 }
+        $error = [PSCustomObject]@{ Timestamp = [datetime]"2026-08-01T12:00:00Z"; Operation = "Read"; Monitor = "Alice Office"; Code = 16; LastError = 5; Attempts = 2 }
+        $system = [PSCustomObject]@{ OS = "Windows 11"; PowerShell = "5.1"; GPUs = @("Example GPU") }
+
+        $json = New-DdcCompatibilityReportJson -Targets @($target) -ProbeResults @($probe) -RecentErrors @($error) -SystemInfo $system
+        $document = $json | ConvertFrom-Json
+        $document.SchemaVersion | Should -Be 1
+        $document.Privacy.RawMonitorIdentifiersIncluded | Should -BeFalse
+        $document.Privacy.RawNamesIncluded | Should -BeFalse
+        $document.Monitors[0].Label | Should -Be "Display 1"
+        foreach ($secret in @("Alice", "SERIAL-ABC", "\\.\DISPLAY9", "MONITOR\DEL4098")) {
+            $json | Should -Not -Match ([regex]::Escape($secret))
+        }
+    }
+
+    It "writes text JSON and a manifest into a bounded ZIP history" {
+        $previousRoot = $script:DefaultProfilesPath
+        try {
+            $script:DefaultProfilesPath = Join-Path $TestDrive "support-root"
+            $diagnostics = Join-Path $script:DefaultProfilesPath "diagnostics"
+            New-Item -ItemType Directory -Path $diagnostics -Force | Out-Null
+            for ($index = 0; $index -lt 12; $index++) {
+                $oldPath = Join-Path $diagnostics ("monitorcontrol-support-20260101-0000{0}-000.zip" -f $index)
+                [System.IO.File]::WriteAllBytes($oldPath, (New-Object byte[] 64))
+                (Get-Item $oldPath).LastWriteTimeUtc = [datetime]::UtcNow.AddMinutes(-($index + 1))
+            }
+
+            $bundlePath = Save-DdcSupportBundle -Text "redacted report" -Json '{"SchemaVersion":1}'
+            $bundlePath | Should -Exist
+            @(Get-ChildItem -LiteralPath $diagnostics -Filter "monitorcontrol-support-*.zip").Count | Should -BeLessOrEqual 10
+
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $archive = [System.IO.Compression.ZipFile]::OpenRead($bundlePath)
+            try {
+                @($archive.Entries.Name | Sort-Object) | Should -Be @("manifest.json", "report.json", "report.txt")
+            } finally { $archive.Dispose() }
+        } finally {
+            $script:DefaultProfilesPath = $previousRoot
+        }
+    }
+}
+
 Describe "Unsigned release packaging" {
     BeforeAll {
         $script:BuildReleasePath = Join-Path $script:RepoRoot "tools\build-release.ps1"
