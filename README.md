@@ -17,7 +17,7 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 ## Features
 
 ### Display Controls
-- **Modern Control Center** — Persistent sidebar navigation, selected-display context, high-contrast control cards, and DPI-aware layouts for a clearer Windows 10/11 experience
+- **Modern Control Center** — Seven focused workspaces share persistent navigation, selected-display context, compact bento-style cards, accessible contrast, and DPI-aware layouts; System adds category navigation for Display & DDC, Safety, Automation, Diagnostics, and Integrations
 - **Brightness & Contrast** — Real-time adjustment via DDC/CI
 - **RGB Gain Control** — Fine-tune red, green, and blue channels independently
 - **Color Temperature Presets** — Quick access to Warm (5000K), 6500K (D65), Cool (9300K), and sRGB
@@ -90,8 +90,8 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 - **PowerShell 5.1+** (included with Windows)
 - **DDC/CI Compatible Monitor** — Most modern monitors support this; ensure it's enabled in your monitor's OSD settings
 - **NVIDIA or AMD GPU** (optional) — For GPU monitoring tab
-- **LibreHardwareMonitorLib.dll or OpenHardwareMonitorLib.dll** (optional, 0.9.0+) — For CPU temperature on the hardware tab. Disabled until you enable it under **System > Optional hardware helpers**
-- **PresentMon.exe** (optional, 1.6+) — For FPS overlay capture on the hardware tab. Disabled until you enable it under **System > Optional hardware helpers**
+- **LibreHardwareMonitorLib.dll or OpenHardwareMonitorLib.dll** (optional, 0.9.0+) — For CPU temperature on the hardware tab. Disabled until you enable it under **System > Integrations**
+- **PresentMon.exe** (optional, 1.6+) — For FPS overlay capture on the hardware tab. Disabled until you enable it under **System > Integrations**
 
 ## Installation
 
@@ -179,19 +179,19 @@ This is the same pinned lane used by CI. It gates a pure-ASCII check across ever
 
 ### Scheduled Profiles
 - Create or load a saved monitor profile
-- Open the **Schedule** tab, enable **Scheduled profiles**, and add `HH:mm` rules that map times to profiles
+- Open the **Automation** tab, enable **Scheduled profiles**, and add `HH:mm` rules that map times to profiles
 - Leave **Risky writes** off unless that exact schedule rule should be allowed to use risky profile values; the target monitor identity must still be unlocked separately
 - The timeline plots rules against a 24-hour axis so timing gaps are visible before saving more rules
 - The watcher applies the latest due rule once per schedule boundary, including the current effective rule when scheduling is enabled
 - Rules are saved in `%APPDATA%\MonitorControlPro\profile-schedules.json`
 
 ### Idle Dim
-- Open the **Schedule** tab and enable **Idle dim**
+- Open the **Automation** tab and enable **Idle dim**
 - Set the idle threshold in minutes, target brightness, and whether activity should restore the previous brightness
 - Settings are saved in `%APPDATA%\MonitorControlPro\idle-dim.json`
 
 ### Local Automation Bridge
-- Open the **System** tab and enable **Local Automation Bridge** only when needed
+- Open **System > Automation** and enable **Local Automation Bridge** only when needed
 - Default bind is `127.0.0.1:34291`; enabling a non-loopback address requires an explicit network-exposure warning because the bridge uses unencrypted HTTP
 - Only an exact, body-free `GET /api/health` is unauthenticated; every other request requires the generated key through `X-MonitorControl-Key` or `Authorization: Bearer <key>`
 - Query-string and JSON-body API keys are rejected, and the saved key is encrypted for the current Windows user with DPAPI
@@ -203,7 +203,7 @@ This is the same pinned lane used by CI. It gates a pure-ASCII check across ever
 ### Restoring Brightness After Sleep
 
 Many monitors forget their brightness across a power or sleep cycle and come back at full
-output. Open **System** and enable **Restore brightness at launch and after resume**.
+output. Open **System > Display & DDC** and enable **Restore brightness at launch and after resume**.
 
 - The last brightness you set for each display is remembered against its stable monitor identity.
 - It is written back once per detected display change, so a burst of hot-plug events cannot
@@ -218,7 +218,7 @@ MonitorControl Pro can read CPU temperature through LibreHardwareMonitorLib/Open
 and drive the FPS overlay through PresentMon. Both are third-party binaries that the app would
 otherwise load or execute from the folder it was extracted into, so both are **off by default**.
 
-- Open **System > Optional hardware helpers** and enable only what you installed yourself. Each
+- Open **System > Integrations** and enable only what you installed yourself. Each
   toggle shows a warning before anything is loaded or run.
 - Nothing is loaded or executed before you enable it, and no settings file is written until you act.
 - Once enabled, the panel reports the resolved absolute path, where it came from (script directory,
@@ -233,10 +233,10 @@ otherwise load or execute from the folder it was extracted into, so both are **o
 
 ### Capability Discovery Safety
 - On first launch, choose whether MonitorControl Pro may request full DDC/CI capability strings from monitor firmware
-- Choose **No** or enable **Maximum compatibility** in **System** to prevent all capability-string requests
+- Choose **No** or enable **Maximum compatibility** in **System > Display & DDC** to prevent all capability-string requests
 - Before each enabled request, the app persists the selected monitor identity in a crash sentinel and clears it only after the native call returns
 - If the app or Windows exits during a request, discovery is disabled on the next launch and that monitor identity is excluded
-- Use **Exclude selected** or **Clear exclusions** in **System** to manage the per-monitor exclusion list
+- Use **Exclude selected** or **Clear exclusions** in **System > Display & DDC** to manage the per-monitor exclusion list
 - A successful read is cached in `%APPDATA%\MonitorControlPro\capabilities-cache.json` and replayed on later launches; use **Clear cache** to force a re-read
 - Monitor models known upstream to fault the Windows kernel during a capability read are skipped before any probe, with the reason shown in the DDC compatibility report
 
@@ -245,6 +245,8 @@ otherwise load or execute from the folder it was extracted into, so both are **o
 Panels differ by an order of magnitude in how long they need between DDC/CI requests, so retry
 budgets and delays are stored against each stable monitor identity in
 `%APPDATA%\MonitorControlPro\ddc-timing.json` and survive restarts.
+
+These controls are under **System > Display & DDC**.
 
 - **Adaptive** (default) learns a sleep multiplier from the first successful handshake with the
   monitor: a panel that answered on attempt three gets three times the default delay between
@@ -264,7 +266,7 @@ budgets and delays are stored against each stable monitor identity in
 - Effective values, calibration state, and skipped codes appear in the DDC Compatibility Report
 
 ### Risky VCP Write Safety
-- Risky controls start disabled. Select a display, open **System**, and explicitly enable risky VCP writes for that stable monitor identity
+- Risky controls start disabled. Select a display, open **System > Safety**, and explicitly enable risky VCP writes for that stable monitor identity
 - The unlock covers power (`0xD6`), input (`0x60`), factory and color reset (`0x04`, `0x08`), color preset (`0x14`), OSD/button control (`0xCA`), OSD language (`0xCC`), auxiliary power (`0xD7`), PiP/PbP (`0xE8`, `0xE9`), and arbitrary VCP writes; identities without a stable key cannot be unlocked
 - Color preset is gated because some monitors keep the value after this app closes and need a factory reset to undo it, and OSD/button control is gated because it can disable the monitor's own buttons, which is the only way to recover a display that stops responding to software
 - Every direct command shows the exact VCP code, value, and target before writing. Canceling makes no hardware change
@@ -277,6 +279,7 @@ budgets and delays are stored against each stable monitor identity in
 - Click on monitor rectangles to select different displays
 - Use Tab and Shift+Tab to navigate every interactive control; focus has a visible system-aware outline
 - Use Alt+D/M/H/V/P/A/S to open Display, Monitor, Hardware, VCP Explorer, Profiles, Automation, or System
+- Within System, use the named Overview, Display & DDC, Safety, Automation, Diagnostics, and Integrations category tabs
 - Use Ctrl+R to refresh displays and Escape to dismiss an inline alert
 - Slider values update in real-time
 
@@ -447,7 +450,7 @@ Use **Sync Folder** to point profile storage at a OneDrive or Dropbox folder. Th
 - Some monitors have a delay (~50ms per command)
 - Certain VCP codes may not be supported by your specific monitor
 - Use the VCP Scanner to discover which features your monitor actually supports
-- Open **System** and build the **DDC Compatibility Report** before troubleshooting docks, adapters, GPU drivers, KVMs, or firmware quirks
+- Open **System > Diagnostics** and build the **DDC Compatibility Report** before troubleshooting docks, adapters, GPU drivers, KVMs, or firmware quirks
 - Failed DDC/CI reads and writes are retried automatically and surfaced in the status bar; open **VCP Explorer** to copy the latest diagnostic summary with monitor name, VCP code, attempted value, Win32 error, and retry count
 
 ### Laptop Display Not Working
@@ -469,7 +472,7 @@ reports against how many of them answered a DDC/CI request, and names the differ
 | Unidentified path | The display answers nothing and its path is not one of the above - typically an MST hub, an adapter, a KVM, or a cable missing the DDC pins, or DDC/CI switched off in the OSD | Switch DDC/CI on in the OSD, then connect straight to a GPU output with a certified cable and no hub, dock, or KVM |
 
 The full breakdown - every display path, its classification, and whether it answered - is in the
-**DDC Compatibility Report** on the **System** tab.
+**DDC Compatibility Report** under **System > Diagnostics**.
 
 ## Technical Details
 

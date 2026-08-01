@@ -14,7 +14,8 @@ param(
     [ValidateSet("System", "Dark", "HighContrast")]
     [string]$Theme = "System",
     [ValidateRange(0, 200)]
-    [int]$TextScalePercent = 0
+    [int]$TextScalePercent = 0,
+    [string]$RenderDirectory = ""
 )
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, UIAutomationTypes, UIAutomationProvider, System.Windows.Forms, System.Drawing, System.IO.Compression, System.IO.Compression.FileSystem, System.Management
@@ -2086,28 +2087,28 @@ function Set-MonitorUserLabel {
 
 function Get-AccessibilityThemePalette {
     return [ordered]@{
-        Canvas = "#08111D"
-        Sidebar = "#0A1422"
-        Header = "#0B1625"
-        Footer = "#091320"
-        Surface = "#101B2B"
+        Canvas = "#07111C"
+        Sidebar = "#091420"
+        Header = "#0A1522"
+        Footer = "#08131F"
+        Surface = "#111D2B"
         Card = "#142235"
-        CardHover = "#192B42"
-        Control = "#0D1928"
-        Track = "#526985"
-        Border = "#5F7794"
-        Accent = "#2F6FCF"
-        AccentHover = "#2864C7"
-        AccentPressed = "#1F5BB8"
-        Focus = "#75A9FF"
-        Text = "#E8EEF7"
-        MutedText = "#9AABC0"
+        CardHover = "#1A2C43"
+        Control = "#0B1724"
+        Track = "#35475A"
+        Border = "#586E84"
+        Accent = "#2563C7"
+        AccentHover = "#2D6BCD"
+        AccentPressed = "#1E54B5"
+        Focus = "#65A2FF"
+        Text = "#F2F5F9"
+        MutedText = "#A0ADBC"
         OnAccent = "#FFFFFF"
-        Success = "#62D891"
-        Warning = "#FFD18A"
-        WarningSurface = "#3A2F1E"
-        Danger = "#F46969"
-        DangerSurface = "#40212A"
+        Success = "#61D683"
+        Warning = "#F2B452"
+        WarningSurface = "#312719"
+        Danger = "#FF6666"
+        DangerSurface = "#321D24"
     }
 }
 
@@ -6819,36 +6820,37 @@ try {
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="MonitorControl Pro v3.37.0" Width="1120" Height="760" MinWidth="920" MinHeight="640"
+        Title="MonitorControl Pro v3.37.0" Width="1320" Height="800" MinWidth="1024" MinHeight="720"
         Background="{DynamicResource CanvasBrush}" Foreground="{DynamicResource TextBrush}" FontFamily="Segoe UI"
         TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="ClearType"
         WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip">
 <Window.Resources>
-    <GridLength x:Key="SidebarWidth">260</GridLength>
-    <SolidColorBrush x:Key="CanvasBrush" Color="#08111d"/>
-    <SolidColorBrush x:Key="SidebarBrush" Color="#0a1422"/>
-    <SolidColorBrush x:Key="HeaderBrush" Color="#0b1625"/>
-    <SolidColorBrush x:Key="FooterBrush" Color="#091320"/>
-    <SolidColorBrush x:Key="SurfaceBrush" Color="#101b2b"/>
+    <GridLength x:Key="SidebarWidth">228</GridLength>
+    <SolidColorBrush x:Key="CanvasBrush" Color="#07111c"/>
+    <SolidColorBrush x:Key="SidebarBrush" Color="#091420"/>
+    <SolidColorBrush x:Key="HeaderBrush" Color="#0a1522"/>
+    <SolidColorBrush x:Key="FooterBrush" Color="#08131f"/>
+    <SolidColorBrush x:Key="SurfaceBrush" Color="#111d2b"/>
     <SolidColorBrush x:Key="CardBrush" Color="#142235"/>
-    <SolidColorBrush x:Key="CardHoverBrush" Color="#192b42"/>
-    <SolidColorBrush x:Key="ControlBrush" Color="#0d1928"/>
-    <SolidColorBrush x:Key="TrackBrush" Color="#526985"/>
-    <SolidColorBrush x:Key="BorderBrush" Color="#5f7794"/>
-    <SolidColorBrush x:Key="AccentBrush" Color="#2f6fcf"/>
-    <SolidColorBrush x:Key="AccentHoverBrush" Color="#2864c7"/>
-    <SolidColorBrush x:Key="AccentPressedBrush" Color="#1f5bb8"/>
-    <SolidColorBrush x:Key="FocusBrush" Color="#75a9ff"/>
-    <SolidColorBrush x:Key="TextBrush" Color="#e8eef7"/>
-    <SolidColorBrush x:Key="MutedTextBrush" Color="#9aabc0"/>
+    <SolidColorBrush x:Key="CardHoverBrush" Color="#1a2c43"/>
+    <SolidColorBrush x:Key="ControlBrush" Color="#0b1724"/>
+    <SolidColorBrush x:Key="TrackBrush" Color="#35475a"/>
+    <SolidColorBrush x:Key="BorderBrush" Color="#586e84"/>
+    <SolidColorBrush x:Key="AccentBrush" Color="#2563c7"/>
+    <SolidColorBrush x:Key="AccentHoverBrush" Color="#2d6bcd"/>
+    <SolidColorBrush x:Key="AccentPressedBrush" Color="#1e54b5"/>
+    <SolidColorBrush x:Key="FocusBrush" Color="#65a2ff"/>
+    <SolidColorBrush x:Key="TextBrush" Color="#f2f5f9"/>
+    <SolidColorBrush x:Key="MutedTextBrush" Color="#a0adbc"/>
     <SolidColorBrush x:Key="OnAccentBrush" Color="#ffffff"/>
-    <SolidColorBrush x:Key="SuccessBrush" Color="#62d891"/>
-    <SolidColorBrush x:Key="WarningBrush" Color="#ffd18a"/>
-    <SolidColorBrush x:Key="WarningSurfaceBrush" Color="#3a2f1e"/>
-    <SolidColorBrush x:Key="DangerBrush" Color="#f46969"/>
-    <SolidColorBrush x:Key="DangerSurfaceBrush" Color="#40212a"/>
+    <SolidColorBrush x:Key="SuccessBrush" Color="#61d683"/>
+    <SolidColorBrush x:Key="WarningBrush" Color="#f2b452"/>
+    <SolidColorBrush x:Key="WarningSurfaceBrush" Color="#312719"/>
+    <SolidColorBrush x:Key="DangerBrush" Color="#ff6666"/>
+    <SolidColorBrush x:Key="DangerSurfaceBrush" Color="#321d24"/>
     <Style TargetType="TextBlock">
         <Setter Property="FontFamily" Value="Segoe UI"/>
+        <Setter Property="FontSize" Value="13"/>
         <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
     </Style>
     <Style x:Key="KeyboardFocusVisual" TargetType="Control">
@@ -6890,11 +6892,11 @@ try {
     </Style>
     <Style x:Key="Btn" TargetType="Button">
         <Setter Property="Background" Value="{DynamicResource CardBrush}"/><Setter Property="Foreground" Value="{DynamicResource TextBrush}"/><Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
-        <Setter Property="BorderThickness" Value="1"/><Setter Property="Padding" Value="14,8"/><Setter Property="Cursor" Value="Hand"/>
-        <Setter Property="FontSize" Value="12"/><Setter Property="FontFamily" Value="Segoe UI"/><Setter Property="FontWeight" Value="SemiBold"/>
+        <Setter Property="BorderThickness" Value="1"/><Setter Property="Padding" Value="15,9"/><Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="FontSize" Value="13"/><Setter Property="FontFamily" Value="Segoe UI"/><Setter Property="FontWeight" Value="SemiBold"/>
         <Setter Property="FocusVisualStyle" Value="{StaticResource KeyboardFocusVisual}"/>
         <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
-            <Border x:Name="bd" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="8" Padding="{TemplateBinding Padding}">
+            <Border x:Name="bd" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="9" Padding="{TemplateBinding Padding}">
                 <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True"/></Border>
             <ControlTemplate.Triggers>
                 <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="{DynamicResource CardHoverBrush}"/><Setter TargetName="bd" Property="BorderBrush" Value="{DynamicResource BorderBrush}"/></Trigger>
@@ -6962,16 +6964,17 @@ try {
         <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="TabControl">
             <Grid>
                 <Grid.ColumnDefinitions><ColumnDefinition Width="{StaticResource SidebarWidth}"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                <Border Grid.Column="0" Background="{DynamicResource SidebarBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,1,0" Padding="14,18">
+                <Border Grid.Column="0" Background="{DynamicResource SidebarBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,1,0" Padding="12,18">
                     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Focusable="False">
                         <StackPanel IsItemsHost="True" KeyboardNavigation.TabIndex="1"/>
                     </ScrollViewer>
                 </Border>
-                <Border Grid.Column="1" Background="{DynamicResource CanvasBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="24,20,24,16">
+                <Border Grid.Column="1" Background="{DynamicResource CanvasBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="30,24,30,20">
                     <Grid>
-                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="16"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-                        <TextBlock Text="{Binding SelectedItem.Header, RelativeSource={RelativeSource TemplatedParent}}" FontSize="24" FontWeight="SemiBold" Foreground="{DynamicResource TextBrush}"/>
-                        <ScrollViewer Grid.Row="2" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto"
+                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="18"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                        <TextBlock Text="{Binding SelectedItem.Header, RelativeSource={RelativeSource TemplatedParent}}" FontSize="28" FontWeight="SemiBold" Foreground="{DynamicResource TextBrush}"/>
+                        <TextBlock Grid.Row="1" Text="{Binding SelectedItem.ToolTip, RelativeSource={RelativeSource TemplatedParent}}" FontSize="13" Foreground="{DynamicResource MutedTextBrush}" Margin="0,4,0,0"/>
+                        <ScrollViewer Grid.Row="3" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto"
                                       CanContentScroll="False" Focusable="False">
                             <ContentPresenter x:Name="PART_SelectedContentHost" ContentSource="SelectedContent"
                                               HorizontalAlignment="Stretch" VerticalAlignment="Stretch" KeyboardNavigation.TabIndex="2"
@@ -6983,16 +6986,16 @@ try {
         </ControlTemplate></Setter.Value></Setter>
     </Style>
     <Style TargetType="TabItem">
-        <Setter Property="Foreground" Value="{DynamicResource MutedTextBrush}"/><Setter Property="FontFamily" Value="Segoe UI"/><Setter Property="FontSize" Value="13"/>
-        <Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Padding" Value="18,13"/><Setter Property="Margin" Value="0,0,0,6"/><Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Foreground" Value="{DynamicResource MutedTextBrush}"/><Setter Property="FontFamily" Value="Segoe UI"/><Setter Property="FontSize" Value="14"/>
+        <Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Padding" Value="16,14"/><Setter Property="Margin" Value="0,0,0,5"/><Setter Property="Cursor" Value="Hand"/>
         <Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="VerticalContentAlignment" Value="Stretch"/>
         <Setter Property="FocusVisualStyle" Value="{StaticResource KeyboardFocusVisual}"/>
         <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="TabItem">
             <Border x:Name="Bd" Background="Transparent" Padding="{TemplateBinding Padding}" CornerRadius="9">
                 <Grid>
-                    <Grid.ColumnDefinitions><ColumnDefinition Width="28"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                     <Border x:Name="Indicator" Width="3" Height="22" CornerRadius="2" Background="{DynamicResource AccentBrush}" HorizontalAlignment="Left" Margin="-18,0,0,0" Visibility="Collapsed"/>
-                    <TextBlock Text="{TemplateBinding Tag}" FontFamily="Segoe MDL2 Assets" FontSize="16" Foreground="{TemplateBinding Foreground}" VerticalAlignment="Center"/>
+                    <TextBlock Text="{TemplateBinding Tag}" FontFamily="Segoe MDL2 Assets" FontSize="18" Foreground="{TemplateBinding Foreground}" VerticalAlignment="Center"/>
                     <ContentPresenter Grid.Column="1" ContentSource="Header" HorizontalAlignment="Left" VerticalAlignment="Center"/>
                 </Grid>
             </Border>
@@ -7044,13 +7047,47 @@ try {
     </Style>
     <Style TargetType="TextBox">
         <Setter Property="Background" Value="{DynamicResource ControlBrush}"/><Setter Property="Foreground" Value="{DynamicResource TextBrush}"/><Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
-        <Setter Property="BorderThickness" Value="1"/><Setter Property="Padding" Value="8,6"/><Setter Property="FontFamily" Value="Segoe UI"/><Setter Property="FontSize" Value="12"/><Setter Property="CaretBrush" Value="{DynamicResource TextBrush}"/>
+        <Setter Property="BorderThickness" Value="1"/><Setter Property="Padding" Value="10,7"/><Setter Property="FontFamily" Value="Segoe UI"/><Setter Property="FontSize" Value="13"/><Setter Property="CaretBrush" Value="{DynamicResource TextBrush}"/>
         <Setter Property="FocusVisualStyle" Value="{StaticResource KeyboardFocusVisual}"/>
+        <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="TextBox">
+            <Border x:Name="TextBoxBorder" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="8" Padding="{TemplateBinding Padding}">
+                <ScrollViewer x:Name="PART_ContentHost"/>
+            </Border>
+            <ControlTemplate.Triggers>
+                <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="TextBoxBorder" Property="BorderBrush" Value="{DynamicResource FocusBrush}"/></Trigger>
+                <Trigger Property="IsEnabled" Value="False"><Setter TargetName="TextBoxBorder" Property="Opacity" Value="0.48"/></Trigger>
+            </ControlTemplate.Triggers>
+        </ControlTemplate></Setter.Value></Setter>
     </Style>
     <Style TargetType="PasswordBox">
         <Setter Property="Background" Value="{DynamicResource ControlBrush}"/><Setter Property="Foreground" Value="{DynamicResource TextBrush}"/><Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
-        <Setter Property="BorderThickness" Value="1"/><Setter Property="Padding" Value="8,6"/><Setter Property="FontFamily" Value="Segoe UI"/><Setter Property="FontSize" Value="12"/><Setter Property="CaretBrush" Value="{DynamicResource TextBrush}"/>
+        <Setter Property="BorderThickness" Value="1"/><Setter Property="Padding" Value="10,7"/><Setter Property="FontFamily" Value="Segoe UI"/><Setter Property="FontSize" Value="13"/><Setter Property="CaretBrush" Value="{DynamicResource TextBrush}"/>
         <Setter Property="FocusVisualStyle" Value="{StaticResource KeyboardFocusVisual}"/>
+        <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="PasswordBox">
+            <Border x:Name="PasswordBoxBorder" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="8" Padding="{TemplateBinding Padding}">
+                <ScrollViewer x:Name="PART_ContentHost"/>
+            </Border>
+            <ControlTemplate.Triggers>
+                <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="PasswordBoxBorder" Property="BorderBrush" Value="{DynamicResource FocusBrush}"/></Trigger>
+                <Trigger Property="IsEnabled" Value="False"><Setter TargetName="PasswordBoxBorder" Property="Opacity" Value="0.48"/></Trigger>
+            </ControlTemplate.Triggers>
+        </ControlTemplate></Setter.Value></Setter>
+    </Style>
+    <Style TargetType="RadioButton">
+        <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/><Setter Property="FontFamily" Value="Segoe UI"/><Setter Property="FontSize" Value="13"/>
+        <Setter Property="FocusVisualStyle" Value="{StaticResource KeyboardFocusVisual}"/>
+        <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="RadioButton">
+            <StackPanel Orientation="Horizontal">
+                <Grid Width="18" Height="18" Margin="0,0,8,0">
+                    <Ellipse x:Name="RadioRing" Fill="{DynamicResource ControlBrush}" Stroke="{DynamicResource BorderBrush}" StrokeThickness="1"/>
+                    <Ellipse x:Name="RadioDot" Width="8" Height="8" Fill="{DynamicResource AccentBrush}" Visibility="Collapsed"/>
+                </Grid>
+                <ContentPresenter VerticalAlignment="Center"/>
+            </StackPanel>
+            <ControlTemplate.Triggers>
+                <Trigger Property="IsChecked" Value="True"><Setter TargetName="RadioRing" Property="Stroke" Value="{DynamicResource FocusBrush}"/><Setter TargetName="RadioDot" Property="Visibility" Value="Visible"/></Trigger>
+            </ControlTemplate.Triggers>
+        </ControlTemplate></Setter.Value></Setter>
     </Style>
     <Style TargetType="ListBox">
         <Setter Property="Background" Value="{DynamicResource ControlBrush}"/>
@@ -7073,29 +7110,71 @@ try {
         <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
         <Setter Property="AutomationProperties.HelpText" Value="Select this display"/>
     </Style>
+    <Style x:Key="PageCard" TargetType="Border">
+        <Setter Property="Background" Value="{DynamicResource SurfaceBrush}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="CornerRadius" Value="12"/>
+        <Setter Property="Padding" Value="20"/>
+    </Style>
+    <Style x:Key="PageCardCompact" TargetType="Border" BasedOn="{StaticResource PageCard}">
+        <Setter Property="Padding" Value="16"/>
+    </Style>
+    <Style x:Key="SectionTitle" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="15"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+    </Style>
+    <Style x:Key="MetricValue" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="28"/><Setter Property="FontWeight" Value="Light"/><Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+    </Style>
+    <Style x:Key="SettingsTabControl" TargetType="TabControl">
+        <Setter Property="Background" Value="Transparent"/><Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="VerticalContentAlignment" Value="Stretch"/>
+        <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="TabControl">
+            <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="16"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <Border Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10">
+                    <UniformGrid Rows="1" IsItemsHost="True"/>
+                </Border>
+                <ContentPresenter Grid.Row="2" x:Name="PART_SelectedContentHost" ContentSource="SelectedContent" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"/>
+            </Grid>
+        </ControlTemplate></Setter.Value></Setter>
+    </Style>
+    <Style x:Key="SettingsTabItem" TargetType="TabItem">
+        <Setter Property="Foreground" Value="{DynamicResource MutedTextBrush}"/><Setter Property="FontSize" Value="12"/><Setter Property="FontWeight" Value="SemiBold"/>
+        <Setter Property="Padding" Value="10,10"/><Setter Property="Margin" Value="0"/><Setter Property="HorizontalContentAlignment" Value="Center"/>
+        <Setter Property="FocusVisualStyle" Value="{StaticResource KeyboardFocusVisual}"/>
+        <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="TabItem">
+            <Border x:Name="SettingsTabBorder" Background="Transparent" BorderBrush="Transparent" BorderThickness="1" CornerRadius="8" Padding="{TemplateBinding Padding}" Margin="2">
+                <ContentPresenter ContentSource="Header" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+                <Trigger Property="IsSelected" Value="True"><Setter TargetName="SettingsTabBorder" Property="Background" Value="{DynamicResource AccentBrush}"/><Setter TargetName="SettingsTabBorder" Property="BorderBrush" Value="{DynamicResource FocusBrush}"/><Setter Property="Foreground" Value="{DynamicResource OnAccentBrush}"/></Trigger>
+                <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="SettingsTabBorder" Property="Background" Value="{DynamicResource CardHoverBrush}"/><Setter Property="Foreground" Value="{DynamicResource TextBrush}"/></Trigger>
+            </ControlTemplate.Triggers>
+        </ControlTemplate></Setter.Value></Setter>
+    </Style>
 </Window.Resources>
 <ScrollViewer x:Name="ShellScrollViewer" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Disabled"
               HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" Focusable="False">
-<Grid x:Name="ShellRoot" Background="{DynamicResource CanvasBrush}" MinWidth="880" MinHeight="600">
+<Grid x:Name="ShellRoot" Background="{DynamicResource CanvasBrush}" MinWidth="984" MinHeight="680">
     <Grid.LayoutTransform><ScaleTransform ScaleX="1" ScaleY="1"/></Grid.LayoutTransform>
-    <Grid.RowDefinitions><RowDefinition Height="Auto" MinHeight="74"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="32"/></Grid.RowDefinitions>
+    <Grid.RowDefinitions><RowDefinition Height="Auto" MinHeight="78"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="34"/></Grid.RowDefinitions>
     <Grid.ColumnDefinitions><ColumnDefinition Width="{StaticResource SidebarWidth}"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
     <Border Grid.Row="0" Grid.Column="0" Background="{DynamicResource SidebarBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0" Padding="18,0">
         <Grid>
-            <Grid.ColumnDefinitions><ColumnDefinition Width="36"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-            <Border Width="30" Height="30" CornerRadius="8" Background="{DynamicResource AccentBrush}" VerticalAlignment="Center">
-                <TextBlock Text="MC" Foreground="{DynamicResource OnAccentBrush}" FontSize="12" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            <Grid.ColumnDefinitions><ColumnDefinition Width="42"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+            <Border Width="38" Height="38" CornerRadius="10" Background="{DynamicResource AccentBrush}" VerticalAlignment="Center">
+                <TextBlock Text="MC" Foreground="{DynamicResource OnAccentBrush}" FontSize="14" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
             <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="10,0,0,0">
-                <TextBlock x:Name="AppTitleText" Text="MonitorControl Pro" FontSize="12.5" FontWeight="SemiBold" Foreground="{DynamicResource TextBrush}" TextWrapping="Wrap"/>
-                <TextBlock x:Name="AppSubtitleText" Text="Version 3.37.0" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,2,0,0" TextTrimming="CharacterEllipsis"/>
+                <TextBlock x:Name="AppTitleText" Text="MonitorControl Pro" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource TextBrush}" TextWrapping="Wrap"/>
+                <TextBlock x:Name="AppSubtitleText" Text="Version 3.37.0" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,3,0,0" TextTrimming="CharacterEllipsis"/>
             </StackPanel>
         </Grid>
     </Border>
-    <Border Grid.Row="0" Grid.Column="1" Background="{DynamicResource HeaderBrush}" Padding="24,8">
+    <Border Grid.Row="0" Grid.Column="1" Background="{DynamicResource HeaderBrush}" Padding="30,10">
         <WrapPanel VerticalAlignment="Center">
-            <StackPanel Width="380" VerticalAlignment="Center" Margin="0,0,16,0">
-                <TextBlock x:Name="SelectedMonitorName" Text="No monitor selected" FontSize="14" Foreground="{DynamicResource TextBrush}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+            <StackPanel Width="430" VerticalAlignment="Center" Margin="0,0,20,0">
+                <TextBlock x:Name="SelectedMonitorName" Text="No monitor selected" FontSize="15" Foreground="{DynamicResource TextBrush}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
                 <Grid Margin="0,2,0,0">
                     <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                     <Ellipse x:Name="SelectedMonitorHealthDot" Width="7" Height="7" Fill="{DynamicResource MutedTextBrush}" Margin="0,0,6,0" VerticalAlignment="Center"/>
@@ -7127,8 +7206,8 @@ try {
             <Button x:Name="StatusBannerDismissButton" Grid.Column="4" Content="_Dismiss" Style="{StaticResource Btn}" Padding="10,5"/>
         </Grid>
     </Border>
-    <TabControl Grid.Row="2" Grid.ColumnSpan="2" TabStripPlacement="Left">
-        <TabItem x:Name="DisplayTab" Header="Display" Tag="&#xE7F4;">
+    <TabControl x:Name="MainNavigationTabs" Grid.Row="2" Grid.ColumnSpan="2" TabStripPlacement="Left">
+        <TabItem x:Name="DisplayTab" Header="Display" Tag="&#xE7F4;" ToolTip="Tune picture and color for the selected screen.">
             <Border Background="Transparent" Padding="0"><ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><Grid>
                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="14"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Border Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="12" Padding="18">
@@ -7209,319 +7288,400 @@ try {
                 </Grid></Border>
             </Grid></Grid></ScrollViewer></Border>
         </TabItem>
-        <TabItem x:Name="MonitorTab" Header="Monitor" Tag="&#xE7F8;">
+        <TabItem x:Name="MonitorTab" Header="Monitor" Tag="&#xE7F8;" ToolTip="Manage identity, inputs, power, and panel-specific controls.">
             <Border Background="Transparent" Padding="0"><ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><Grid>
-                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                <Border Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
-                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="5"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="8"/><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                        <TextBlock Text="Label" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center"/>
-                        <TextBox x:Name="MonitorLabelBox" Grid.Column="2" VerticalAlignment="Center"/>
-                        <Button x:Name="MonitorLabelSaveBtn" Grid.Column="4" Content="Save" Style="{StaticResource GreenBtn}" Padding="10,4" FontSize="12"/>
-                        <Button x:Name="MonitorLabelResetBtn" Grid.Column="6" Content="Reset" Style="{StaticResource Btn}" Padding="10,4" FontSize="12"/>
-                    </Grid>
-                    <TextBlock x:Name="MonitorIdentityText" Grid.Row="2" Text="Identity: unknown" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" TextTrimming="CharacterEllipsis"/>
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <Border Style="{StaticResource PageCard}"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="72"/><ColumnDefinition Width="18"/><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <TextBlock Text="&#xE7F8;" FontFamily="Segoe MDL2 Assets" FontSize="42" Foreground="{DynamicResource AccentBrush}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    <StackPanel Grid.Column="2"><TextBlock Text="Label" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,0,0,6"/><TextBox x:Name="MonitorLabelBox"/><TextBlock x:Name="MonitorIdentityText" Text="Identity: unknown" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,8,0,0" TextTrimming="CharacterEllipsis"/></StackPanel>
+                    <StackPanel Grid.Column="4" Width="130"><Button x:Name="MonitorLabelSaveBtn" Content="Save" Style="{StaticResource AccBtn}"/><Button x:Name="MonitorLabelResetBtn" Content="Reset" Style="{StaticResource Btn}" Margin="0,8,0,0"/></StackPanel>
                 </Grid></Border>
-                <Grid Grid.Row="2"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="8"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                    <Border Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><StackPanel><TextBlock Text="Input source" FontSize="12" Foreground="{DynamicResource TextBrush}" FontWeight="SemiBold" Margin="0,0,0,8"/>
-                        <ComboBox x:Name="InputSourceCombo"/></StackPanel></Border>
-                    <Border Grid.Column="2" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><StackPanel><TextBlock Text="Power control" FontSize="12" Foreground="{DynamicResource TextBrush}" FontWeight="SemiBold" Margin="0,0,0,8"/>
-                        <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="3"/><ColumnDefinition Width="*"/><ColumnDefinition Width="3"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                            <Button x:Name="PowerOffBtn" Content="Off" Style="{StaticResource WarnBtn}" Padding="4,4" FontSize="12"/>
-                            <Button x:Name="PowerStandbyBtn" Grid.Column="2" Content="Standby" Style="{StaticResource Btn}" Padding="4,4" FontSize="12"/>
-                            <Button x:Name="PowerOnBtn" Grid.Column="4" Content="On" Style="{StaticResource GreenBtn}" Padding="4,4" FontSize="12"/>
+                <Grid Grid.Row="2"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                    <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                        <Border Style="{StaticResource PageCardCompact}"><StackPanel><TextBlock Text="Input source" Style="{StaticResource SectionTitle}" Margin="0,0,0,12"/><ComboBox x:Name="InputSourceCombo"/></StackPanel></Border>
+                        <Border Grid.Row="2" Style="{StaticResource PageCardCompact}"><StackPanel><TextBlock Text="Power control" Style="{StaticResource SectionTitle}" Margin="0,0,0,12"/><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="4"/><ColumnDefinition Width="*"/><ColumnDefinition Width="4"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Button x:Name="PowerOffBtn" Content="Off" Style="{StaticResource WarnBtn}"/><Button x:Name="PowerStandbyBtn" Grid.Column="2" Content="Standby" Style="{StaticResource Btn}"/><Button x:Name="PowerOnBtn" Grid.Column="4" Content="On" Style="{StaticResource AccBtn}"/>
                         </Grid></StackPanel></Border>
-                </Grid>
-                <Grid Grid.Row="4"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="8"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                    <Border Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14,10"><Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="7"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                        <Grid><StackPanel Orientation="Horizontal"><TextBlock Text="Volume" FontSize="12" Foreground="{DynamicResource MutedTextBrush}"/><CheckBox x:Name="MuteCheckbox" Content="Mute" Margin="8,0,0,0" VerticalAlignment="Center" FontSize="12"/></StackPanel>
-                            <TextBlock x:Name="VolumeValue" Text="50" FontSize="12" Foreground="{DynamicResource OnAccentBrush}" FontWeight="SemiBold" HorizontalAlignment="Right"/></Grid>
-                        <Slider x:Name="VolumeSlider" Grid.Row="2" Value="50" Tag="{DynamicResource FocusBrush}" Style="{StaticResource Sld}"/>
-                    </Grid></Border>
-                    <Border Grid.Column="2" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14,10"><Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="7"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                        <Grid><TextBlock Text="Sharpness" FontSize="12" Foreground="{DynamicResource MutedTextBrush}"/><TextBlock x:Name="SharpnessValue" Text="50" FontSize="12" Foreground="{DynamicResource OnAccentBrush}" FontWeight="SemiBold" HorizontalAlignment="Right"/></Grid>
-                        <Slider x:Name="SharpnessSlider" Grid.Row="2" Value="50" Tag="{DynamicResource FocusBrush}" Style="{StaticResource Sld}"/>
-                    </Grid></Border>
-                </Grid>
-                <Border Grid.Row="6" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="8"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                    <Button x:Name="ResetColorBtn" Content="Reset Colors" Style="{StaticResource Btn}"/>
-                    <Button x:Name="FactoryResetBtn" Grid.Column="2" Content="Factory Reset" Style="{StaticResource WarnBtn}"/>
-                </Grid></Border>
-                <Button x:Name="AllMonitorsStandbyBtn" Grid.Row="8" Content="All Monitors to Standby" Style="{StaticResource Btn}"/>
-                <Border Grid.Row="10" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
-                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                        <TextBlock Text="PiP / PbP Mode" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center"/>
-                        <Button x:Name="PipPbpOffBtn" Grid.Column="2" Content="Off" Style="{StaticResource Btn}" Padding="8,4" FontSize="12"/>
-                        <Button x:Name="PipModeBtn" Grid.Column="4" Content="PiP" Style="{StaticResource Btn}" Padding="8,4" FontSize="12"/>
-                        <Button x:Name="PbpModeBtn" Grid.Column="6" Content="PbP" Style="{StaticResource AccBtn}" Padding="8,4" FontSize="12"/>
+                        <Border Grid.Row="4" Style="{StaticResource PageCardCompact}"><Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                            <Grid><TextBlock Text="Volume" Style="{StaticResource SectionTitle}"/><StackPanel Orientation="Horizontal" HorizontalAlignment="Right"><CheckBox x:Name="MuteCheckbox" Content="Mute" Margin="0,0,14,0"/><TextBlock x:Name="VolumeValue" Text="50" Style="{StaticResource MetricValue}"/></StackPanel></Grid>
+                            <Slider x:Name="VolumeSlider" Grid.Row="2" Value="50" Tag="{DynamicResource FocusBrush}" Style="{StaticResource Sld}"/>
+                        </Grid></Border>
                     </Grid>
-                    <Grid Grid.Row="2"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                        <TextBlock Text="Secondary Input" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center"/>
-                        <Button x:Name="PipSecondaryDpBtn" Grid.Column="2" Content="DP" Style="{StaticResource Btn}" Padding="8,4" FontSize="12"/>
-                        <Button x:Name="PipSecondaryHdmi1Btn" Grid.Column="4" Content="HDMI 1" Style="{StaticResource Btn}" Padding="8,4" FontSize="12"/>
-                        <Button x:Name="PipSecondaryHdmi2Btn" Grid.Column="6" Content="HDMI 2" Style="{StaticResource Btn}" Padding="8,4" FontSize="12"/>
+                    <Grid Grid.Column="2"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                        <Border Style="{StaticResource PageCardCompact}"><Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                            <Grid><TextBlock Text="Sharpness" Style="{StaticResource SectionTitle}"/><TextBlock x:Name="SharpnessValue" Text="50" Style="{StaticResource MetricValue}" HorizontalAlignment="Right"/></Grid>
+                            <Slider x:Name="SharpnessSlider" Grid.Row="2" Value="50" Tag="{DynamicResource FocusBrush}" Style="{StaticResource Sld}"/>
+                        </Grid></Border>
+                        <Border Grid.Row="2" Style="{StaticResource PageCardCompact}" BorderBrush="{DynamicResource DangerBrush}"><Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                            <TextBlock Text="Maintenance" Style="{StaticResource SectionTitle}"/>
+                            <Button x:Name="ResetColorBtn" Grid.Row="2" Content="Reset Colors" Style="{StaticResource Btn}"/>
+                            <Button x:Name="FactoryResetBtn" Grid.Row="4" Content="Factory Reset" Style="{StaticResource WarnBtn}"/>
+                            <Button x:Name="AllMonitorsStandbyBtn" Grid.Row="6" Content="All Monitors to Standby" Style="{StaticResource WarnBtn}"/>
+                        </Grid></Border>
+                    </Grid>
+                </Grid>
+                <Border Grid.Row="4" Style="{StaticResource PageCardCompact}"><Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <TextBlock Text="PiP / PbP" Style="{StaticResource SectionTitle}"/>
+                    <Grid Grid.Row="2"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/><ColumnDefinition Width="24"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                        <TextBlock Text="Mode" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center"/>
+                        <Grid Grid.Column="2"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="4"/><ColumnDefinition Width="*"/><ColumnDefinition Width="4"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions><Button x:Name="PipPbpOffBtn" Content="Off" Style="{StaticResource AccBtn}"/><Button x:Name="PipModeBtn" Grid.Column="2" Content="PiP" Style="{StaticResource Btn}"/><Button x:Name="PbpModeBtn" Grid.Column="4" Content="PbP" Style="{StaticResource Btn}"/></Grid>
+                        <TextBlock Grid.Column="4" Text="Secondary Input" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center"/>
+                        <Grid Grid.Column="6"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="4"/><ColumnDefinition Width="*"/><ColumnDefinition Width="4"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions><Button x:Name="PipSecondaryDpBtn" Content="DP" Style="{StaticResource Btn}"/><Button x:Name="PipSecondaryHdmi1Btn" Grid.Column="2" Content="HDMI 1" Style="{StaticResource Btn}"/><Button x:Name="PipSecondaryHdmi2Btn" Grid.Column="4" Content="HDMI 2" Style="{StaticResource Btn}"/></Grid>
                     </Grid>
                 </Grid></Border>
             </Grid></ScrollViewer></Border>
         </TabItem>
-        <TabItem x:Name="GpuTab" Header="Hardware" Tag="&#xEA86;">
+        <TabItem x:Name="GpuTab" Header="Hardware" Tag="&#xEA86;" ToolTip="Live graphics, thermal, and presentation telemetry.">
             <Border Background="Transparent" Padding="0"><Grid>
-                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                <Border Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="16"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                    <StackPanel><TextBlock x:Name="GpuNameText" Text="GPU" FontSize="14" Foreground="{DynamicResource SuccessBrush}" FontWeight="SemiBold"/>
-                        <TextBlock x:Name="GpuStatsText" Text="-- C | -- MHz | -- W" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,3,0,0"/>
-                        <TextBlock x:Name="CpuTempText" Text="CPU: -- C" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,2,0,0"/></StackPanel>
-                    <StackPanel Grid.Column="1" Orientation="Horizontal"><TextBlock x:Name="GpuTempText" Text="--" FontSize="20" Foreground="{DynamicResource OnAccentBrush}" FontWeight="Light"/>
-                        <TextBlock Text=" C" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Top" Margin="0,3,0,0"/></StackPanel>
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <Border Style="{StaticResource PageCard}"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="220"/><ColumnDefinition Width="180"/></Grid.ColumnDefinitions>
+                    <StackPanel VerticalAlignment="Center"><TextBlock Text="GPU" Style="{StaticResource SectionTitle}"/>
+                        <TextBlock x:Name="GpuNameText" Text="GPU" FontSize="14" Foreground="{DynamicResource MutedTextBrush}" Margin="0,8,0,0"/>
+                        <TextBlock x:Name="GpuStatsText" Text="-- C | -- MHz | -- W" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,4,0,0"/></StackPanel>
+                    <Border Grid.Column="1" Background="{DynamicResource ControlBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="16,12" Margin="12,0">
+                        <Grid><TextBlock Text="GPU temperature" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center"/><StackPanel Orientation="Horizontal" HorizontalAlignment="Right"><TextBlock x:Name="GpuTempText" Text="--" FontSize="24" FontWeight="Light"/><TextBlock Text=" C" Foreground="{DynamicResource MutedTextBrush}" Margin="2,5,0,0"/></StackPanel></Grid>
+                    </Border>
+                    <Border Grid.Column="2" Background="{DynamicResource ControlBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="16,12">
+                        <TextBlock x:Name="CpuTempText" Text="CPU: -- C" FontSize="13" Foreground="{DynamicResource FocusBrush}" VerticalAlignment="Center"/>
+                    </Border>
                 </Grid></Border>
-                <Grid Grid.Row="2"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="8"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                    <Border Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><StackPanel>
-                        <Grid Margin="0,0,0,3"><TextBlock Text="GPU Utilization" FontSize="12" Foreground="{DynamicResource MutedTextBrush}"/><TextBlock x:Name="GpuUtilText" Text="0%" FontSize="12" Foreground="{DynamicResource OnAccentBrush}" HorizontalAlignment="Right"/></Grid>
-                        <ProgressBar x:Name="GpuUtilBar" Value="0" Foreground="{DynamicResource SuccessBrush}"/>
-                        <Grid Margin="0,6,0,3"><TextBlock Text="Memory Usage" FontSize="12" Foreground="{DynamicResource MutedTextBrush}"/><TextBlock x:Name="MemUsageText" Text="0 / 0 GB" FontSize="12" Foreground="{DynamicResource OnAccentBrush}" HorizontalAlignment="Right"/></Grid>
-                        <ProgressBar x:Name="MemUtilBar" Value="0" Foreground="{DynamicResource WarningBrush}"/>
-                    </StackPanel></Border>
-                    <Border Grid.Column="2" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><StackPanel>
-                        <Grid Margin="0,0,0,3"><TextBlock Text="Fan Speed" FontSize="12" Foreground="{DynamicResource MutedTextBrush}"/><TextBlock x:Name="FanSpeedText" Text="0%" FontSize="12" Foreground="{DynamicResource OnAccentBrush}" HorizontalAlignment="Right"/></Grid>
-                        <ProgressBar x:Name="FanSpeedBar" Value="0" Foreground="{DynamicResource FocusBrush}"/>
-                        <Grid Margin="0,6,0,3"><TextBlock Text="Power Draw" FontSize="12" Foreground="{DynamicResource MutedTextBrush}"/><TextBlock x:Name="PowerDrawText" Text="0 / 0 W" FontSize="12" Foreground="{DynamicResource OnAccentBrush}" HorizontalAlignment="Right"/></Grid>
-                        <ProgressBar x:Name="PowerDrawBar" Value="0" Foreground="{DynamicResource DangerBrush}"/>
-                    </StackPanel></Border>
+                <Grid Grid.Row="2"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="10"/><ColumnDefinition Width="*"/><ColumnDefinition Width="10"/><ColumnDefinition Width="*"/><ColumnDefinition Width="10"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                    <Border Style="{StaticResource PageCardCompact}"><StackPanel><TextBlock Text="GPU Utilization" Style="{StaticResource SectionTitle}"/><TextBlock x:Name="GpuUtilText" Text="0%" Style="{StaticResource MetricValue}" Margin="0,14,0,14"/><ProgressBar x:Name="GpuUtilBar" Value="0" Foreground="{DynamicResource SuccessBrush}"/></StackPanel></Border>
+                    <Border Grid.Column="2" Style="{StaticResource PageCardCompact}"><StackPanel><TextBlock Text="Memory Usage" Style="{StaticResource SectionTitle}"/><TextBlock x:Name="MemUsageText" Text="0 / 0 GB" Style="{StaticResource MetricValue}" Margin="0,14,0,14"/><ProgressBar x:Name="MemUtilBar" Value="0" Foreground="{DynamicResource WarningBrush}"/></StackPanel></Border>
+                    <Border Grid.Column="4" Style="{StaticResource PageCardCompact}"><StackPanel><TextBlock Text="Fan Speed" Style="{StaticResource SectionTitle}"/><TextBlock x:Name="FanSpeedText" Text="0%" Style="{StaticResource MetricValue}" Margin="0,14,0,14"/><ProgressBar x:Name="FanSpeedBar" Value="0" Foreground="{DynamicResource FocusBrush}"/></StackPanel></Border>
+                    <Border Grid.Column="6" Style="{StaticResource PageCardCompact}"><StackPanel><TextBlock Text="Power Draw" Style="{StaticResource SectionTitle}"/><TextBlock x:Name="PowerDrawText" Text="0 / 0 W" Style="{StaticResource MetricValue}" Margin="0,14,0,14"/><ProgressBar x:Name="PowerDrawBar" Value="0" Foreground="{DynamicResource DangerBrush}"/></StackPanel></Border>
                 </Grid>
-                <Grid Grid.Row="4"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="8"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                    <Border Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14,10"><Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="7"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                        <Grid><TextBlock Text="Digital Vibrance" FontSize="12" Foreground="{DynamicResource MutedTextBrush}"/><TextBlock x:Name="VibranceValue" Text="50" FontSize="12" Foreground="{DynamicResource OnAccentBrush}" FontWeight="SemiBold" HorizontalAlignment="Right"/></Grid>
-                        <Slider x:Name="VibranceSlider" Grid.Row="2" Value="50" Tag="{DynamicResource SuccessBrush}" Style="{StaticResource Sld}"/>
+                <Grid Grid.Row="4"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                    <Border Style="{StaticResource PageCard}"><Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                        <Grid><StackPanel><TextBlock Text="Digital Vibrance" Style="{StaticResource SectionTitle}"/><TextBlock Text="Adjust color intensity for the active GPU." FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,4,0,0"/></StackPanel><TextBlock x:Name="VibranceValue" Text="50" Style="{StaticResource MetricValue}" HorizontalAlignment="Right"/></Grid>
+                        <Slider x:Name="VibranceSlider" Grid.Row="2" Value="50" Tag="{DynamicResource FocusBrush}" Style="{StaticResource Sld}"/>
                     </Grid></Border>
-                    <Border Grid.Column="2" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14,10"><Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="7"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                        <Grid><TextBlock Text="Software Gamma" FontSize="12" Foreground="{DynamicResource MutedTextBrush}"/><TextBlock x:Name="GammaValue" Text="1.00" FontSize="12" Foreground="{DynamicResource OnAccentBrush}" FontWeight="SemiBold" HorizontalAlignment="Right"/></Grid>
+                    <Border Grid.Column="2" Style="{StaticResource PageCard}"><Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                        <Grid><StackPanel><TextBlock Text="Software Gamma" Style="{StaticResource SectionTitle}"/><TextBlock Text="Tune the software gamma curve." FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,4,0,0"/></StackPanel><TextBlock x:Name="GammaValue" Text="1.00" Style="{StaticResource MetricValue}" HorizontalAlignment="Right"/></Grid>
                         <Slider x:Name="GammaSlider" Grid.Row="2" Value="100" Minimum="50" Maximum="150" Tag="{DynamicResource FocusBrush}" Style="{StaticResource Sld}"/>
                     </Grid></Border>
                 </Grid>
-                <Border Grid.Row="6" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
-                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                    <StackPanel><TextBlock Text="FPS Overlay" FontSize="12" Foreground="{DynamicResource MutedTextBrush}"/>
-                        <TextBlock x:Name="FpsOverlayStatusText" Text="PresentMon idle" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,2,0,0"/></StackPanel>
-                    <Button x:Name="FpsOverlayStartBtn" Grid.Column="2" Content="Start" Style="{StaticResource GreenBtn}" Padding="10,4" FontSize="12"/>
-                    <Button x:Name="FpsOverlayStopBtn" Grid.Column="4" Content="Stop" Style="{StaticResource Btn}" Padding="10,4" FontSize="12"/>
+                <Border Grid.Row="6" Style="{StaticResource PageCardCompact}"><Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="8"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="8"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <StackPanel><TextBlock Text="FPS Overlay" Style="{StaticResource SectionTitle}"/>
+                        <TextBlock x:Name="FpsOverlayStatusText" Text="PresentMon idle" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,4,0,0"/></StackPanel>
+                    <Button x:Name="FpsOverlayStartBtn" Grid.Column="2" Content="Start" Style="{StaticResource AccBtn}" MinWidth="110"/>
+                    <Button x:Name="FpsOverlayStopBtn" Grid.Column="4" Content="Stop" Style="{StaticResource Btn}" MinWidth="110"/>
                 </Grid></Border>
             </Grid></Border>
         </TabItem>
-        <TabItem x:Name="VcpTab" Header="VCP Explorer" Tag="&#xE943;">
+        <TabItem x:Name="VcpTab" Header="VCP Explorer" Tag="&#xE943;" ToolTip="Inspect and safely test monitor control codes.">
             <Border Background="Transparent" Padding="0"><Grid>
-                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="*"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                <Border Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
-                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="6"/><ColumnDefinition Width="60"/><ColumnDefinition Width="6"/><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                    <TextBlock Text="VCP Code:" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center"/>
-                    <TextBox x:Name="VCPCodeBox" Grid.Column="2" Text="0x10" VerticalAlignment="Center"/>
-                    <ComboBox x:Name="VCPPresetCombo" Grid.Column="4"/>
-                    <Button x:Name="VCPQueryBtn" Grid.Column="6" Content="Query" Style="{StaticResource AccBtn}" Padding="10,4"/>
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="*"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                    <Border Style="{StaticResource PageCard}"><Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="14"/><RowDefinition Height="Auto"/><RowDefinition Height="10"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                        <TextBlock Text="Query a code" Style="{StaticResource SectionTitle}"/>
+                        <TextBlock Grid.Row="2" Text="VCP Code:" FontSize="12" Foreground="{DynamicResource MutedTextBrush}"/>
+                        <Grid Grid.Row="4"><Grid.ColumnDefinitions><ColumnDefinition Width="96"/><ColumnDefinition Width="10"/><ColumnDefinition Width="*"/><ColumnDefinition Width="10"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                            <TextBox x:Name="VCPCodeBox" Text="0x10" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="VCPPresetCombo" Grid.Column="2"/>
+                            <Button x:Name="VCPQueryBtn" Grid.Column="4" Content="Query" Style="{StaticResource AccBtn}" MinWidth="110"/>
+                        </Grid>
+                    </Grid></Border>
+                    <Border Grid.Column="2" Style="{StaticResource PageCard}"><Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="14"/><RowDefinition Height="Auto"/><RowDefinition Height="10"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                        <TextBlock Text="Write a value" Style="{StaticResource SectionTitle}"/>
+                        <TextBlock Grid.Row="2" Text="Set Value:" FontSize="12" Foreground="{DynamicResource MutedTextBrush}"/>
+                        <Grid Grid.Row="4"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="10"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                            <TextBox x:Name="VCPSetValueBox" Text="50" VerticalAlignment="Center"/>
+                            <Button x:Name="VCPSetBtn" Grid.Column="2" Content="Set" Style="{StaticResource OrangeBtn}" MinWidth="110"/>
+                        </Grid>
+                    </Grid></Border>
+                </Grid>
+                <Border Grid.Row="2" Style="{StaticResource PageCard}"><Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                    <TextBlock Text="VCP response" Style="{StaticResource SectionTitle}"/>
+                    <TextBox x:Name="VCPResultBox" Grid.Row="2" IsReadOnly="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Background="{DynamicResource ControlBrush}" FontFamily="Consolas" FontSize="13" AcceptsReturn="True" MinHeight="230"/>
                 </Grid></Border>
-                <Border Grid.Row="2" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-                    <TextBlock Text="VCP response" FontSize="12" Foreground="{DynamicResource TextBrush}" FontWeight="SemiBold"/>
-                    <TextBox x:Name="VCPResultBox" Grid.Row="2" IsReadOnly="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Background="{DynamicResource ControlBrush}" FontFamily="Consolas" FontSize="12" AcceptsReturn="True"/>
-                </Grid></Border>
-                <Border Grid.Row="4" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
-                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="6"/><ColumnDefinition Width="70"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                    <TextBlock Text="Set Value:" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center"/>
-                    <TextBox x:Name="VCPSetValueBox" Grid.Column="2" Text="50" VerticalAlignment="Center"/>
-                    <Button x:Name="VCPSetBtn" Grid.Column="4" Content="Set" Style="{StaticResource GreenBtn}" Padding="10,4"/>
-                    <Button x:Name="VCPScanBtn" Grid.Column="6" Content="Scan All" Style="{StaticResource Btn}" Padding="10,4"/>
-                    <CheckBox x:Name="VCPScanCapabilitiesOnlyCheckbox" Grid.Column="8" Content="Caps only" IsChecked="True" VerticalAlignment="Center"/>
+                <Border Grid.Row="4" Style="{StaticResource PageCardCompact}"><Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="12"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <StackPanel><TextBlock Text="Capability scan" Style="{StaticResource SectionTitle}"/><TextBlock Text="Scan supported VCP codes and reported monitor capabilities." FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,4,0,0"/></StackPanel>
+                    <CheckBox x:Name="VCPScanCapabilitiesOnlyCheckbox" Grid.Column="2" Content="Caps only" IsChecked="True" VerticalAlignment="Center"/>
+                    <Button x:Name="VCPScanBtn" Grid.Column="4" Content="Scan All" Style="{StaticResource AccBtn}" MinWidth="120"/>
                 </Grid></Border>
             </Grid></Border>
         </TabItem>
-        <TabItem x:Name="ProfilesTab" Header="Profiles" Tag="&#xE8B7;">
+        <TabItem x:Name="ProfilesTab" Header="Profiles" Tag="&#xE8B7;" ToolTip="Save, organize, and apply complete display configurations.">
             <Border Background="Transparent" Padding="0"><Grid>
-                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="*"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                <Border Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="8"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                    <TextBox x:Name="ProfileNameBox" Text="My Profile"/>
-                    <Button x:Name="SaveProfileBtn" Grid.Column="2" Content="Save" Style="{StaticResource GreenBtn}" Padding="10,4"/>
-                </Grid></Border>
-                <Border Grid.Row="2" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-                    <TextBlock Text="Saved profiles" FontSize="12" Foreground="{DynamicResource TextBrush}" FontWeight="SemiBold"/>
-                    <ListBox x:Name="ProfilesList" Grid.Row="2" Background="Transparent" BorderThickness="0" Foreground="{DynamicResource TextBrush}"/>
-                </Grid></Border>
-                <Grid Grid.Row="4"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                    <Button x:Name="LoadProfileBtn" Content="Load" Style="{StaticResource AccBtn}"/>
-                    <Button x:Name="DeleteProfileBtn" Grid.Column="2" Content="Delete" Style="{StaticResource WarnBtn}"/>
+                <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="5*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="7*"/></Grid.ColumnDefinitions>
+                    <Border Style="{StaticResource PageCard}"><Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="*"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                        <TextBlock Text="Saved profiles" Style="{StaticResource SectionTitle}"/>
+                        <ListBox x:Name="ProfilesList" Grid.Row="2" Background="{DynamicResource ControlBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Foreground="{DynamicResource TextBrush}" MinHeight="180"/>
+                        <Grid Grid.Row="4"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="8"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Button x:Name="LoadProfileBtn" Content="Load" Style="{StaticResource AccBtn}"/>
+                            <Button x:Name="DeleteProfileBtn" Grid.Column="2" Content="Delete" Style="{StaticResource WarnBtn}"/>
+                        </Grid>
+                    </Grid></Border>
+                    <Border Grid.Column="2" Style="{StaticResource PageCard}"><Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="16"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="16"/><RowDefinition Height="*"/><RowDefinition Height="16"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                        <TextBlock Text="Profile details" Style="{StaticResource SectionTitle}"/>
+                        <TextBlock Grid.Row="2" Text="Profile name" FontSize="12" Foreground="{DynamicResource MutedTextBrush}"/>
+                        <TextBox x:Name="ProfileNameBox" Grid.Row="4" Text="My Profile"/>
+                        <Border Grid.Row="6" Background="{DynamicResource ControlBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="16">
+                            <StackPanel><TextBlock Text="Current display configuration" FontSize="13" FontWeight="SemiBold"/><TextBlock Text="Brightness, contrast, color, input, and supported panel settings will be captured for the selected display." TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,8,0,0"/></StackPanel>
+                        </Border>
+                        <Button x:Name="SaveProfileBtn" Grid.Row="8" Content="Save" Style="{StaticResource AccBtn}" HorizontalAlignment="Right" MinWidth="130"/>
+                    </Grid></Border>
                 </Grid>
-                <Grid Grid.Row="6"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                    <Button x:Name="ExportProfilesBtn" Content="Export Bundle" Style="{StaticResource Btn}"/>
-                    <Button x:Name="ImportProfilesBtn" Grid.Column="2" Content="Import Bundle" Style="{StaticResource Btn}"/>
-                </Grid>
-                <Border Grid.Row="8" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
-                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                    <StackPanel><TextBlock Text="Profile Storage" FontSize="12" Foreground="{DynamicResource MutedTextBrush}"/>
-                        <TextBlock x:Name="ProfileStorageStatusText" Text="Local" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,2,0,0" TextTrimming="CharacterEllipsis"/></StackPanel>
-                    <Button x:Name="ProfileSyncFolderBtn" Grid.Column="2" Content="Sync Folder" Style="{StaticResource Btn}" Padding="8,4" FontSize="12"/>
-                    <Button x:Name="ProfileLocalFolderBtn" Grid.Column="4" Content="Use Local" Style="{StaticResource Btn}" Padding="8,4" FontSize="12"/>
+                <Border Grid.Row="2" Style="{StaticResource PageCardCompact}"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="10"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="24"/><ColumnDefinition Width="*"/><ColumnDefinition Width="10"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="10"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <Button x:Name="ExportProfilesBtn" Content="Export Bundle" Style="{StaticResource Btn}" MinWidth="130"/>
+                    <Button x:Name="ImportProfilesBtn" Grid.Column="2" Content="Import Bundle" Style="{StaticResource Btn}" MinWidth="130"/>
+                    <StackPanel Grid.Column="4" VerticalAlignment="Center"><TextBlock Text="Profile Storage" Style="{StaticResource SectionTitle}"/>
+                        <TextBlock x:Name="ProfileStorageStatusText" Text="Local" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,4,0,0" TextTrimming="CharacterEllipsis"/></StackPanel>
+                    <Button x:Name="ProfileSyncFolderBtn" Grid.Column="6" Content="Sync Folder" Style="{StaticResource Btn}"/>
+                    <Button x:Name="ProfileLocalFolderBtn" Grid.Column="8" Content="Use Local" Style="{StaticResource Btn}"/>
                 </Grid></Border>
-                <Border Grid.Row="10" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
-                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <Border Grid.Row="4" Style="{StaticResource PageCardCompact}"><Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/><RowDefinition Height="10"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                     <Grid><CheckBox x:Name="AppProfileEnabledCheckbox" Content="Per-application profiles" VerticalAlignment="Center"/>
                         <TextBlock x:Name="AppProfileStatusText" Text="Off" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/></Grid>
-                    <Grid Grid.Row="2"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <Grid Grid.Row="2"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="8"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="18"/><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="8"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="8"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                         <TextBox x:Name="AppProfileExeBox" Text="app.exe"/>
-                        <Button x:Name="AppProfileCaptureBtn" Grid.Column="2" Content="Capture" Style="{StaticResource Btn}" Padding="8,4" FontSize="12"/>
+                        <Button x:Name="AppProfileCaptureBtn" Grid.Column="2" Content="Capture" Style="{StaticResource Btn}"/>
+                        <ComboBox x:Name="AppProfileProfileCombo" Grid.Column="4"/>
+                        <CheckBox x:Name="AppProfileRiskyConsentCheckbox" Grid.Column="6" Content="Risky writes" VerticalAlignment="Center" FontSize="12" ToolTip="Separate rule-level consent; the target monitor identity must also be unlocked."/>
+                        <Button x:Name="AppProfileAddBtn" Grid.Column="8" Content="Add" Style="{StaticResource AccBtn}"/>
+                        <Button x:Name="AppProfileRemoveBtn" Grid.Column="10" Content="Remove" Style="{StaticResource WarnBtn}"/>
                     </Grid>
-                    <Grid Grid.Row="4"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                        <ComboBox x:Name="AppProfileProfileCombo"/>
-                        <CheckBox x:Name="AppProfileRiskyConsentCheckbox" Grid.Column="2" Content="Risky writes" VerticalAlignment="Center" FontSize="12" ToolTip="Separate rule-level consent; the target monitor identity must also be unlocked."/>
-                        <Button x:Name="AppProfileAddBtn" Grid.Column="4" Content="Add" Style="{StaticResource GreenBtn}" Padding="10,4" FontSize="12"/>
-                        <Button x:Name="AppProfileRemoveBtn" Grid.Column="6" Content="Remove" Style="{StaticResource WarnBtn}" Padding="10,4" FontSize="12"/>
-                    </Grid>
-                    <ListBox x:Name="AppProfileRulesList" Grid.Row="6" Height="76" Background="{DynamicResource ControlBrush}" BorderThickness="0" Foreground="{DynamicResource TextBrush}" FontSize="12"/>
+                    <ListBox x:Name="AppProfileRulesList" Grid.Row="4" Height="72" Background="{DynamicResource ControlBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Foreground="{DynamicResource TextBrush}" FontSize="12"/>
                 </Grid></Border>
             </Grid></Border>
         </TabItem>
-        <TabItem x:Name="ScheduleTab" Header="Automation" Tag="&#xE823;">
+        <TabItem x:Name="ScheduleTab" Header="Automation" Tag="&#xE823;" ToolTip="Adapt display behavior to time, activity, and power.">
             <Border Background="Transparent" Padding="0"><Grid>
-                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="*"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                <Border Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
-                    <CheckBox x:Name="ScheduleEnabledCheckbox" Content="Scheduled profiles" VerticalAlignment="Center"/>
-                    <TextBlock x:Name="ScheduleStatusText" Text="Off" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
-                </Grid></Border>
-                <Border Grid.Row="2" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
-                    <Grid.ColumnDefinitions><ColumnDefinition Width="76"/><ColumnDefinition Width="6"/><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                    <TextBox x:Name="ScheduleTimeBox" Text="21:00" VerticalAlignment="Center"/>
-                    <ComboBox x:Name="ScheduleProfileCombo" Grid.Column="2"/>
-                    <CheckBox x:Name="ScheduleRiskyConsentCheckbox" Grid.Column="4" Content="Risky writes" VerticalAlignment="Center" FontSize="12" ToolTip="Separate rule-level consent; the target monitor identity must also be unlocked."/>
-                    <Button x:Name="ScheduleAddBtn" Grid.Column="6" Content="Add" Style="{StaticResource GreenBtn}" Padding="10,4" FontSize="12"/>
-                    <Button x:Name="ScheduleRemoveBtn" Grid.Column="8" Content="Remove" Style="{StaticResource WarnBtn}" Padding="10,4" FontSize="12"/>
-                </Grid></Border>
-                <Border Grid.Row="4" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
-                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-                    <TextBlock Text="Profile schedule" FontSize="12" Foreground="{DynamicResource MutedTextBrush}"/>
-                    <Border Grid.Row="2" Background="{DynamicResource ControlBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="8" Height="56">
-                        <Canvas x:Name="ScheduleTimelineCanvas" ClipToBounds="True"/>
+                <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <Border Style="{StaticResource PageCard}"><Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="14"/><RowDefinition Height="Auto"/><RowDefinition Height="16"/><RowDefinition Height="Auto"/><RowDefinition Height="10"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                    <Grid><TextBlock Text="Scheduled profiles" Style="{StaticResource SectionTitle}"/>
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right"><CheckBox x:Name="ScheduleEnabledCheckbox" Content="Enabled" VerticalAlignment="Center"/><TextBlock x:Name="ScheduleStatusText" Text="Off" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="12,0,0,0" VerticalAlignment="Center"/></StackPanel></Grid>
+                    <Grid Grid.Row="2"><Grid.ColumnDefinitions><ColumnDefinition Width="110"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/><ColumnDefinition Width="16"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="16"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="8"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                        <StackPanel><TextBlock Text="Time" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,0,0,6"/><TextBox x:Name="ScheduleTimeBox" Text="21:00"/></StackPanel>
+                        <StackPanel Grid.Column="2"><TextBlock Text="Profile" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,0,0,6"/><ComboBox x:Name="ScheduleProfileCombo"/></StackPanel>
+                        <CheckBox x:Name="ScheduleRiskyConsentCheckbox" Grid.Column="4" Content="Risky writes" VerticalAlignment="Bottom" Margin="0,0,0,8" ToolTip="Separate rule-level consent; the target monitor identity must also be unlocked."/>
+                        <Button x:Name="ScheduleAddBtn" Grid.Column="6" Content="Add" Style="{StaticResource AccBtn}" VerticalAlignment="Bottom"/>
+                        <Button x:Name="ScheduleRemoveBtn" Grid.Column="8" Content="Remove" Style="{StaticResource WarnBtn}" VerticalAlignment="Bottom"/>
+                    </Grid>
+                    <TextBlock Grid.Row="4" Text="Profile schedule" Style="{StaticResource SectionTitle}"/>
+                    <Border Grid.Row="6" Background="{DynamicResource ControlBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="10">
+                        <Grid><Grid.RowDefinitions><RowDefinition Height="58"/><RowDefinition Height="10"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                            <Canvas x:Name="ScheduleTimelineCanvas" ClipToBounds="True"/>
+                            <ListBox x:Name="ScheduleRulesList" Grid.Row="2" Background="Transparent" BorderThickness="0" Foreground="{DynamicResource TextBrush}" FontSize="12" MinHeight="80"/>
+                        </Grid>
                     </Border>
-                    <ListBox x:Name="ScheduleRulesList" Grid.Row="4" Background="{DynamicResource ControlBrush}" BorderThickness="0" Foreground="{DynamicResource TextBrush}" FontSize="12"/>
                 </Grid></Border>
-                <Border Grid.Row="6" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
-                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                    <Grid><CheckBox x:Name="IdleDimEnabledCheckbox" Content="Idle dim" VerticalAlignment="Center"/>
-                        <TextBlock x:Name="IdleDimStatusText" Text="Off" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/></Grid>
-                    <Grid Grid.Row="2"><Grid.ColumnDefinitions><ColumnDefinition Width="70"/><ColumnDefinition Width="6"/><ColumnDefinition Width="70"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                        <TextBox x:Name="IdleDimMinutesBox" Text="10" VerticalAlignment="Center"/>
-                        <TextBox x:Name="IdleDimBrightnessBox" Grid.Column="2" Text="20" VerticalAlignment="Center"/>
-                        <CheckBox x:Name="IdleDimRestoreCheckbox" Grid.Column="4" Content="Restore" VerticalAlignment="Center"/>
-                        <Button x:Name="IdleDimSaveBtn" Grid.Column="6" Content="Save" Style="{StaticResource GreenBtn}" Padding="10,4" FontSize="12"/>
-                    </Grid>
-                </Grid></Border>
-                <Border Grid.Row="8" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
-                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                    <Grid><CheckBox x:Name="BatteryProfileEnabledCheckbox" Content="Battery profile" VerticalAlignment="Center"/>
-                        <TextBlock x:Name="BatteryProfileStatusText" Text="Off" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/></Grid>
-                    <Grid Grid.Row="2"><Grid.ColumnDefinitions><ColumnDefinition Width="70"/><ColumnDefinition Width="6"/><ColumnDefinition Width="70"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                        <TextBox x:Name="BatteryBrightnessBox" Text="35" VerticalAlignment="Center"/>
-                        <TextBox x:Name="AcBrightnessBox" Grid.Column="2" Text="75" VerticalAlignment="Center"/>
-                        <Button x:Name="BatteryProfileSaveBtn" Grid.Column="4" Content="Save" Style="{StaticResource GreenBtn}" Padding="10,4" FontSize="12"/>
-                    </Grid>
-                </Grid></Border>
+                <Grid Grid.Row="2"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                    <Border Style="{StaticResource PageCard}"><Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="14"/><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/><RowDefinition Height="14"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                        <Grid><CheckBox x:Name="IdleDimEnabledCheckbox" Content="Idle dim" VerticalAlignment="Center" FontWeight="SemiBold"/><TextBlock x:Name="IdleDimStatusText" Text="Off" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/></Grid>
+                        <Grid Grid.Row="2"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <StackPanel><TextBlock Text="After (min)" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,0,0,6"/><TextBox x:Name="IdleDimMinutesBox" Text="10"/></StackPanel>
+                            <StackPanel Grid.Column="2"><TextBlock Text="Dim to (%)" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,0,0,6"/><TextBox x:Name="IdleDimBrightnessBox" Text="20"/></StackPanel>
+                        </Grid>
+                        <CheckBox x:Name="IdleDimRestoreCheckbox" Grid.Row="4" Content="Restore brightness after activity" VerticalAlignment="Center"/>
+                        <Button x:Name="IdleDimSaveBtn" Grid.Row="6" Content="Save" Style="{StaticResource AccBtn}" HorizontalAlignment="Right" MinWidth="120"/>
+                    </Grid></Border>
+                    <Border Grid.Column="2" Style="{StaticResource PageCard}"><Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="14"/><RowDefinition Height="Auto"/><RowDefinition Height="26"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                        <Grid><CheckBox x:Name="BatteryProfileEnabledCheckbox" Content="Battery profile" VerticalAlignment="Center" FontWeight="SemiBold"/><TextBlock x:Name="BatteryProfileStatusText" Text="Off" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/></Grid>
+                        <Grid Grid.Row="2"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <StackPanel><TextBlock Text="Battery (%)" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,0,0,6"/><TextBox x:Name="BatteryBrightnessBox" Text="35"/></StackPanel>
+                            <StackPanel Grid.Column="2"><TextBlock Text="AC (%)" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,0,0,6"/><TextBox x:Name="AcBrightnessBox" Text="75"/></StackPanel>
+                        </Grid>
+                        <Button x:Name="BatteryProfileSaveBtn" Grid.Row="4" Content="Save" Style="{StaticResource AccBtn}" HorizontalAlignment="Right" MinWidth="120"/>
+                    </Grid></Border>
+                </Grid>
             </Grid></Border>
         </TabItem>
-        <TabItem x:Name="SystemTab" Header="System" Tag="&#xE713;">
-            <Border Background="Transparent" Padding="0"><ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><Grid>
-                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                <Border Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><StackPanel><TextBlock Text="Quick links" FontSize="12" Foreground="{DynamicResource TextBrush}" FontWeight="SemiBold" Margin="0,0,0,8"/>
-                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                        <Button x:Name="DisplaySettingsBtn" Content="Display" Style="{StaticResource Btn}" Padding="5,4" FontSize="12"/>
-                        <Button x:Name="ColorMgmtBtn" Grid.Column="2" Content="Color Mgmt" Style="{StaticResource Btn}" Padding="5,4" FontSize="12"/>
-                        <Button x:Name="GpuControlPanelBtn" Grid.Column="4" Content="GPU Panel" Style="{StaticResource Btn}" Padding="5,4" FontSize="12"/>
-                    </Grid></StackPanel></Border>
-                <Border Grid.Row="2" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                    <Grid><TextBlock Text="Software Gamma R/G/B" FontSize="12" Foreground="{DynamicResource MutedTextBrush}"/>
-                        <Button x:Name="ResetGammaBtn" Content="Reset" Style="{StaticResource Btn}" Padding="8,2" FontSize="12" HorizontalAlignment="Right"/></Grid>
-                    <Grid Grid.Row="2"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                        <StackPanel><TextBlock x:Name="GammaRedValue" Text="1.00" FontSize="12" Foreground="{DynamicResource DangerBrush}" HorizontalAlignment="Right" Margin="0,0,0,2"/>
-                            <Slider x:Name="GammaRedSlider" Value="100" Minimum="50" Maximum="150" Tag="{DynamicResource DangerBrush}" Style="{StaticResource Sld}"/></StackPanel>
-                        <StackPanel Grid.Column="2"><TextBlock x:Name="GammaGreenValue" Text="1.00" FontSize="12" Foreground="{DynamicResource SuccessBrush}" HorizontalAlignment="Right" Margin="0,0,0,2"/>
-                            <Slider x:Name="GammaGreenSlider" Value="100" Minimum="50" Maximum="150" Tag="{DynamicResource SuccessBrush}" Style="{StaticResource Sld}"/></StackPanel>
-                        <StackPanel Grid.Column="4"><TextBlock x:Name="GammaBlueValue" Text="1.00" FontSize="12" Foreground="{DynamicResource FocusBrush}" HorizontalAlignment="Right" Margin="0,0,0,2"/>
-                            <Slider x:Name="GammaBlueSlider" Value="100" Minimum="50" Maximum="150" Tag="{DynamicResource FocusBrush}" Style="{StaticResource Sld}"/></StackPanel>
-                    </Grid>
-                </Grid></Border>
-                <Border Grid.Row="4" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><StackPanel><TextBlock Text="Monitor capabilities" FontSize="12" Foreground="{DynamicResource TextBrush}" FontWeight="SemiBold" Margin="0,0,0,8"/>
-                    <TextBox x:Name="CapabilitiesBox" IsReadOnly="True" TextWrapping="Wrap" Height="70" VerticalScrollBarVisibility="Auto" Background="{DynamicResource ControlBrush}" FontFamily="Consolas" FontSize="12"/>
-                </StackPanel></Border>
-                <Border Grid.Row="6" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
-                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                    <Grid><CheckBox x:Name="CapabilitiesDiscoveryEnabledCheckbox" Content="Allow capability discovery" VerticalAlignment="Center"/>
-                        <TextBlock x:Name="CapabilitiesSafetyStatusText" Text="Discovery off" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/></Grid>
-                    <CheckBox x:Name="CapabilitiesMaximumCompatibilityCheckbox" Grid.Row="2" Content="Maximum compatibility (never request capability strings)" Foreground="{DynamicResource MutedTextBrush}"/>
-                    <Grid Grid.Row="4"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                        <TextBlock Text="A pending probe is recorded before every firmware call." Foreground="{DynamicResource MutedTextBrush}" FontSize="12" VerticalAlignment="Center"/>
-                        <Button x:Name="CapabilitiesExcludeCurrentBtn" Grid.Column="2" Content="Exclude selected" Style="{StaticResource Btn}" Padding="10,4" FontSize="12"/>
-                        <Button x:Name="CapabilitiesClearExclusionsBtn" Grid.Column="4" Content="Clear exclusions" Style="{StaticResource Btn}" Padding="10,4" FontSize="12"/>
-                        <Button x:Name="CapabilitiesClearCacheBtn" Grid.Column="6" Content="Clear cache" Style="{StaticResource Btn}" Padding="10,4" FontSize="12"/>
-                    </Grid>
-                </Grid></Border>
-                <Border Grid.Row="8" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource WarningBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
-                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                    <Grid><CheckBox x:Name="RiskyVcpEnabledCheckbox" Content="Enable risky VCP writes for selected display" VerticalAlignment="Center"/>
-                        <TextBlock x:Name="RiskyVcpStatusText" Text="Disabled" FontSize="12" Foreground="{DynamicResource WarningBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/></Grid>
-                    <TextBlock Grid.Row="2" Text="Power, input, reset, PiP/PbP, and arbitrary writes require this per-identity unlock plus confirmation for every direct command." TextWrapping="Wrap" Foreground="{DynamicResource MutedTextBrush}" FontSize="12"/>
-                </Grid></Border>
-                <Border Grid.Row="10" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
-                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                    <Grid><CheckBox x:Name="AutomationBridgeEnabledCheckbox" Content="Local Automation Bridge" VerticalAlignment="Center"/>
-                        <TextBlock x:Name="AutomationBridgeStatusText" Text="Off" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/></Grid>
-                    <Grid Grid.Row="2"><Grid.ColumnDefinitions><ColumnDefinition Width="64"/><ColumnDefinition Width="6"/><ColumnDefinition Width="74"/><ColumnDefinition Width="6"/><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                        <TextBox x:Name="AutomationBridgeBindBox" Text="127.0.0.1" VerticalAlignment="Center" FontSize="12"/>
-                        <TextBox x:Name="AutomationBridgePortBox" Grid.Column="2" Text="34291" VerticalAlignment="Center" FontSize="12"/>
-                        <PasswordBox x:Name="AutomationBridgeKeyBox" Grid.Column="4" Password="" VerticalAlignment="Center" FontSize="12"/>
-                        <Button x:Name="AutomationBridgeSaveBtn" Grid.Column="6" Content="Save" Style="{StaticResource GreenBtn}" Padding="10,4" FontSize="12"/>
-                    </Grid>
-                </Grid></Border>
-                <Border Grid.Row="12" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
-                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="5"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                        <TextBlock Text="DDC Compatibility Report" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center"/>
-                        <Button x:Name="DdcReportGenerateBtn" Grid.Column="2" Content="Build" Style="{StaticResource GreenBtn}" Padding="10,4" FontSize="12"/>
-                        <Button x:Name="DdcReportCopyBtn" Grid.Column="4" Content="Copy" Style="{StaticResource Btn}" Padding="10,4" FontSize="12"/>
-                    </Grid>
-                    <TextBox x:Name="DdcReportBox" Grid.Row="2" IsReadOnly="True" TextWrapping="Wrap" Height="180" VerticalScrollBarVisibility="Auto" Background="{DynamicResource ControlBrush}" FontFamily="Consolas" FontSize="12" AcceptsReturn="True"/>
-                </Grid></Border>
-                <Border Grid.Row="18" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
-                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                    <TextBlock Text="DDC timing for the selected monitor" FontSize="12" Foreground="{DynamicResource TextBrush}" FontWeight="SemiBold"/>
-                    <StackPanel Grid.Row="2" Orientation="Horizontal">
-                        <RadioButton x:Name="DdcTimingAdaptiveRadio" GroupName="DdcTimingMode" Content="Adaptive" IsChecked="True" VerticalAlignment="Center"/>
-                        <RadioButton x:Name="DdcTimingManualRadio" GroupName="DdcTimingMode" Content="Manual" Margin="16,0,0,0" VerticalAlignment="Center"/>
-                        <Button x:Name="DdcTimingResetBtn" Content="Reset calibration" Style="{StaticResource Btn}" Padding="10,4" FontSize="12" Margin="20,0,0,0"/>
-                        <Button x:Name="DdcValuesRereadBtn" Content="Re-read values" Style="{StaticResource Btn}" Padding="10,4" FontSize="12" Margin="8,0,0,0"/>
-                    </StackPanel>
-                    <Grid Grid.Row="4">
-                        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="8"/><ColumnDefinition Width="60"/><ColumnDefinition Width="16"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="8"/><ColumnDefinition Width="60"/><ColumnDefinition Width="16"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="8"/><ColumnDefinition Width="60"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                        <TextBlock Text="Read retries" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center"/>
-                        <TextBox x:Name="DdcTimingReadRetriesBox" Grid.Column="2" FontSize="12" Background="{DynamicResource ControlBrush}"/>
-                        <TextBlock Grid.Column="4" Text="Write retries" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center"/>
-                        <TextBox x:Name="DdcTimingWriteRetriesBox" Grid.Column="6" FontSize="12" Background="{DynamicResource ControlBrush}"/>
-                        <TextBlock Grid.Column="8" Text="Capability retries" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center"/>
-                        <TextBox x:Name="DdcTimingCapabilityRetriesBox" Grid.Column="10" FontSize="12" Background="{DynamicResource ControlBrush}"/>
-                    </Grid>
-                    <TextBlock x:Name="DdcTimingEffectiveText" Grid.Row="6" Text="" TextWrapping="Wrap" Foreground="{DynamicResource TextBrush}" FontSize="12"/>
-                    <TextBlock x:Name="DdcTimingWarningText" Grid.Row="8" Text="" TextWrapping="Wrap" Foreground="{DynamicResource WarningBrush}" FontSize="12"/>
-                </Grid></Border>
-                <Border Grid.Row="16" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
-                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                    <Grid><CheckBox x:Name="DisplayRestoreEnabledCheckbox" Content="Restore brightness at launch and after resume" VerticalAlignment="Center"/>
-                        <TextBlock x:Name="DisplayRestoreStatusText" Text="Off" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/></Grid>
-                    <TextBlock Grid.Row="2" Text="Monitors often reset themselves to full brightness after a power or sleep cycle. When this is on, the last brightness you set for each display is written back once per detected display change, through the verified write path." TextWrapping="Wrap" Foreground="{DynamicResource MutedTextBrush}" FontSize="12"/>
-                </Grid></Border>
-                <Border Grid.Row="14" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource WarningBrush}" BorderThickness="1" CornerRadius="10" Padding="14"><Grid>
-                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                    <TextBlock Text="Optional hardware helpers" FontSize="12" Foreground="{DynamicResource TextBrush}" FontWeight="SemiBold"/>
-                    <CheckBox x:Name="CpuMonitorEnabledCheckbox" Grid.Row="2" Content="Load CPU temperature library (LibreHardwareMonitorLib / OpenHardwareMonitorLib)"/>
-                    <CheckBox x:Name="PresentMonEnabledCheckbox" Grid.Row="4" Content="Run PresentMon for the FPS overlay"/>
-                    <StackPanel Grid.Row="6">
-                        <TextBlock Text="These load a DLL or run an executable found beside this script, in Program Files, or on PATH. They stay off until enabled here, and every resolved binary is reported below with its version and SHA-256." TextWrapping="Wrap" Foreground="{DynamicResource MutedTextBrush}" FontSize="12" Margin="0,0,0,6"/>
-                        <TextBox x:Name="OptionalHelperStatusBox" IsReadOnly="True" TextWrapping="NoWrap" Height="112" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="{DynamicResource ControlBrush}" FontFamily="Consolas" FontSize="12" AcceptsReturn="True"/>
-                    </StackPanel>
-                </Grid></Border>
-            </Grid></ScrollViewer></Border>
+        <TabItem x:Name="SystemTab" Header="System" Tag="&#xE713;" ToolTip="Configure safety, diagnostics, integrations, and recovery.">
+            <TabControl x:Name="SystemCategoryTabs" Style="{StaticResource SettingsTabControl}">
+                <TabItem x:Name="SystemOverviewCategory" Header="Overview" Style="{StaticResource SettingsTabItem}" AutomationProperties.Name="Overview system settings">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="3*"/><ColumnDefinition Width="14"/><ColumnDefinition Width="2*"/></Grid.ColumnDefinitions>
+                            <Border Style="{StaticResource PageCard}">
+                                <StackPanel>
+                                    <TextBlock Text="Windows control centers" Style="{StaticResource SectionTitle}"/>
+                                    <TextBlock Text="Open a native Windows panel without leaving MonitorControl." Foreground="{DynamicResource MutedTextBrush}" Margin="0,5,0,16"/>
+                                    <UniformGrid Columns="3">
+                                        <Button x:Name="DisplaySettingsBtn" Content="Display settings" Style="{StaticResource Btn}" Margin="0,0,6,0"/>
+                                        <Button x:Name="ColorMgmtBtn" Content="Color management" Style="{StaticResource Btn}" Margin="3,0"/>
+                                        <Button x:Name="GpuControlPanelBtn" Content="GPU control panel" Style="{StaticResource Btn}" Margin="6,0,0,0"/>
+                                    </UniformGrid>
+                                </StackPanel>
+                            </Border>
+                            <Border Grid.Column="2" Style="{StaticResource PageCard}">
+                                <StackPanel>
+                                    <TextBlock Text="System workspace" Style="{StaticResource SectionTitle}"/>
+                                    <TextBlock Text="Display &amp; DDC" Foreground="{DynamicResource FocusBrush}" FontWeight="SemiBold" Margin="0,14,0,2"/>
+                                    <TextBlock Text="Gamma, capabilities, timing, and brightness restore" Foreground="{DynamicResource MutedTextBrush}" TextWrapping="Wrap"/>
+                                    <TextBlock Text="Safety &amp; automation" Foreground="{DynamicResource FocusBrush}" FontWeight="SemiBold" Margin="0,14,0,2"/>
+                                    <TextBlock Text="Risky writes and the local API bridge" Foreground="{DynamicResource MutedTextBrush}" TextWrapping="Wrap"/>
+                                    <TextBlock Text="Diagnostics &amp; integrations" Foreground="{DynamicResource FocusBrush}" FontWeight="SemiBold" Margin="0,14,0,2"/>
+                                    <TextBlock Text="Compatibility reports and optional helpers" Foreground="{DynamicResource MutedTextBrush}" TextWrapping="Wrap"/>
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+                    </ScrollViewer>
+                </TabItem>
+                <TabItem x:Name="SystemDisplayDdcCategory" Header="Display &amp; DDC" IsSelected="True" Style="{StaticResource SettingsTabItem}" AutomationProperties.Name="Display and DDC system settings">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                        <Grid>
+                            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="14"/><RowDefinition Height="Auto"/><RowDefinition Height="14"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="14"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                <Border Style="{StaticResource PageCard}">
+                                    <Grid>
+                                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="16"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                                        <Grid>
+                                            <StackPanel><TextBlock Text="Software gamma" Style="{StaticResource SectionTitle}"/><TextBlock Text="Independent red, green, and blue gain" Foreground="{DynamicResource MutedTextBrush}" Margin="0,3,0,0"/></StackPanel>
+                                            <Button x:Name="ResetGammaBtn" Content="Reset" Style="{StaticResource Btn}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                                        </Grid>
+                                        <Grid Grid.Row="2">
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="10"/><ColumnDefinition Width="*"/><ColumnDefinition Width="10"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                            <StackPanel><TextBlock Text="Red" Foreground="{DynamicResource MutedTextBrush}"/><TextBlock x:Name="GammaRedValue" Text="1.00" FontSize="17" Foreground="{DynamicResource DangerBrush}" HorizontalAlignment="Right"/><Slider x:Name="GammaRedSlider" Value="100" Minimum="50" Maximum="150" Tag="{DynamicResource DangerBrush}" Style="{StaticResource Sld}"/></StackPanel>
+                                            <StackPanel Grid.Column="2"><TextBlock Text="Green" Foreground="{DynamicResource MutedTextBrush}"/><TextBlock x:Name="GammaGreenValue" Text="1.00" FontSize="17" Foreground="{DynamicResource SuccessBrush}" HorizontalAlignment="Right"/><Slider x:Name="GammaGreenSlider" Value="100" Minimum="50" Maximum="150" Tag="{DynamicResource SuccessBrush}" Style="{StaticResource Sld}"/></StackPanel>
+                                            <StackPanel Grid.Column="4"><TextBlock Text="Blue" Foreground="{DynamicResource MutedTextBrush}"/><TextBlock x:Name="GammaBlueValue" Text="1.00" FontSize="17" Foreground="{DynamicResource FocusBrush}" HorizontalAlignment="Right"/><Slider x:Name="GammaBlueSlider" Value="100" Minimum="50" Maximum="150" Tag="{DynamicResource FocusBrush}" Style="{StaticResource Sld}"/></StackPanel>
+                                        </Grid>
+                                    </Grid>
+                                </Border>
+                                <Border Grid.Column="2" Style="{StaticResource PageCard}">
+                                    <StackPanel>
+                                        <TextBlock Text="Monitor capabilities" Style="{StaticResource SectionTitle}"/>
+                                        <TextBlock Text="Raw MCCS capability data reported by the selected display" Foreground="{DynamicResource MutedTextBrush}" Margin="0,3,0,12"/>
+                                        <TextBox x:Name="CapabilitiesBox" IsReadOnly="True" TextWrapping="Wrap" Height="116" VerticalScrollBarVisibility="Auto" Background="{DynamicResource ControlBrush}" FontFamily="Consolas" FontSize="12"/>
+                                    </StackPanel>
+                                </Border>
+                            </Grid>
+                            <Border Grid.Row="2" Style="{StaticResource PageCard}">
+                                <Grid>
+                                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="10"/><RowDefinition Height="Auto"/><RowDefinition Height="14"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                                    <Grid>
+                                        <StackPanel><TextBlock Text="Capability discovery" Style="{StaticResource SectionTitle}"/><TextBlock Text="Control how MonitorControl probes display firmware." Foreground="{DynamicResource MutedTextBrush}" Margin="0,3,0,0"/></StackPanel>
+                                        <TextBlock x:Name="CapabilitiesSafetyStatusText" Text="Discovery off" Foreground="{DynamicResource MutedTextBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                                    </Grid>
+                                    <StackPanel Grid.Row="2">
+                                        <CheckBox x:Name="CapabilitiesDiscoveryEnabledCheckbox" Content="Allow capability discovery"/>
+                                        <CheckBox x:Name="CapabilitiesMaximumCompatibilityCheckbox" Content="Maximum compatibility (never request capability strings)" Foreground="{DynamicResource MutedTextBrush}" Margin="0,9,0,0"/>
+                                    </StackPanel>
+                                    <Grid Grid.Row="4">
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                        <TextBlock Text="A pending probe is recorded before every firmware call." Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,16,0"/>
+                                        <WrapPanel Grid.Column="1" HorizontalAlignment="Right">
+                                            <Button x:Name="CapabilitiesExcludeCurrentBtn" Content="Exclude selected" Style="{StaticResource Btn}" Margin="0,0,8,0"/>
+                                            <Button x:Name="CapabilitiesClearExclusionsBtn" Content="Clear exclusions" Style="{StaticResource Btn}" Margin="0,0,8,0"/>
+                                            <Button x:Name="CapabilitiesClearCacheBtn" Content="Clear cache" Style="{StaticResource Btn}"/>
+                                        </WrapPanel>
+                                    </Grid>
+                                </Grid>
+                            </Border>
+                            <Grid Grid.Row="4">
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="3*"/><ColumnDefinition Width="14"/><ColumnDefinition Width="2*"/></Grid.ColumnDefinitions>
+                                <Border Style="{StaticResource PageCard}">
+                                    <Grid>
+                                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/><RowDefinition Height="10"/><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                                        <Grid>
+                                            <StackPanel><TextBlock Text="DDC timing" Style="{StaticResource SectionTitle}"/><TextBlock Text="Per-monitor retry and calibration strategy" Foreground="{DynamicResource MutedTextBrush}" Margin="0,3,0,0"/></StackPanel>
+                                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                                                <RadioButton x:Name="DdcTimingAdaptiveRadio" GroupName="DdcTimingMode" Content="Adaptive" IsChecked="True"/>
+                                                <RadioButton x:Name="DdcTimingManualRadio" GroupName="DdcTimingMode" Content="Manual" Margin="16,0,0,0"/>
+                                            </StackPanel>
+                                        </Grid>
+                                        <Grid Grid.Row="2">
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="10"/><ColumnDefinition Width="*"/><ColumnDefinition Width="10"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                            <StackPanel><TextBlock Text="Read retries" Foreground="{DynamicResource MutedTextBrush}"/><TextBox x:Name="DdcTimingReadRetriesBox" Margin="0,5,0,0"/></StackPanel>
+                                            <StackPanel Grid.Column="2"><TextBlock Text="Write retries" Foreground="{DynamicResource MutedTextBrush}"/><TextBox x:Name="DdcTimingWriteRetriesBox" Margin="0,5,0,0"/></StackPanel>
+                                            <StackPanel Grid.Column="4"><TextBlock Text="Capability retries" Foreground="{DynamicResource MutedTextBrush}"/><TextBox x:Name="DdcTimingCapabilityRetriesBox" Margin="0,5,0,0"/></StackPanel>
+                                        </Grid>
+                                        <StackPanel Grid.Row="4" Orientation="Horizontal">
+                                            <Button x:Name="DdcTimingResetBtn" Content="Reset calibration" Style="{StaticResource Btn}"/>
+                                            <Button x:Name="DdcValuesRereadBtn" Content="Re-read values" Style="{StaticResource Btn}" Margin="8,0,0,0"/>
+                                        </StackPanel>
+                                        <TextBlock x:Name="DdcTimingEffectiveText" Grid.Row="6" Text="" TextWrapping="Wrap" Foreground="{DynamicResource TextBrush}"/>
+                                        <TextBlock x:Name="DdcTimingWarningText" Grid.Row="8" Text="" TextWrapping="Wrap" Foreground="{DynamicResource WarningBrush}"/>
+                                    </Grid>
+                                </Border>
+                                <Border Grid.Column="2" Style="{StaticResource PageCard}">
+                                    <StackPanel>
+                                        <Grid>
+                                            <TextBlock Text="Brightness restore" Style="{StaticResource SectionTitle}"/>
+                                            <TextBlock x:Name="DisplayRestoreStatusText" Text="Off" Foreground="{DynamicResource MutedTextBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                                        </Grid>
+                                        <CheckBox x:Name="DisplayRestoreEnabledCheckbox" Content="Restore brightness at launch and after resume" Margin="0,16,0,12"/>
+                                        <TextBlock Text="Writes the last brightness back once per detected display change after a power or sleep cycle, using the verified DDC path." TextWrapping="Wrap" Foreground="{DynamicResource MutedTextBrush}"/>
+                                    </StackPanel>
+                                </Border>
+                            </Grid>
+                        </Grid>
+                    </ScrollViewer>
+                </TabItem>
+                <TabItem x:Name="SystemSafetyCategory" Header="Safety" Style="{StaticResource SettingsTabItem}" AutomationProperties.Name="Safety system settings">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="3*"/><ColumnDefinition Width="14"/><ColumnDefinition Width="2*"/></Grid.ColumnDefinitions>
+                            <Border Style="{StaticResource PageCard}" BorderBrush="{DynamicResource WarningBrush}">
+                                <StackPanel>
+                                    <Grid><StackPanel><TextBlock Text="Risky VCP writes" Style="{StaticResource SectionTitle}"/><TextBlock Text="Per-display firmware write protection" Foreground="{DynamicResource MutedTextBrush}" Margin="0,3,0,0"/></StackPanel><TextBlock x:Name="RiskyVcpStatusText" Text="Disabled" Foreground="{DynamicResource WarningBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/></Grid>
+                                    <CheckBox x:Name="RiskyVcpEnabledCheckbox" Content="Enable risky VCP writes for selected display" Margin="0,18,0,12"/>
+                                    <TextBlock Text="Power, input, reset, PiP/PbP, and arbitrary writes require this per-identity unlock plus confirmation for every direct command." TextWrapping="Wrap" Foreground="{DynamicResource MutedTextBrush}"/>
+                                </StackPanel>
+                            </Border>
+                            <Border Grid.Column="2" Style="{StaticResource PageCard}">
+                                <StackPanel><TextBlock Text="Guardrails" Style="{StaticResource SectionTitle}"/><TextBlock Text="Unlocks stay scoped to the stable identity of the selected display. Each direct command still asks for explicit confirmation and uses the verified write path." TextWrapping="Wrap" Foreground="{DynamicResource MutedTextBrush}" Margin="0,12,0,0"/></StackPanel>
+                            </Border>
+                        </Grid>
+                    </ScrollViewer>
+                </TabItem>
+                <TabItem x:Name="SystemAutomationCategory" Header="Automation" Style="{StaticResource SettingsTabItem}" AutomationProperties.Name="Automation system settings">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                        <Border Style="{StaticResource PageCard}">
+                            <Grid>
+                                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="18"/><RowDefinition Height="Auto"/><RowDefinition Height="10"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                                <Grid><StackPanel><TextBlock Text="Local automation bridge" Style="{StaticResource SectionTitle}"/><TextBlock Text="Expose MonitorControl to trusted local tools through an authenticated loopback endpoint." Foreground="{DynamicResource MutedTextBrush}" Margin="0,3,0,0"/></StackPanel><TextBlock x:Name="AutomationBridgeStatusText" Text="Off" Foreground="{DynamicResource MutedTextBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/></Grid>
+                                <CheckBox x:Name="AutomationBridgeEnabledCheckbox" Grid.Row="2" Content="Enable local Automation Bridge"/>
+                                <Grid Grid.Row="4">
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="2*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="3*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                    <StackPanel><TextBlock Text="Bind address" Foreground="{DynamicResource MutedTextBrush}"/><TextBox x:Name="AutomationBridgeBindBox" Text="127.0.0.1" Margin="0,5,0,0"/></StackPanel>
+                                    <StackPanel Grid.Column="2"><TextBlock Text="Port" Foreground="{DynamicResource MutedTextBrush}"/><TextBox x:Name="AutomationBridgePortBox" Text="34291" Margin="0,5,0,0"/></StackPanel>
+                                    <StackPanel Grid.Column="4"><TextBlock Text="API key" Foreground="{DynamicResource MutedTextBrush}"/><PasswordBox x:Name="AutomationBridgeKeyBox" Password="" Margin="0,5,0,0"/></StackPanel>
+                                    <Button x:Name="AutomationBridgeSaveBtn" Grid.Column="6" Content="Save bridge" Style="{StaticResource GreenBtn}" VerticalAlignment="Bottom"/>
+                                </Grid>
+                            </Grid>
+                        </Border>
+                    </ScrollViewer>
+                </TabItem>
+                <TabItem x:Name="SystemDiagnosticsCategory" Header="Diagnostics" Style="{StaticResource SettingsTabItem}" AutomationProperties.Name="Diagnostics system settings">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                        <Border Style="{StaticResource PageCard}">
+                            <Grid>
+                                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="14"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                                <Grid>
+                                    <StackPanel><TextBlock Text="DDC compatibility report" Style="{StaticResource SectionTitle}"/><TextBlock Text="Build a portable diagnostic snapshot for the selected monitor." Foreground="{DynamicResource MutedTextBrush}" Margin="0,3,0,0"/></StackPanel>
+                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center"><Button x:Name="DdcReportGenerateBtn" Content="Build report" Style="{StaticResource GreenBtn}" AutomationProperties.Name="Build DDC compatibility report"/><Button x:Name="DdcReportCopyBtn" Content="Copy report" Style="{StaticResource Btn}" Margin="8,0,0,0"/></StackPanel>
+                                </Grid>
+                                <TextBox x:Name="DdcReportBox" Grid.Row="2" IsReadOnly="True" TextWrapping="Wrap" Height="420" VerticalScrollBarVisibility="Auto" Background="{DynamicResource ControlBrush}" FontFamily="Consolas" FontSize="12" AcceptsReturn="True"/>
+                            </Grid>
+                        </Border>
+                    </ScrollViewer>
+                </TabItem>
+                <TabItem x:Name="SystemIntegrationsCategory" Header="Integrations" Style="{StaticResource SettingsTabItem}" AutomationProperties.Name="Integrations system settings">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                        <Border Style="{StaticResource PageCard}" BorderBrush="{DynamicResource WarningBrush}">
+                            <Grid>
+                                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="16"/><RowDefinition Height="Auto"/><RowDefinition Height="10"/><RowDefinition Height="Auto"/><RowDefinition Height="16"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                                <StackPanel><TextBlock Text="Optional hardware helpers" Style="{StaticResource SectionTitle}"/><TextBlock Text="Explicitly opt into local libraries and executables used for extra telemetry." Foreground="{DynamicResource MutedTextBrush}" Margin="0,3,0,0"/></StackPanel>
+                                <CheckBox x:Name="CpuMonitorEnabledCheckbox" Grid.Row="2" Content="Load CPU temperature library (LibreHardwareMonitorLib / OpenHardwareMonitorLib)"/>
+                                <CheckBox x:Name="PresentMonEnabledCheckbox" Grid.Row="4" Content="Run PresentMon for the FPS overlay"/>
+                                <StackPanel Grid.Row="6">
+                                    <TextBlock Text="Every resolved binary is reported with its version and SHA-256. Helpers remain disabled until enabled here." TextWrapping="Wrap" Foreground="{DynamicResource MutedTextBrush}" Margin="0,0,0,10"/>
+                                    <TextBox x:Name="OptionalHelperStatusBox" IsReadOnly="True" TextWrapping="NoWrap" Height="300" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="{DynamicResource ControlBrush}" FontFamily="Consolas" FontSize="12" AcceptsReturn="True"/>
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+                    </ScrollViewer>
+                </TabItem>
+            </TabControl>
         </TabItem>
     </TabControl>
     <Border Grid.Row="3" Grid.ColumnSpan="2" Background="{DynamicResource FooterBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="18,0"><Grid>
@@ -7547,7 +7707,7 @@ try {
     }
 } catch {}
 # Get all UI elements
-$shellScrollViewer = $window.FindName("ShellScrollViewer"); $shellRoot = $window.FindName("ShellRoot")
+$shellScrollViewer = $window.FindName("ShellScrollViewer"); $shellRoot = $window.FindName("ShellRoot"); $mainNavigationTabs = $window.FindName("MainNavigationTabs")
 $statusBannerBorder = $window.FindName("StatusBannerBorder"); $statusBannerText = $window.FindName("StatusBannerText"); $statusBannerDismissButton = $window.FindName("StatusBannerDismissButton")
 $appTitleText = $window.FindName("AppTitleText"); $appSubtitleText = $window.FindName("AppSubtitleText")
 $displayTab = $window.FindName("DisplayTab"); $monitorTab = $window.FindName("MonitorTab"); $vcpTab = $window.FindName("VcpTab")
@@ -11427,6 +11587,97 @@ function Update-GpuStats {
     }
 }
 
+function Save-NavigationRenderFrame {
+    param($Page, [string]$RenderRoot)
+    $window.UpdateLayout()
+    $pixelWidth = [Math]::Max(1, [int][Math]::Ceiling($shellRoot.ActualWidth))
+    $pixelHeight = [Math]::Max(1, [int][Math]::Ceiling($shellRoot.ActualHeight))
+    $bitmap = New-Object System.Windows.Media.Imaging.RenderTargetBitmap(
+        $pixelWidth,
+        $pixelHeight,
+        96,
+        96,
+        [System.Windows.Media.PixelFormats]::Pbgra32
+    )
+    $bitmap.Render($shellRoot)
+    $encoder = New-Object System.Windows.Media.Imaging.PngBitmapEncoder
+    $encoder.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($bitmap))
+    $outputPath = Join-Path $RenderRoot $Page.Name
+    $stream = New-Object System.IO.FileStream(
+        $outputPath,
+        [System.IO.FileMode]::Create,
+        [System.IO.FileAccess]::Write,
+        [System.IO.FileShare]::None
+    )
+    try { $encoder.Save($stream) } finally { $stream.Dispose() }
+}
+
+function Export-NavigationRenders {
+    param([string]$Directory)
+    if ([string]::IsNullOrWhiteSpace($Directory)) { return }
+
+    $script:NavigationRenderRoot = [System.IO.Path]::GetFullPath($Directory)
+    [System.IO.Directory]::CreateDirectory($script:NavigationRenderRoot) | Out-Null
+    $completePath = Join-Path $script:NavigationRenderRoot "render.complete"
+    $errorPath = Join-Path $script:NavigationRenderRoot "render.error.txt"
+    if ([System.IO.File]::Exists($completePath)) { [System.IO.File]::Delete($completePath) }
+    if ([System.IO.File]::Exists($errorPath)) { [System.IO.File]::Delete($errorPath) }
+
+    $script:NavigationRenderSelectedTab = @($displayTab,$monitorTab,$gpuTab,$vcpTab,$profilesTab,$scheduleTab,$systemTab) |
+        Where-Object { $_ -and $_.IsSelected } |
+        Select-Object -First 1
+    $script:NavigationRenderPages = @(
+        [PSCustomObject]@{ Name = "display.png"; Tab = $displayTab },
+        [PSCustomObject]@{ Name = "monitor.png"; Tab = $monitorTab },
+        [PSCustomObject]@{ Name = "hardware.png"; Tab = $gpuTab },
+        [PSCustomObject]@{ Name = "vcp-explorer.png"; Tab = $vcpTab },
+        [PSCustomObject]@{ Name = "profiles.png"; Tab = $profilesTab },
+        [PSCustomObject]@{ Name = "automation.png"; Tab = $scheduleTab },
+        [PSCustomObject]@{ Name = "system.png"; Tab = $systemTab }
+    ) | Where-Object { $_.Tab -and $_.Tab.Visibility -eq [System.Windows.Visibility]::Visible }
+    $script:NavigationRenderIndex = 0
+    $script:NavigationRenderReady = $false
+    $script:NavigationRenderTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:NavigationRenderTimer.Interval = [TimeSpan]::FromMilliseconds(175)
+    $script:NavigationRenderTimer.Add_Tick({
+        try {
+            if (-not $script:NavigationRenderReady) {
+                $script:NavigationRenderPages[0].Tab.IsSelected = $true
+                $window.UpdateLayout()
+                $script:NavigationRenderReady = $true
+                return
+            }
+
+            $page = $script:NavigationRenderPages[$script:NavigationRenderIndex]
+            Save-NavigationRenderFrame -Page $page -RenderRoot $script:NavigationRenderRoot
+            $script:NavigationRenderIndex++
+            if ($script:NavigationRenderIndex -ge $script:NavigationRenderPages.Count) {
+                $script:NavigationRenderTimer.Stop()
+                if ($script:NavigationRenderSelectedTab) {
+                    $script:NavigationRenderSelectedTab.IsSelected = $true
+                    $window.UpdateLayout()
+                }
+                [System.IO.File]::WriteAllText(
+                    (Join-Path $script:NavigationRenderRoot "render.complete"),
+                    [string]$script:NavigationRenderPages.Count,
+                    (New-Object System.Text.UTF8Encoding($false))
+                )
+                return
+            }
+            $script:NavigationRenderPages[$script:NavigationRenderIndex].Tab.IsSelected = $true
+            $window.UpdateLayout()
+        } catch {
+            $script:NavigationRenderTimer.Stop()
+            [System.IO.File]::WriteAllText(
+                (Join-Path $script:NavigationRenderRoot "render.error.txt"),
+                $_.Exception.ToString(),
+                (New-Object System.Text.UTF8Encoding($false))
+            )
+        }
+    })
+    $script:NavigationRenderTimer.Start()
+}
+
 # Initialize
 Initialize-WmiBrightness; Load-MonitorIdentitySettings; Import-CapabilitySafetyState; Import-VcpWriteSafetyState; Import-OptionalHelperSettings; Import-DisplayStateRestoreSettings; Import-CapabilitiesCache; Import-DdcTimingSettings; Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList
 Load-AppProfileRules; Update-AppProfileControls; Start-AppProfileWatcher
@@ -11444,6 +11695,21 @@ Update-HardwareTabVisibility
 
 Initialize-TrayIcon
 
+$mainNavigationTabs.Add_SelectionChanged({
+    param($sender, $eventArgs)
+    if (-not [object]::ReferenceEquals($eventArgs.OriginalSource, $sender)) { return }
+    $anchorShell = [Action]{
+        if ($shellScrollViewer) {
+            $shellScrollViewer.ScrollToHorizontalOffset(0)
+            $shellScrollViewer.ScrollToVerticalOffset(0)
+        }
+    }
+    $window.Dispatcher.BeginInvoke(
+        [System.Windows.Threading.DispatcherPriority]::ContextIdle,
+        $anchorShell
+    ) | Out-Null
+})
+
 $window.Add_SourceInitialized({
     Initialize-DisplayRecoveryEventPipeline
 })
@@ -11458,12 +11724,25 @@ $window.Add_ContentRendered({
     Start-CapabilitiesWorker
 })
 
+if (-not [string]::IsNullOrWhiteSpace($RenderDirectory)) {
+    $script:NavigationRenderExported = $false
+    $window.Add_ContentRendered({
+        if ($script:NavigationRenderExported) { return }
+        $script:NavigationRenderExported = $true
+        try {
+            Export-NavigationRenders -Directory $RenderDirectory
+        } catch {
+            [System.Diagnostics.Trace]::TraceError("Navigation render export failed: $($_.Exception.Message)")
+        }
+    })
+}
+
 $window.Add_StateChanged({
     if ($script:TraySuppressWindowStateEvent -or $script:IsQuitting) { return }
     if ($window.WindowState -eq [System.Windows.WindowState]::Minimized) { Hide-MainWindowToTray }
 })
 
-$window.Add_Closed({ Stop-SystemAccessibility; if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AmbientLightTimer) { $script:AmbientLightTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }; if ($script:ProfileScheduleTimer) { $script:ProfileScheduleTimer.Stop() }; if ($script:IdleDimTimer) { $script:IdleDimTimer.Stop() }; if ($script:BatteryProfileTimer) { $script:BatteryProfileTimer.Stop() }; if ($script:FpsOverlayTimer) { $script:FpsOverlayTimer.Stop() }; if ($script:DdcWriteResultTimer) { $script:DdcWriteResultTimer.Stop() }; foreach ($timer in @($script:DeferredRefreshTimers)) { try { $timer.Stop() } catch {} }; $script:DeferredRefreshTimers = @(); Stop-DisplayRecoveryEventPipeline; Stop-AutomationBridge; Stop-VcpWorker -Cancel; Stop-MonitorSettingsWorker -Cancel; Stop-CapabilitiesWorker -Cancel; Stop-DdcReportWorker -Cancel
+$window.Add_Closed({ Stop-SystemAccessibility; if ($script:NavigationRenderTimer) { $script:NavigationRenderTimer.Stop() }; if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AmbientLightTimer) { $script:AmbientLightTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }; if ($script:ProfileScheduleTimer) { $script:ProfileScheduleTimer.Stop() }; if ($script:IdleDimTimer) { $script:IdleDimTimer.Stop() }; if ($script:BatteryProfileTimer) { $script:BatteryProfileTimer.Stop() }; if ($script:FpsOverlayTimer) { $script:FpsOverlayTimer.Stop() }; if ($script:DdcWriteResultTimer) { $script:DdcWriteResultTimer.Stop() }; foreach ($timer in @($script:DeferredRefreshTimers)) { try { $timer.Stop() } catch {} }; $script:DeferredRefreshTimers = @(); Stop-DisplayRecoveryEventPipeline; Stop-AutomationBridge; Stop-VcpWorker -Cancel; Stop-MonitorSettingsWorker -Cancel; Stop-CapabilitiesWorker -Cancel; Stop-DdcReportWorker -Cancel
     if ($script:FpsOverlayWindow) { try { $script:FpsOverlayWindow.Close() } catch {} }
     if ($script:HardwareMonitorComputer) { try { $script:HardwareMonitorComputer.Close() } catch {} }
     Dispose-TrayMode
