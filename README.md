@@ -67,6 +67,7 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 - **Async VCP Reads** — VCP Explorer query and scan operations run in a background worker with live scan progress
 - **Async Monitor Refresh** — Monitor brightness, contrast, color gain, volume, and sharpness reads refresh from a background worker
 - **Coalesced Routine Writes** — Sliders, presets, and brightness automation queue on a background worker so rapid routine changes do not block the WPF thread
+- **No Redundant DDC Writes** — Reads and writes record each monitor's current value, and a routine write that would not change it is skipped and counted rather than sent. Repeating automation such as ambient mode touches the panel once instead of on every poll, which matters because many monitors store these settings in limited-endurance EEPROM. The cache is dropped whenever monitor handles are released, and verified profile writes always go through
 - **Recoverable Profile Apply** — Profile loads snapshot every readable hardware value, verify writes, and restore readable prior values in reverse order after a failure or mismatch
 - **DDC/CI Diagnostics** — Failed reads and writes include monitor name, VCP code, attempted value, Win32 error, and retry count in a copyable VCP Explorer summary
 - **DDC/CI Capabilities Viewer** — View raw capabilities string from monitor
