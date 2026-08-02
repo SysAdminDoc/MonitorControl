@@ -1159,6 +1159,22 @@ $script:DisplayStateRestoreGeneration = -1
 $script:UpdatingDisplayStateRestoreUI = $false
 $script:UpdatingDdcTimingUI = $false
 $script:OptionalHelperSettingsPath = Join-Path $script:DefaultProfilesPath "optional-helpers.json"
+$script:UpdateCheckSettingsPath = Join-Path $script:DefaultProfilesPath "update-check.json"
+$script:UpdateCheckEnabled = $false
+$script:UpdateCheckETag = ""
+$script:UpdateCheckLastCheckedUtc = ""
+$script:UpdateCheckLastVersion = ""
+$script:UpdateCheckLastReleaseUrl = ""
+$script:UpdateCheckDismissedVersion = ""
+$script:UpdateCheckLastError = ""
+$script:UpdateCheckWorker = $null
+$script:UpdateCheckWorkerInput = $null
+$script:UpdateCheckWorkerOutput = $null
+$script:UpdateCheckWorkerAsyncResult = $null
+$script:UpdateCheckWorkerTimer = $null
+$script:UpdateCheckWorkerUri = "https://api.github.com/repos/SysAdminDoc/MonitorControl/releases/latest"
+$script:UpdateCheckLatestUrl = "https://github.com/SysAdminDoc/MonitorControl/releases/latest"
+$script:UpdatingUpdateCheckUI = $false
 # Optional native helpers are discovered next to the script and on PATH, so they stay off
 # until the user enables them. Nothing is loaded or executed before that.
 $script:CpuMonitorEnabled = $false
@@ -1194,6 +1210,7 @@ $script:CapabilitiesSafetySchemaVersion = [int]$script:SettingsDocumentRegistry.
 $script:CapabilitiesProbeSentinelSchemaVersion = [int]$script:SettingsDocumentRegistry.CapabilitiesProbeSentinel.CurrentVersion
 $script:VcpWriteSafetySchemaVersion = [int]$script:SettingsDocumentRegistry.VcpWriteSafety.CurrentVersion
 $script:OptionalHelperSchemaVersion = [int]$script:SettingsDocumentRegistry.OptionalHelpers.CurrentVersion
+$script:UpdateCheckSchemaVersion = [int]$script:SettingsDocumentRegistry.UpdateCheck.CurrentVersion
 $script:DisplayStateRestoreSchemaVersion = [int]$script:SettingsDocumentRegistry.DisplayRestore.CurrentVersion
 $script:CapabilitiesCacheSchemaVersion = [int]$script:SettingsDocumentRegistry.CapabilitiesCache.CurrentVersion
 $script:DdcTimingSchemaVersion = [int]$script:SettingsDocumentRegistry.DdcTiming.CurrentVersion
@@ -3633,6 +3650,175 @@ function Update-RunAtLoginControls {
     }
 }
 
+function Test-UpdateCheckDue {
+    if (-not $script:UpdateCheckEnabled) { return $false }
+    if ([string]::IsNullOrWhiteSpace([string]$script:UpdateCheckLastCheckedUtc)) { return $true }
+    $lastChecked = [DateTime]::MinValue
+    if (-not [DateTime]::TryParse([string]$script:UpdateCheckLastCheckedUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$lastChecked)) { return $true }
+    return ([DateTime]::UtcNow - $lastChecked.ToUniversalTime()).TotalHours -ge 24
+}
+
+function Get-UpdateCheckReleaseUrl {
+    param([version]$Version, [string]$Candidate = "")
+    $fallback = "https://github.com/SysAdminDoc/MonitorControl/releases/tag/v$($Version.ToString(3))"
+    if ([string]$Candidate -match '^https://github\.com/SysAdminDoc/MonitorControl/releases/tag/v[0-9]+\.[0-9]+\.[0-9]+$') { return [string]$Candidate }
+    return $fallback
+}
+
+function Update-UpdateCheckControls {
+    if ($null -eq $updateCheckEnabledCheckbox) { return }
+    $script:UpdatingUpdateCheckUI = $true
+    try {
+        $updateCheckEnabledCheckbox.IsChecked = [bool]$script:UpdateCheckEnabled
+        $latestVersion = $null
+        [void][version]::TryParse([string]$script:UpdateCheckLastVersion, [ref]$latestVersion)
+        $hasNotice = $script:UpdateCheckEnabled -and $null -ne $latestVersion -and $latestVersion -gt [version]$script:AppVersion -and
+            [string]$script:UpdateCheckDismissedVersion -ne $latestVersion.ToString(3) -and -not [string]::IsNullOrWhiteSpace([string]$script:UpdateCheckLastReleaseUrl)
+        if (-not $script:UpdateCheckEnabled) {
+            $updateCheckStatusText.Text = "Off"
+        } elseif ($null -ne $script:UpdateCheckWorker) {
+            $updateCheckStatusText.Text = "Checking for updates..."
+        } elseif ($hasNotice) {
+            $updateCheckStatusText.Text = "Update available: v$($latestVersion.ToString(3))"
+        } elseif (-not [string]::IsNullOrWhiteSpace([string]$script:UpdateCheckLastError)) {
+            $updateCheckStatusText.Text = "Last check unavailable; see diagnostics"
+        } elseif ([string]::IsNullOrWhiteSpace([string]$script:UpdateCheckLastCheckedUtc)) {
+            $updateCheckStatusText.Text = "Not checked yet"
+        } else {
+            $checkedText = Format-UiDateTime -Value ([DateTime]$script:UpdateCheckLastCheckedUtc) -Format "g"
+            $updateCheckStatusText.Text = "Up to date (checked $checkedText)"
+        }
+        $updateCheckNowBtn.IsEnabled = [bool]$script:UpdateCheckEnabled -and $null -eq $script:UpdateCheckWorker
+        $updateCheckOpenBtn.Visibility = if ($hasNotice) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed }
+        $updateCheckDismissBtn.Visibility = if ($hasNotice) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed }
+    } finally {
+        $script:UpdatingUpdateCheckUI = $false
+    }
+}
+
+function Stop-UpdateCheckWorker {
+    if ($script:UpdateCheckWorkerTimer) { try { $script:UpdateCheckWorkerTimer.Stop() } catch {} }
+    if ($script:UpdateCheckWorker -and $script:UpdateCheckWorkerAsyncResult -and -not $script:UpdateCheckWorkerAsyncResult.IsCompleted) {
+        try { $script:UpdateCheckWorker.Stop() } catch {}
+    }
+    if ($script:UpdateCheckWorker) { try { $script:UpdateCheckWorker.Dispose() } catch {} }
+    if ($script:UpdateCheckWorkerInput) { try { $script:UpdateCheckWorkerInput.Dispose() } catch {} }
+    if ($script:UpdateCheckWorkerOutput) { try { $script:UpdateCheckWorkerOutput.Dispose() } catch {} }
+    $script:UpdateCheckWorker = $null
+    $script:UpdateCheckWorkerInput = $null
+    $script:UpdateCheckWorkerOutput = $null
+    $script:UpdateCheckWorkerAsyncResult = $null
+}
+
+function ConvertFrom-UpdateCheckResponse {
+    param($Response, [int]$StatusCode, [string]$ETag = "", [string]$CheckedUtc = "")
+    if ([string]::IsNullOrWhiteSpace($CheckedUtc)) { $CheckedUtc = [DateTime]::UtcNow.ToString("o") }
+    if ($StatusCode -eq 304) {
+        return [PSCustomObject]@{ Success = $true; Status = "NotModified"; Version = ""; ReleaseUrl = ""; ETag = $ETag; CheckedUtc = $CheckedUtc; ErrorCode = "" }
+    }
+    if ($StatusCode -lt 200 -or $StatusCode -ge 300 -or $null -eq $Response) {
+        return [PSCustomObject]@{ Success = $false; Status = "Failed"; Version = ""; ReleaseUrl = ""; ETag = ""; CheckedUtc = $CheckedUtc; ErrorCode = if ($StatusCode -gt 0) { "HTTP $StatusCode" } else { "response" } }
+    }
+    try {
+        $payload = if ($Response.Content -is [string]) { [string]$Response.Content | ConvertFrom-Json } else { $Response.Content }
+        $versionText = ([string]$payload.tag_name) -replace '^[vV]', ''
+        $version = $null
+        if (-not [version]::TryParse($versionText, [ref]$version)) { throw "invalid release version" }
+        return [PSCustomObject]@{
+            Success = $true
+            Status = "Success"
+            Version = $version.ToString(3)
+            ReleaseUrl = [string]$payload.html_url
+            ETag = if ($Response.PSObject.Properties.Name -contains "Headers") { [string]$Response.Headers["ETag"] } else { $ETag }
+            CheckedUtc = $CheckedUtc
+            ErrorCode = ""
+        }
+    } catch {
+        return [PSCustomObject]@{ Success = $false; Status = "Failed"; Version = ""; ReleaseUrl = ""; ETag = ""; CheckedUtc = $CheckedUtc; ErrorCode = "payload" }
+    }
+}
+
+function Update-UpdateCheckWorkerOutput {
+    if (-not $script:UpdateCheckWorker -or -not $script:UpdateCheckWorkerOutput -or -not $script:UpdateCheckWorkerAsyncResult) { return }
+    if (-not [bool]$script:UpdateCheckWorkerAsyncResult.IsCompleted) { return }
+    $result = @()
+    try { $script:UpdateCheckWorker.EndInvoke($script:UpdateCheckWorkerAsyncResult) | Out-Null } catch { $script:UpdateCheckLastError = "worker" }
+    if ($script:UpdateCheckWorkerOutput.Count -gt 0) { $result = @($script:UpdateCheckWorkerOutput | Select-Object -Last 1) }
+    Stop-UpdateCheckWorker
+    if ($result.Count -eq 0) {
+        if ([string]::IsNullOrWhiteSpace([string]$script:UpdateCheckLastError)) { $script:UpdateCheckLastError = "worker" }
+        Update-UpdateCheckControls
+        return
+    }
+    $item = $result[0]
+    $script:UpdateCheckLastError = if ([bool]$item.Success -or [string]$item.Status -eq "NotModified") { "" } else { [string]$item.ErrorCode }
+    if (-not [string]::IsNullOrWhiteSpace([string]$item.CheckedUtc)) { $script:UpdateCheckLastCheckedUtc = [string]$item.CheckedUtc }
+    if ([string]$item.Status -eq "Success") {
+        $parsedVersion = $null
+        if ([version]::TryParse([string]$item.Version, [ref]$parsedVersion)) {
+            $script:UpdateCheckLastVersion = $parsedVersion.ToString(3)
+            $script:UpdateCheckLastReleaseUrl = Get-UpdateCheckReleaseUrl -Version $parsedVersion -Candidate ([string]$item.ReleaseUrl)
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$item.ETag)) { $script:UpdateCheckETag = [string]$item.ETag }
+    }
+    Save-UpdateCheckSettings | Out-Null
+    Update-UpdateCheckControls
+}
+
+function Start-UpdateCheckWorker {
+    if (-not $script:UpdateCheckEnabled -or $null -ne $script:UpdateCheckWorker) { return $false }
+    $parserDefinition = "function ConvertFrom-UpdateCheckResponse {" + (Get-Command ConvertFrom-UpdateCheckResponse).Definition + "}"
+    $workerScript = [scriptblock]::Create($parserDefinition + @'
+        param([string]$Uri, [string]$ETag, [string]$UserAgent)
+        $checkedUtc = [DateTime]::UtcNow.ToString("o")
+        $headers = @{ Accept = "application/vnd.github+json"; "User-Agent" = $UserAgent }
+        if (-not [string]::IsNullOrWhiteSpace($ETag)) { $headers["If-None-Match"] = $ETag }
+        try {
+            $response = Invoke-WebRequest -UseBasicParsing -Uri $Uri -Headers $headers -Method Get -TimeoutSec 10
+            $statusCode = [int]$response.StatusCode
+            ConvertFrom-UpdateCheckResponse -Response $response -StatusCode $statusCode -ETag $ETag -CheckedUtc $checkedUtc
+        } catch {
+            $statusCode = 0
+            try { if ($_.Exception.Response) { $statusCode = [int]$_.Exception.Response.StatusCode } } catch {}
+            ConvertFrom-UpdateCheckResponse -Response $null -StatusCode $statusCode -ETag $ETag -CheckedUtc $checkedUtc
+        }
+'@)
+    $script:UpdateCheckWorkerInput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
+    $script:UpdateCheckWorkerInput.Complete()
+    $script:UpdateCheckWorkerOutput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
+    $script:UpdateCheckWorker = [PowerShell]::Create()
+    $script:UpdateCheckWorker.AddScript($workerScript.ToString()).AddArgument($script:UpdateCheckWorkerUri).AddArgument([string]$script:UpdateCheckETag).AddArgument("$script:AppName/$script:AppVersion") | Out-Null
+    $script:UpdateCheckWorkerAsyncResult = $script:UpdateCheckWorker.BeginInvoke($script:UpdateCheckWorkerInput, $script:UpdateCheckWorkerOutput)
+    if (-not $script:UpdateCheckWorkerTimer) {
+        $script:UpdateCheckWorkerTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:UpdateCheckWorkerTimer.Interval = [TimeSpan]::FromMilliseconds(200)
+        $script:UpdateCheckWorkerTimer.Add_Tick({ Update-UpdateCheckWorkerOutput })
+    }
+    $script:UpdateCheckWorkerTimer.Start()
+    Update-UpdateCheckControls
+    return $true
+}
+
+function Invoke-UpdateCheck {
+    if (-not $script:UpdateCheckEnabled) { Update-UpdateCheckControls; return $false }
+    if (Start-UpdateCheckWorker) { return $true }
+    Update-UpdateCheckControls
+    return $false
+}
+
+function Open-UpdateCheckRelease {
+    $url = [string]$script:UpdateCheckLastReleaseUrl
+    if ($url -notmatch '^https://github\.com/SysAdminDoc/MonitorControl/releases/tag/v[0-9]+\.[0-9]+\.[0-9]+$') { return $false }
+    try { Start-Process -FilePath $url | Out-Null; return $true } catch { return $false }
+}
+
+function Dismiss-UpdateCheckRelease {
+    if ([string]::IsNullOrWhiteSpace([string]$script:UpdateCheckLastVersion)) { return }
+    $script:UpdateCheckDismissedVersion = [string]$script:UpdateCheckLastVersion
+    Save-UpdateCheckSettings | Out-Null
+    Update-UpdateCheckControls
+}
+
 
 
 
@@ -5045,6 +5231,15 @@ if ($CliWorker) {
                                     <TextBlock Text="Risky writes and the local API bridge" Foreground="{DynamicResource MutedTextBrush}" TextWrapping="Wrap"/>
                                     <TextBlock Text="Diagnostics &amp; integrations" Foreground="{DynamicResource FocusBrush}" FontWeight="SemiBold" Margin="0,14,0,2"/>
                                     <TextBlock Text="Compatibility reports and optional helpers" Foreground="{DynamicResource MutedTextBrush}" TextWrapping="Wrap"/>
+                                    <Separator Margin="0,16,0,12"/>
+                                    <TextBlock Text="Updates" Foreground="{DynamicResource FocusBrush}" FontWeight="SemiBold"/>
+                                    <CheckBox x:Name="UpdateCheckEnabledCheckbox" Content="Check for updates (notify only)" Margin="0,8,0,0" ToolTip="When enabled, query the GitHub releases API for a newer version. No files are downloaded or executed."/>
+                                    <TextBlock x:Name="UpdateCheckStatusText" Text="Off" Foreground="{DynamicResource MutedTextBrush}" TextWrapping="Wrap" Margin="0,6,0,0"/>
+                                    <WrapPanel Margin="0,8,0,0">
+                                        <Button x:Name="UpdateCheckNowBtn" Content="Check now" Style="{StaticResource Btn}" Margin="0,0,8,0"/>
+                                        <Button x:Name="UpdateCheckOpenBtn" Content="Open release" Style="{StaticResource GreenBtn}" Visibility="Collapsed" Margin="0,0,8,0"/>
+                                        <Button x:Name="UpdateCheckDismissBtn" Content="Dismiss" Style="{StaticResource Btn}" Visibility="Collapsed"/>
+                                    </WrapPanel>
                                 </StackPanel>
                             </Border>
                         </Grid>
@@ -5379,6 +5574,8 @@ $automationBridgeEnabledCheckbox = $window.FindName("AutomationBridgeEnabledChec
 $automationBridgeBindBox = $window.FindName("AutomationBridgeBindBox"); $automationBridgePortBox = $window.FindName("AutomationBridgePortBox")
 $automationBridgeKeyBox = $window.FindName("AutomationBridgeKeyBox"); $automationBridgeSaveBtn = $window.FindName("AutomationBridgeSaveBtn")
 $runAtLoginEnabledCheckbox = $window.FindName("RunAtLoginEnabledCheckbox"); $runAtLoginStatusText = $window.FindName("RunAtLoginStatusText")
+$updateCheckEnabledCheckbox = $window.FindName("UpdateCheckEnabledCheckbox"); $updateCheckStatusText = $window.FindName("UpdateCheckStatusText")
+$updateCheckNowBtn = $window.FindName("UpdateCheckNowBtn"); $updateCheckOpenBtn = $window.FindName("UpdateCheckOpenBtn"); $updateCheckDismissBtn = $window.FindName("UpdateCheckDismissBtn")
 $ddcReportGenerateBtn = $window.FindName("DdcReportGenerateBtn"); $ddcReportCopyBtn = $window.FindName("DdcReportCopyBtn")
 $ddcReportIncludeIdentifiersCheckbox = $window.FindName("DdcReportIncludeIdentifiersCheckbox"); $ddcReportIncludeNamesCheckbox = $window.FindName("DdcReportIncludeNamesCheckbox")
 $statusText = $window.FindName("StatusText"); $autoModeText = $window.FindName("AutoModeText")
@@ -10314,6 +10511,24 @@ $runAtLoginEnabledCheckbox.Add_Unchecked({
     }
     Update-RunAtLoginControls
 })
+$updateCheckEnabledCheckbox.Add_Checked({
+    if ($script:UpdatingUpdateCheckUI) { return }
+    $script:UpdateCheckEnabled = $true
+    $script:UpdateCheckLastError = ""
+    Save-UpdateCheckSettings | Out-Null
+    Update-UpdateCheckControls
+    Invoke-UpdateCheck | Out-Null
+})
+$updateCheckEnabledCheckbox.Add_Unchecked({
+    if ($script:UpdatingUpdateCheckUI) { return }
+    $script:UpdateCheckEnabled = $false
+    Stop-UpdateCheckWorker
+    Save-UpdateCheckSettings | Out-Null
+    Update-UpdateCheckControls
+})
+$updateCheckNowBtn.Add_Click({ Invoke-UpdateCheck | Out-Null })
+$updateCheckOpenBtn.Add_Click({ if (-not (Open-UpdateCheckRelease)) { Update-Status "Release page could not be opened" } })
+$updateCheckDismissBtn.Add_Click({ Dismiss-UpdateCheckRelease })
 $ddcReportGenerateBtn.Add_Click({ Start-DdcReportWorker })
 $ddcReportCopyBtn.Add_Click({
     $text = if ($script:DdcReportLastText) { $script:DdcReportLastText } else { $ddcReportBox.Text }
@@ -10446,7 +10661,7 @@ function Export-NavigationRenders {
 }
 
 # Initialize
-Initialize-WmiBrightness; Load-MonitorIdentitySettings; Import-CapabilitySafetyState; Import-VcpWriteSafetyState; Import-InputSourceSettings; Import-UsbInputRules; Import-OptionalHelperSettings; Import-DisplayStateRestoreSettings; Import-CapabilitiesCache; Import-DdcTimingSettings; Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Initialize-FixedChoiceCombos; Load-MonitorSettings; Update-ProfilesList; Update-UsbInputControls
+Initialize-WmiBrightness; Load-MonitorIdentitySettings; Import-CapabilitySafetyState; Import-VcpWriteSafetyState; Import-InputSourceSettings; Import-UsbInputRules; Import-OptionalHelperSettings; Import-UpdateCheckSettings; Import-DisplayStateRestoreSettings; Import-CapabilitiesCache; Import-DdcTimingSettings; Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Initialize-FixedChoiceCombos; Load-MonitorSettings; Update-ProfilesList; Update-UsbInputControls
 Load-AppProfileRules; Update-AppProfileControls; Start-AppProfileWatcher
 Load-ProfileSchedules; Update-ScheduleControls; Start-ProfileScheduleWatcher
 Load-IdleDimSettings; Update-IdleDimControls; Start-IdleDimWatcher
@@ -10457,6 +10672,7 @@ Update-ProfileStorageControls
 Sync-CapabilitySafetyUi
 Sync-VcpWriteSafetyUi
 Update-OptionalHelperControls
+Update-UpdateCheckControls
 Update-DisplayStateRestoreControls
 Update-DdcTimingControls
 Update-HardwareTabVisibility
@@ -10505,6 +10721,7 @@ $window.Add_ContentRendered({
     }
     Sync-CapabilitySafetyUi
     Start-CapabilitiesWorker
+    if (Test-UpdateCheckDue) { Invoke-UpdateCheck }
 })
 
 if (-not [string]::IsNullOrWhiteSpace($RenderDirectory)) {
@@ -10525,7 +10742,7 @@ $window.Add_StateChanged({
     if ($window.WindowState -eq [System.Windows.WindowState]::Minimized) { Hide-MainWindowToTray }
 })
 
-$window.Add_Closed({ Stop-SystemAccessibility; if ($script:NavigationRenderTimer) { $script:NavigationRenderTimer.Stop() }; if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AmbientLightTimer) { $script:AmbientLightTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }; if ($script:ProfileScheduleTimer) { $script:ProfileScheduleTimer.Stop() }; if ($script:IdleDimTimer) { $script:IdleDimTimer.Stop() }; if ($script:BatteryProfileTimer) { $script:BatteryProfileTimer.Stop() }; if ($script:FpsOverlayTimer) { $script:FpsOverlayTimer.Stop() }; if ($script:DdcWriteResultTimer) { $script:DdcWriteResultTimer.Stop() }; foreach ($timer in @($script:DeferredRefreshTimers)) { try { $timer.Stop() } catch {} }; $script:DeferredRefreshTimers = @(); Stop-DisplayRecoveryEventPipeline; Stop-AutomationBridge; Stop-VerifiedVcpTransactionWorker -Cancel -WaitForCompletion; Stop-VcpWorker -Cancel; Stop-MonitorSettingsWorker -Cancel; Stop-CapabilitiesWorker -Cancel; Stop-DdcReportWorker -Cancel
+$window.Add_Closed({ Stop-SystemAccessibility; if ($script:NavigationRenderTimer) { $script:NavigationRenderTimer.Stop() }; if ($script:GpuTimer) { $script:GpuTimer.Stop() }; if ($script:AutoModeTimer) { $script:AutoModeTimer.Stop() }; if ($script:AmbientLightTimer) { $script:AmbientLightTimer.Stop() }; if ($script:AppProfileTimer) { $script:AppProfileTimer.Stop() }; if ($script:AppProfileCaptureTimer) { $script:AppProfileCaptureTimer.Stop() }; if ($script:ProfileScheduleTimer) { $script:ProfileScheduleTimer.Stop() }; if ($script:IdleDimTimer) { $script:IdleDimTimer.Stop() }; if ($script:BatteryProfileTimer) { $script:BatteryProfileTimer.Stop() }; if ($script:FpsOverlayTimer) { $script:FpsOverlayTimer.Stop() }; if ($script:DdcWriteResultTimer) { $script:DdcWriteResultTimer.Stop() }; foreach ($timer in @($script:DeferredRefreshTimers)) { try { $timer.Stop() } catch {} }; $script:DeferredRefreshTimers = @(); Stop-UpdateCheckWorker; Stop-DisplayRecoveryEventPipeline; Stop-AutomationBridge; Stop-VerifiedVcpTransactionWorker -Cancel -WaitForCompletion; Stop-VcpWorker -Cancel; Stop-MonitorSettingsWorker -Cancel; Stop-CapabilitiesWorker -Cancel; Stop-DdcReportWorker -Cancel
     if ($script:FpsOverlayWindow) { try { $script:FpsOverlayWindow.Close() } catch {} }
     if ($script:HardwareMonitorComputer) { try { $script:HardwareMonitorComputer.Close() } catch {} }
     Dispose-TrayMode

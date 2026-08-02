@@ -53,6 +53,7 @@ A comprehensive Windows GUI utility for controlling monitor settings via DDC/CI 
 - **Headless Command Line** — List stable monitor identities, read or write any VCP code, apply profiles, and collect diagnostics without creating a WPF window; human-readable and schema-versioned JSON output share the GUI's verified-write and per-identity safety policy
 
 ### Advanced Features
+- **Notify-Only Update Checks** — Opt in under **System > Overview** to compare the installed version with the GitHub Releases API. The check uses an `ETag` cache, never downloads or executes files, and opens the release page only when you choose
 - **VCP Explorer** — Query and set any VCP code for advanced users
 - **VCP Code Scanner** — Discover which DDC/CI features your monitor supports, including extended MCCS codes for gamma, OSD controls, indicators, auxiliary power, and display modes
 - **Capabilities-Aware Controls** — Parses monitor `vcp(...)` capabilities, disables controls that are known unsupported, renders enumerated values as labelled pickers and continuous values as reported-range sliders, and can scan either reported capabilities or the full probe table
@@ -228,6 +229,14 @@ This is the same pinned lane used by CI. It gates a pure-ASCII check across ever
 ```powershell
 .\MonitorControlPro.ps1
 ```
+
+### Notify-Only Update Checks
+
+Update checks are disabled by default. To receive a quiet notice when a newer release is
+available, open **System > Overview** and enable **Check for updates (notify only)**. MonitorControl
+queries only the GitHub Releases API, caches its `ETag`, and never downloads or executes an update.
+Use **Open release** to review the release page yourself; **Dismiss** hides that version's notice.
+Disabling the checkbox stops all update-check requests.
 
 ### Command-Line Parameters
 ```powershell

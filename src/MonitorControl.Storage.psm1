@@ -293,6 +293,7 @@ function Initialize-MonitorControlSettingsDocumentRegistry {
         [PSCustomObject]@{ Name = "DdcTiming"; FileName = "ddc-timing.json"; CurrentVersion = 3; LegacyVersion = 1; MigrationHandler = "Import-DdcTimingSettings" }
         [PSCustomObject]@{ Name = "InputSources"; FileName = "input-sources.json"; CurrentVersion = 1; LegacyVersion = 0; MigrationHandler = "Import-InputSourceSettings" }
         [PSCustomObject]@{ Name = "UsbInputRules"; FileName = "usb-input-rules.json"; CurrentVersion = 1; LegacyVersion = 0; MigrationHandler = "Import-UsbInputRules" }
+        [PSCustomObject]@{ Name = "UpdateCheck"; FileName = "update-check.json"; CurrentVersion = 1; LegacyVersion = 0; MigrationHandler = "Import-UpdateCheckSettings" }
         [PSCustomObject]@{ Name = "ProfileTrash"; FileName = "trash/<record>.json"; CurrentVersion = 1; LegacyVersion = 1; MigrationHandler = "Restore-ProfileFromTrash" }
     ))
 }
@@ -854,4 +855,63 @@ function Import-OptionalHelperSettings {
     }
     if ($data.PSObject.Properties.Name -contains "CpuMonitorEnabled") { $script:CpuMonitorEnabled = [bool]$data.CpuMonitorEnabled }
     if ($data.PSObject.Properties.Name -contains "PresentMonEnabled") { $script:PresentMonEnabled = [bool]$data.PresentMonEnabled }
+}
+
+function Get-UpdateCheckSettingsObject {
+    return [PSCustomObject]@{
+        SchemaVersion = [int]$script:UpdateCheckSchemaVersion
+        Enabled = [bool]$script:UpdateCheckEnabled
+        ETag = [string]$script:UpdateCheckETag
+        LastCheckedUtc = [string]$script:UpdateCheckLastCheckedUtc
+        LastVersion = [string]$script:UpdateCheckLastVersion
+        LastReleaseUrl = [string]$script:UpdateCheckLastReleaseUrl
+        DismissedVersion = [string]$script:UpdateCheckDismissedVersion
+    }
+}
+
+function Save-UpdateCheckSettings {
+    return (Write-JsonFileSafely -Path $script:UpdateCheckSettingsPath -Data (Get-UpdateCheckSettingsObject) -Depth 4)
+}
+
+function Import-UpdateCheckSettings {
+    $script:UpdateCheckEnabled = $false
+    $script:UpdateCheckETag = ""
+    $script:UpdateCheckLastCheckedUtc = ""
+    $script:UpdateCheckLastVersion = ""
+    $script:UpdateCheckLastReleaseUrl = ""
+    $script:UpdateCheckDismissedVersion = ""
+    if ([string]::IsNullOrWhiteSpace([string]$script:UpdateCheckSettingsPath) -or -not (Test-Path -LiteralPath $script:UpdateCheckSettingsPath)) { return }
+    try {
+        $data = Read-JsonFileSafely -Path $script:UpdateCheckSettingsPath -Label "Update check settings"
+        if ($null -eq $data) { return }
+        $schema = if ($data.PSObject.Properties.Name -contains "SchemaVersion") { [int]$data.SchemaVersion } else { 0 }
+        if ($schema -gt [int]$script:UpdateCheckSchemaVersion) {
+            Set-DeferredStatus "Update check settings schema is newer than this app; update checks remain disabled"
+            return
+        }
+        if ($data.PSObject.Properties.Name -contains "Enabled") { $script:UpdateCheckEnabled = [bool]$data.Enabled }
+        $etag = [string](Get-ProfilePropertyValue -Object $data -Property "ETag" -Default "")
+        if ($etag.Length -le 512) { $script:UpdateCheckETag = $etag }
+        $checked = [string](Get-ProfilePropertyValue -Object $data -Property "LastCheckedUtc" -Default "")
+        $checkedAt = [DateTime]::MinValue
+        if ([string]::IsNullOrWhiteSpace($checked) -or [DateTime]::TryParse($checked, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$checkedAt)) {
+            $script:UpdateCheckLastCheckedUtc = $checked
+        }
+        $version = [string](Get-ProfilePropertyValue -Object $data -Property "LastVersion" -Default "")
+        $parsedVersion = $null
+        if ([version]::TryParse($version, [ref]$parsedVersion)) { $script:UpdateCheckLastVersion = $parsedVersion.ToString(3) }
+        $releaseUrl = [string](Get-ProfilePropertyValue -Object $data -Property "LastReleaseUrl" -Default "")
+        if ($releaseUrl -match '^https://github\.com/SysAdminDoc/MonitorControl/releases/tag/v[0-9]+\.[0-9]+\.[0-9]+$') { $script:UpdateCheckLastReleaseUrl = $releaseUrl }
+        $dismissed = [string](Get-ProfilePropertyValue -Object $data -Property "DismissedVersion" -Default "")
+        $parsedDismissed = $null
+        if ([version]::TryParse($dismissed, [ref]$parsedDismissed)) { $script:UpdateCheckDismissedVersion = $parsedDismissed.ToString(3) }
+    } catch {
+        $script:UpdateCheckEnabled = $false
+        $script:UpdateCheckETag = ""
+        $script:UpdateCheckLastCheckedUtc = ""
+        $script:UpdateCheckLastVersion = ""
+        $script:UpdateCheckLastReleaseUrl = ""
+        $script:UpdateCheckDismissedVersion = ""
+        Set-DeferredStatus "Update check settings were invalid; update checks are disabled"
+    }
 }
