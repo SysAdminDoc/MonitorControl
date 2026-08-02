@@ -250,6 +250,7 @@ function Initialize-MonitorControlSettingsDocumentRegistry {
         [PSCustomObject]@{ Name = "CapabilitiesCache"; FileName = "capabilities-cache.json"; CurrentVersion = 1; LegacyVersion = 0; MigrationHandler = "Import-CapabilitiesCache" }
         [PSCustomObject]@{ Name = "DdcTiming"; FileName = "ddc-timing.json"; CurrentVersion = 3; LegacyVersion = 1; MigrationHandler = "Import-DdcTimingSettings" }
         [PSCustomObject]@{ Name = "InputSources"; FileName = "input-sources.json"; CurrentVersion = 1; LegacyVersion = 0; MigrationHandler = "Import-InputSourceSettings" }
+        [PSCustomObject]@{ Name = "UsbInputRules"; FileName = "usb-input-rules.json"; CurrentVersion = 1; LegacyVersion = 0; MigrationHandler = "Import-UsbInputRules" }
         [PSCustomObject]@{ Name = "ProfileTrash"; FileName = "trash/<record>.json"; CurrentVersion = 1; LegacyVersion = 1; MigrationHandler = "Restore-ProfileFromTrash" }
     ))
 }
@@ -511,6 +512,41 @@ function Import-InputSourceSettings {
     } catch {
         $script:InputSourceOverrides = @{}
         Set-DeferredStatus "Input source settings were invalid; the built-in input table is in use"
+    }
+}
+
+function Get-UsbInputRulesObject {
+    return [PSCustomObject]@{
+        SchemaVersion = [int]$script:UsbInputRulesSchemaVersion
+        UpdatedAt = (Get-Date).ToString("o")
+        Enabled = [bool]$script:UsbInputTriggerEnabled
+        Rules = @($script:UsbInputRules)
+    }
+}
+
+function Save-UsbInputRules {
+    if (-not (Test-ProfileStorageWriteAllowed -Operation "USB input rule changes")) { return $false }
+    return (Write-JsonFileSafely -Path $script:UsbInputRulesPath -Data (Get-UsbInputRulesObject) -Depth 6)
+}
+
+function Import-UsbInputRules {
+    $script:UsbInputRules = @()
+    $script:UsbInputTriggerEnabled = $false
+    if ([string]::IsNullOrWhiteSpace([string]$script:UsbInputRulesPath)) { return }
+    if (-not (Test-Path -LiteralPath $script:UsbInputRulesPath)) { return }
+    try {
+        $data = Read-JsonFileSafely -Path $script:UsbInputRulesPath -Label "USB input rules" -ReadOnly:$script:ProfileStorageOffline
+        if ($null -eq $data) { return }
+        if (-not (Test-SettingsDocumentSupported -Name "UsbInputRules" -Document $data -Label "USB input rules")) { return }
+        $script:UsbInputRules = @(ConvertTo-UsbInputRules -Records @($data.Rules))
+        if ($data.PSObject.Properties.Name -contains "Enabled") { $script:UsbInputTriggerEnabled = [bool]$data.Enabled }
+        # An enabled trigger with no surviving rule listens to every device change for nothing;
+        # turn it off rather than leave a watcher running with no work.
+        if (@($script:UsbInputRules).Count -eq 0) { $script:UsbInputTriggerEnabled = $false }
+    } catch {
+        $script:UsbInputRules = @()
+        $script:UsbInputTriggerEnabled = $false
+        Set-DeferredStatus "USB input rules were invalid; USB input switching is off"
     }
 }
 

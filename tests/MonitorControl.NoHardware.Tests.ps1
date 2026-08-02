@@ -280,6 +280,20 @@ public static class MonitorControlVcpWriteProbe
         "Get-InputSourceSettingsObject",
         "Save-InputSourceSettings",
         "Import-InputSourceSettings",
+        "ConvertTo-UsbDeviceId",
+        "Get-UsbDeviceIdFromInterfacePath",
+        "Get-UsbInputRuleTriggerName",
+        "ConvertTo-UsbInputRuleTargets",
+        "ConvertTo-UsbInputRules",
+        "New-UsbInputRuleObject",
+        "Test-UsbInputRuleMatches",
+        "Test-UsbInputRuleSuppressed",
+        "Test-InputValueIsDisplayPort",
+        "Get-UsbInputSwitchPlan",
+        "Get-UsbInputRuleDescription",
+        "Get-UsbInputRulesObject",
+        "Save-UsbInputRules",
+        "Import-UsbInputRules",
         "Test-IsSelectedMonitor",
         "Get-MonitorEdidModelId",
         "Get-CapabilitiesBlocklistEntry",
@@ -918,7 +932,7 @@ Describe "Unified settings document registry" {
             "Profile", "ProfileBundle", "ProfileStorage", "MonitorIdentity", "AppProfileRules",
             "ProfileSchedules", "IdleDim", "BatteryProfile", "AutomationBridge", "CapabilitiesSafety",
             "CapabilitiesProbeSentinel", "VcpWriteSafety", "OptionalHelpers", "DisplayRestore",
-            "CapabilitiesCache", "DdcTiming", "InputSources", "ProfileTrash"
+            "CapabilitiesCache", "DdcTiming", "InputSources", "UsbInputRules", "ProfileTrash"
         )
         @($script:SettingsDocumentRegistry.Keys) | Should -Be $expected
         foreach ($definition in $script:SettingsDocumentRegistry.Values) {
@@ -1657,7 +1671,7 @@ Describe "Display recovery generation and identity safety" {
     It "wires display device resume and WMI events through one debounced request path" {
         $source = Get-Content -LiteralPath $script:AppPath -Raw
         $source | Should -Match '0x007E \{ \$reason = "display-change" \}'
-        $source | Should -Match '0x0219 \{ \$reason = "device-change" \}'
+        $source | Should -Match '0x0219 \{\s*\r?\n\s*\$reason = "device-change"'
         $source | Should -Match '\$powerEvent -in @\(0x0006, 0x0007, 0x0012\)'
         $source | Should -Match 'WmiMonitorBrightnessEvent'
         $source | Should -Match 'Request-DisplayRecoveryRefresh -Reason \$reason'
@@ -3637,6 +3651,198 @@ Describe "Profile percentage schema" {
     It "rejects a profile schema newer than this build" {
         $future = [PSCustomObject]@{ SchemaVersion = ($script:ProfileSchemaVersion + 1); Name = "Future" }
         { ConvertTo-CurrentProfileSchema -Profile $future -FallbackName "Future" } | Should -Throw
+    }
+}
+
+Describe "USB device triggers for input switching" {
+    BeforeEach {
+        $script:InputSourceOverrides = @{}
+        $script:RiskyVcpEnabledIdentityKeys = @{ "edid:left" = $true; "edid:right" = $true }
+        $script:UsbInputRules = @()
+        $script:UsbInputTriggerEnabled = $false
+        $script:UsbInputRulesSchemaVersion = [int]$script:SettingsDocumentRegistry.UsbInputRules.CurrentVersion
+        $script:UsbInputRulesPath = Join-Path $TestDrive "usb-input-rules.json"
+        $script:ProfileStorageOffline = $false
+        $script:ProfileMetadataFiles = @("usb-input-rules.json")
+        if (Test-Path -LiteralPath $script:UsbInputRulesPath) { Remove-Item -LiteralPath $script:UsbInputRulesPath -Force }
+        $script:PhysicalMonitors = @(
+            [PSCustomObject]@{ Name = "Left panel"; IdentityKey = "edid:left"; IdentityAliases = @("legacy:left"); Handle = [IntPtr]21 },
+            [PSCustomObject]@{ Name = "Right panel"; IdentityKey = "edid:right"; IdentityAliases = @(); Handle = [IntPtr]22 }
+        )
+        $script:UsbNow = [datetime]"2026-08-01T10:00:00Z"
+        $script:UsbRule = @(New-UsbInputRuleObject -DeviceId "046d:c52b" -Trigger "Arrival" -SuppressionSeconds 30 -AllowRiskyVcp $true -Targets @(
+            [PSCustomObject]@{ IdentityKey = "edid:left"; InputValue = 0x11 },
+            [PSCustomObject]@{ IdentityKey = "edid:right"; InputValue = 0x12 }
+        ))[0]
+    }
+
+    It "normalizes every device identifier shape people actually have to hand" {
+        ConvertTo-UsbDeviceId -Text "VID_046D&PID_C52B" | Should -Be "VID_046D&PID_C52B"
+        ConvertTo-UsbDeviceId -Text "vid_046d&pid_c52b" | Should -Be "VID_046D&PID_C52B"
+        ConvertTo-UsbDeviceId -Text "046d:c52b" | Should -Be "VID_046D&PID_C52B"
+        ConvertTo-UsbDeviceId -Text "046D-C52B" | Should -Be "VID_046D&PID_C52B"
+        ConvertTo-UsbDeviceId -Text "logitech" | Should -Be ""
+        ConvertTo-UsbDeviceId -Text "" | Should -Be ""
+    }
+
+    It "reads the identifier out of a device interface path and ignores a non-USB interface" {
+        Get-UsbDeviceIdFromInterfacePath -Path '\\?\USB#VID_046D&PID_C52B#5&1a2b3c#{a5dcbf10-6530-11d2-901f-00c04fb951ed}' | Should -Be "VID_046D&PID_C52B"
+        Get-UsbDeviceIdFromInterfacePath -Path '\\?\HID#VID_046D&PID_C52B#6&abc#{4d1e55b2-f16f-11cf-88cb-001111000030}' | Should -Be ""
+        Get-UsbDeviceIdFromInterfacePath -Path '\\?\SWD#MMDEVAPI#speakers' | Should -Be ""
+        Get-UsbDeviceIdFromInterfacePath -Path "" | Should -Be ""
+    }
+
+    It "matches only its own device and trigger" {
+        Test-UsbInputRuleMatches -Rule $script:UsbRule -DeviceId "046d:c52b" -Trigger "Arrival" | Should -BeTrue
+        Test-UsbInputRuleMatches -Rule $script:UsbRule -DeviceId "VID_046D&PID_C52B" -Trigger "Arrival" | Should -BeTrue
+        Test-UsbInputRuleMatches -Rule $script:UsbRule -DeviceId "046d:c52b" -Trigger "Removal" | Should -BeFalse
+        Test-UsbInputRuleMatches -Rule $script:UsbRule -DeviceId "1234:5678" -Trigger "Arrival" | Should -BeFalse
+        $script:UsbRule.Enabled = $false
+        Test-UsbInputRuleMatches -Rule $script:UsbRule -DeviceId "046d:c52b" -Trigger "Arrival" | Should -BeFalse
+    }
+
+    It "plans one switch per target display" {
+        $plan = Get-UsbInputSwitchPlan -Rule $script:UsbRule -Monitors $script:PhysicalMonitors -CurrentInputs @{} -NowUtc $script:UsbNow -LastFiredUtc $null
+
+        $plan.Suppressed | Should -BeFalse
+        @($plan.Entries | ForEach-Object { [string]$_.Action }) | Should -Be @("Switch", "Switch")
+        @($plan.Entries | ForEach-Object { [int]$_.WriteValue }) | Should -Be @(0x11, 0x12)
+    }
+
+    It "skips a display already on the target input" {
+        $plan = Get-UsbInputSwitchPlan -Rule $script:UsbRule -Monitors $script:PhysicalMonitors -CurrentInputs @{ "edid:left" = 0x11 } -NowUtc $script:UsbNow -LastFiredUtc $null
+
+        @($plan.Entries | Where-Object { [string]$_.IdentityKey -eq "edid:left" })[0].Action | Should -Be "AlreadyOnTarget"
+        @($plan.Entries | Where-Object { [string]$_.IdentityKey -eq "edid:right" })[0].Action | Should -Be "Switch"
+    }
+
+    It "compares a single-byte monitor's reported input on the low byte" {
+        $script:InputSourceOverrides["edid:left"] = [PSCustomObject]@{ IdentityKey = "edid:left"; SingleByteWrite = $true; Sources = @() }
+
+        $plan = Get-UsbInputSwitchPlan -Rule $script:UsbRule -Monitors $script:PhysicalMonitors -CurrentInputs @{ "edid:left" = 0x1100 } -NowUtc $script:UsbNow -LastFiredUtc $null
+
+        # 0x1100 masks to 0x00, which is not the target 0x11, so the switch must still happen.
+        @($plan.Entries | Where-Object { [string]$_.IdentityKey -eq "edid:left" })[0].Action | Should -Be "Switch"
+
+        $plan = Get-UsbInputSwitchPlan -Rule $script:UsbRule -Monitors $script:PhysicalMonitors -CurrentInputs @{ "edid:left" = 0x0F11 } -NowUtc $script:UsbNow -LastFiredUtc $null
+
+        @($plan.Entries | Where-Object { [string]$_.IdentityKey -eq "edid:left" })[0].Action | Should -Be "AlreadyOnTarget"
+    }
+
+    It "never claims a display is already on target when nothing has been read" {
+        $plan = Get-UsbInputSwitchPlan -Rule $script:UsbRule -Monitors $script:PhysicalMonitors -CurrentInputs $null -NowUtc $script:UsbNow -LastFiredUtc $null
+
+        @($plan.Entries | ForEach-Object { [string]$_.Action } | Select-Object -Unique) | Should -Be @("Switch")
+    }
+
+    It "suppresses a re-trigger inside the window and allows it after" {
+        $justFired = $script:UsbNow.AddSeconds(-5)
+        $longAgo = $script:UsbNow.AddSeconds(-45)
+
+        (Get-UsbInputSwitchPlan -Rule $script:UsbRule -Monitors $script:PhysicalMonitors -CurrentInputs @{} -NowUtc $script:UsbNow -LastFiredUtc $justFired).Suppressed | Should -BeTrue
+        (Get-UsbInputSwitchPlan -Rule $script:UsbRule -Monitors $script:PhysicalMonitors -CurrentInputs @{} -NowUtc $script:UsbNow -LastFiredUtc $longAgo).Suppressed | Should -BeFalse
+        (Get-UsbInputSwitchPlan -Rule $script:UsbRule -Monitors $script:PhysicalMonitors -CurrentInputs @{} -NowUtc $script:UsbNow -LastFiredUtc $null).Suppressed | Should -BeFalse
+    }
+
+    It "treats a zero-second window as no suppression at all" {
+        $script:UsbRule.SuppressionSeconds = 0
+
+        Test-UsbInputRuleSuppressed -Rule $script:UsbRule -LastFiredUtc $script:UsbNow -NowUtc $script:UsbNow | Should -BeFalse
+    }
+
+    It "refuses to switch a display whose identity is not unlocked for risky writes" {
+        $script:RiskyVcpEnabledIdentityKeys = @{ "edid:right" = $true }
+
+        $plan = Get-UsbInputSwitchPlan -Rule $script:UsbRule -Monitors $script:PhysicalMonitors -CurrentInputs @{} -NowUtc $script:UsbNow -LastFiredUtc $null
+
+        @($plan.Entries | Where-Object { [string]$_.IdentityKey -eq "edid:left" })[0].Action | Should -Be "NotUnlocked"
+        @($plan.Entries | Where-Object { [string]$_.IdentityKey -eq "edid:right" })[0].Action | Should -Be "Switch"
+    }
+
+    It "refuses every target when the rule itself has no risky-write consent" {
+        $script:UsbRule.AllowRiskyVcp = $false
+
+        $plan = Get-UsbInputSwitchPlan -Rule $script:UsbRule -Monitors $script:PhysicalMonitors -CurrentInputs @{} -NowUtc $script:UsbNow -LastFiredUtc $null
+
+        @($plan.Entries | ForEach-Object { [string]$_.Action } | Select-Object -Unique) | Should -Be @("NoRuleConsent")
+    }
+
+    It "resolves a target stored under a legacy identity alias" {
+        $rule = @(New-UsbInputRuleObject -DeviceId "046d:c52b" -Trigger "Arrival" -SuppressionSeconds 0 -AllowRiskyVcp $true -Targets @(
+            [PSCustomObject]@{ IdentityKey = "legacy:left"; InputValue = 0x11 }
+        ))[0]
+
+        $plan = Get-UsbInputSwitchPlan -Rule $rule -Monitors $script:PhysicalMonitors -CurrentInputs @{} -NowUtc $script:UsbNow -LastFiredUtc $null
+
+        @($plan.Entries)[0].IdentityKey | Should -Be "edid:left"
+        @($plan.Entries)[0].Action | Should -Be "Switch"
+    }
+
+    It "names a target display that is not connected instead of writing blindly" {
+        $rule = @(New-UsbInputRuleObject -DeviceId "046d:c52b" -Trigger "Arrival" -SuppressionSeconds 0 -AllowRiskyVcp $true -Targets @(
+            [PSCustomObject]@{ IdentityKey = "edid:gone"; InputValue = 0x11 }
+        ))[0]
+
+        $plan = Get-UsbInputSwitchPlan -Rule $rule -Monitors $script:PhysicalMonitors -CurrentInputs @{} -NowUtc $script:UsbNow -LastFiredUtc $null
+
+        @($plan.Entries)[0].Action | Should -Be "MonitorMissing"
+    }
+
+    It "identifies a DisplayPort target as the one-way switch it is" {
+        Test-InputValueIsDisplayPort -Value 0x0F | Should -BeTrue
+        Test-InputValueIsDisplayPort -Value 0x10 | Should -BeTrue
+        Test-InputValueIsDisplayPort -Value 0x11 | Should -BeFalse
+        Test-InputValueIsDisplayPort -Value 0x13 | Should -BeFalse
+    }
+
+    It "rejects a rule with no valid device, no targets, or an out-of-range value" {
+        @(ConvertTo-UsbInputRules -Records @([PSCustomObject]@{ DeviceId = "nonsense"; Targets = @([PSCustomObject]@{ IdentityKey = "edid:left"; InputValue = 0x11 }) })).Count | Should -Be 0
+        @(ConvertTo-UsbInputRules -Records @([PSCustomObject]@{ DeviceId = "046d:c52b"; Targets = @() })).Count | Should -Be 0
+        @(ConvertTo-UsbInputRules -Records @([PSCustomObject]@{ DeviceId = "046d:c52b"; Targets = @([PSCustomObject]@{ IdentityKey = "edid:left"; InputValue = 300 }) })).Count | Should -Be 0
+    }
+
+    It "clamps the suppression window and keeps the first of a duplicated target display" {
+        $rules = @(ConvertTo-UsbInputRules -Records @([PSCustomObject]@{
+            DeviceId = "046d:c52b"
+            SuppressionSeconds = 99999
+            Targets = @(
+                [PSCustomObject]@{ IdentityKey = "edid:left"; InputValue = 0x11 },
+                [PSCustomObject]@{ IdentityKey = "edid:left"; InputValue = 0x12 }
+            )
+        }))
+
+        $rules[0].SuppressionSeconds | Should -Be 3600
+        @($rules[0].Targets).Count | Should -Be 1
+        @($rules[0].Targets)[0].InputValue | Should -Be 0x11
+    }
+
+    It "persists rules and the enabled flag across a reload" {
+        $script:UsbInputRules = @($script:UsbRule)
+        $script:UsbInputTriggerEnabled = $true
+        Save-UsbInputRules | Should -BeTrue
+        (Get-Content -LiteralPath $script:UsbInputRulesPath -Raw | ConvertFrom-Json).SchemaVersion | Should -Be $script:UsbInputRulesSchemaVersion
+
+        $script:UsbInputRules = @()
+        $script:UsbInputTriggerEnabled = $false
+        Import-UsbInputRules
+
+        $script:UsbInputTriggerEnabled | Should -BeTrue
+        @($script:UsbInputRules).Count | Should -Be 1
+        $script:UsbInputRules[0].DeviceId | Should -Be "VID_046D&PID_C52B"
+        @($script:UsbInputRules[0].Targets).Count | Should -Be 2
+    }
+
+    It "turns the trigger off when every stored rule was rejected" {
+        Set-Content -LiteralPath $script:UsbInputRulesPath -Value (([PSCustomObject]@{
+            SchemaVersion = $script:UsbInputRulesSchemaVersion
+            Enabled = $true
+            Rules = @([PSCustomObject]@{ DeviceId = "nonsense"; Targets = @() })
+        } | ConvertTo-Json -Depth 6))
+
+        Import-UsbInputRules
+
+        @($script:UsbInputRules).Count | Should -Be 0
+        $script:UsbInputTriggerEnabled | Should -BeFalse
     }
 }
 
