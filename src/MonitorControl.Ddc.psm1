@@ -1303,8 +1303,64 @@ function New-DdcTimingProfile {
         NullMeansUnsupported = $false
         NullSemanticsClassifiedAt = ""
         NullProbeLastError = 0
+        SaveAfterWrite = $false
+        SavesIssued = 0
         UnsupportedCodes = @()
     }
+}
+
+# VCP 0xB0 value 0x01 is MCCS "save current settings". A documented class of panels accepts a
+# write, reports success, and then reverts on the next power cycle because the value was only
+# ever in volatile state - which looks like a hardware fault rather than a missing command.
+$script:VcpSaveSettingsCode = 0xB0
+$script:VcpSaveSettingsValue = 0x01
+# One save per identity per this window. A slider drag produces a write per notch, and the whole
+# reason the objection to DDC tools exists is EEPROM endurance - so the save, which is the write
+# that actually reaches the EEPROM, must be strictly rate limited rather than mirrored 1:1.
+$script:VcpSaveSettingsMinimumIntervalSeconds = 10
+# Seeded from ddcutil's per-model monitor notes. Users can set the flag on any identity; these
+# models get it without having to discover the behaviour themselves.
+$script:VcpSaveSettingsKnownModels = @("IVMPL2492H", "IVMPL2792Q")
+
+function Test-MonitorNeedsExplicitSave {
+    param($Monitor)
+    if ($null -eq $Monitor) { return $false }
+    $timingProfile = Get-DdcTimingProfile -IdentityKey ([string]$Monitor.IdentityKey)
+    if ($null -ne $timingProfile -and $timingProfile.PSObject.Properties.Name -contains "SaveAfterWrite" -and [bool]$timingProfile.SaveAfterWrite) { return $true }
+    $modelId = Get-MonitorEdidModelId -Monitor $Monitor
+    if ([string]::IsNullOrWhiteSpace($modelId)) { return $false }
+    return ($script:VcpSaveSettingsKnownModels -contains $modelId)
+}
+
+# Pure: which identities a completed transaction should follow with a save, given when each one
+# last saved. A save is pointless for a code that was never actually written, so only operations
+# whose write succeeded count.
+function Get-DdcSaveSettingsPlan {
+    param($Results, [datetime]$NowUtc, $LastSavedUtc)
+    $planned = @()
+    $seen = New-Object System.Collections.Generic.HashSet[string]
+    # Enumerated directly rather than through @(): the caller passes the transaction's own
+    # List[object], and wrapping that in an array subexpression throws "Argument types do not
+    # match" in Windows PowerShell 5.1.
+    $records = if ($null -eq $Results) { @() } elseif ($Results -is [System.Collections.IEnumerable] -and $Results -isnot [string]) { $Results } else { @($Results) }
+    foreach ($record in $records) {
+        if ($null -eq $record -or -not [bool]$record.WriteSuccess -or $null -eq $record.Operation) { continue }
+        if ([string]$record.Operation.Backend -eq "WMI") { continue }
+        if ([int]$record.Operation.Code -eq $script:VcpSaveSettingsCode) { continue }
+        $identityKey = [string]$record.Operation.IdentityKey
+        if ([string]::IsNullOrWhiteSpace($identityKey) -or -not $seen.Add($identityKey)) { continue }
+        if (-not (Test-MonitorNeedsExplicitSave -Monitor $record.Operation.Monitor)) { continue }
+        if ($null -ne $LastSavedUtc -and $LastSavedUtc.Contains($identityKey)) {
+            $elapsed = ($NowUtc - [datetime]$LastSavedUtc[$identityKey]).TotalSeconds
+            if ($elapsed -lt $script:VcpSaveSettingsMinimumIntervalSeconds) { continue }
+        }
+        $planned += [PSCustomObject]@{
+            IdentityKey = $identityKey
+            MonitorName = [string]$record.Operation.MonitorName
+            Operation = $record.Operation
+        }
+    }
+    return @($planned)
 }
 
 function Get-DdcTimingProfile {
@@ -1874,11 +1930,34 @@ function Invoke-VerifiedVcpTransaction {
     } else {
         "Verified"
     }
+    # The save runs only after every write in the transaction succeeded. Committing a partial
+    # transaction to non-volatile settings would make a rollback unable to undo itself.
+    $savedIdentities = @()
+    foreach ($save in @(Get-DdcSaveSettingsPlan -Results $results -NowUtc ([DateTime]::UtcNow) -LastSavedUtc $script:DdcSaveSettingsLastUtc)) {
+        $saveOperation = [PSCustomObject]@{
+            Monitor = $save.Operation.Monitor
+            MonitorName = [string]$save.MonitorName
+            IdentityKey = [string]$save.IdentityKey
+            Handle = $save.Operation.Handle
+            Code = [int]$script:VcpSaveSettingsCode
+            Value = [uint32]$script:VcpSaveSettingsValue
+            ReportedMaximum = [uint32]0
+            Backend = "DDC"
+        }
+        $saved = $false
+        try { $saved = [bool](& $WriteValue $saveOperation ([uint32]$script:VcpSaveSettingsValue)) } catch { $saved = $false }
+        if (-not $saved) { continue }
+        $script:DdcSaveSettingsLastUtc[[string]$save.IdentityKey] = [DateTime]::UtcNow
+        $timingProfile = Get-DdcTimingProfile -IdentityKey ([string]$save.IdentityKey)
+        $timingProfile | Add-Member -NotePropertyName SavesIssued -NotePropertyValue ([int]$timingProfile.SavesIssued + 1) -Force
+        $savedIdentities += [string]$save.IdentityKey
+    }
     return [PSCustomObject]@{
         Success = $true
         Outcome = $outcome
         Results = $results.ToArray()
         Rollback = "NotNeeded"
+        SavedIdentities = @($savedIdentities)
     }
 }
 
@@ -2325,6 +2404,8 @@ function New-DdcCompatibilityReport {
                 "Null remains retryable; classified $($timingProfile.NullSemanticsClassifiedAt)"
             }
             [void]$sb.AppendLine("    null-message semantics: $nullSemantics (probe Win32=$([int]$timingProfile.NullProbeLastError))")
+            $saveState = if ([bool]$timingProfile.SaveAfterWrite) { "on" } else { "off" }
+            [void]$sb.AppendLine("    explicit save after write (VCP 0xB0): $saveState; saves issued this session: $([int]$timingProfile.SavesIssued)")
             $unsupported = @($timingProfile.UnsupportedCodes)
             if ($unsupported.Count -gt 0) {
                 $codeText = ($unsupported | ForEach-Object { "0x{0:X2} (Win32 {1})" -f [int]$_.Code, [int]$_.LastError }) -join ", "

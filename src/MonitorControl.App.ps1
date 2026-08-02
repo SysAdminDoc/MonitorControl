@@ -1060,6 +1060,7 @@ $script:UsbInputRulesPath = ""
 $script:UsbInputRules = @()
 $script:UsbInputTriggerEnabled = $false
 $script:UsbInputRuleLastFiredUtc = @{}
+$script:DdcSaveSettingsLastUtc = @{}
 $script:UsbInputRuleTargetDraft = @()
 $script:UpdatingUsbInputUI = $false
 $script:UsbDeviceNotificationHandle = [IntPtr]::Zero
@@ -1310,6 +1311,7 @@ $script:UiStrings = @{
     "A11y.UsbInputConsent" = "USB rule risky write consent"
     "A11y.UsbInputEnabled" = "USB input switching enabled"
     "A11y.IdleDimMode" = "Idle measurement mode"
+    "A11y.DdcSaveAfterWrite" = "Save settings to the monitor after a write"
     "A11y.ProfileName" = "Profile name"
     "A11y.ProfilesList" = "Saved profiles"
     "A11y.ProfileCaptureAll" = "Capture all connected displays"
@@ -2445,6 +2447,7 @@ function Initialize-LocalizationAndAccessibility {
     Set-AccessibleName -Control $usbInputRiskyConsentCheckbox -Key "A11y.UsbInputConsent"
     Set-AccessibleName -Control $usbInputEnabledCheckbox -Key "A11y.UsbInputEnabled"
     Set-AccessibleName -Control $idleDimModeCombo -Key "A11y.IdleDimMode"
+    Set-AccessibleName -Control $ddcSaveAfterWriteCheckbox -Key "A11y.DdcSaveAfterWrite"
     Set-AccessibleName -Control $profileNameBox -Key "A11y.ProfileName"
     Set-AccessibleName -Control $profilesList -Key "A11y.ProfilesList"
     Set-AccessibleName -Control $profileCaptureAllCheckbox -Key "A11y.ProfileCaptureAll"
@@ -2526,7 +2529,7 @@ function Initialize-LocalizationAndAccessibility {
         $idleDimEnabledCheckbox,$idleDimMinutesBox,$idleDimBrightnessBox,$idleDimModeCombo,$idleDimRestoreCheckbox,$idleDimSaveBtn,
         $batteryProfileEnabledCheckbox,$batteryBrightnessBox,$acBrightnessBox,$batteryProfileSaveBtn,
         $displaySettingsBtn,$colorMgmtBtn,$gpuControlPanelBtn,$gammaRedSlider,$gammaGreenSlider,$gammaBlueSlider,$resetGammaBtn,$capabilitiesBox,
-        $capabilitiesClearCacheBtn,$ddcTimingAdaptiveRadio,$ddcTimingManualRadio,$ddcTimingReadRetriesBox,$ddcTimingWriteRetriesBox,$ddcTimingCapabilityRetriesBox,$ddcTimingResetBtn,$ddcValuesRereadBtn,$displayRestoreEnabledCheckbox,$cpuMonitorEnabledCheckbox,$presentMonEnabledCheckbox,$optionalHelperStatusBox,$capabilitiesDiscoveryEnabledCheckbox,$capabilitiesMaximumCompatibilityCheckbox,$capabilitiesExcludeCurrentBtn,$capabilitiesClearExclusionsBtn,$riskyVcpEnabledCheckbox,
+        $capabilitiesClearCacheBtn,$ddcTimingAdaptiveRadio,$ddcTimingManualRadio,$ddcTimingReadRetriesBox,$ddcTimingWriteRetriesBox,$ddcTimingCapabilityRetriesBox,$ddcTimingResetBtn,$ddcSaveAfterWriteCheckbox,$ddcValuesRereadBtn,$displayRestoreEnabledCheckbox,$cpuMonitorEnabledCheckbox,$presentMonEnabledCheckbox,$optionalHelperStatusBox,$capabilitiesDiscoveryEnabledCheckbox,$capabilitiesMaximumCompatibilityCheckbox,$capabilitiesExcludeCurrentBtn,$capabilitiesClearExclusionsBtn,$riskyVcpEnabledCheckbox,
         $automationBridgeEnabledCheckbox,$automationBridgeBindBox,$automationBridgePortBox,$automationBridgeKeyBox,$automationBridgeSaveBtn,
         $ddcReportGenerateBtn,$ddcReportCopyBtn,$ddcReportBox
     )
@@ -5125,9 +5128,12 @@ if ($CliWorker) {
                                                 <ComboBoxItem Content="Off - trust successful writes" Tag="Off"/>
                                             </ComboBox>
                                         </Grid>
-                                        <StackPanel Grid.Row="6" Orientation="Horizontal">
-                                            <Button x:Name="DdcTimingResetBtn" Content="Reset calibration" Style="{StaticResource Btn}"/>
-                                            <Button x:Name="DdcValuesRereadBtn" Content="Re-read values" Style="{StaticResource Btn}" Margin="8,0,0,0"/>
+                                        <StackPanel Grid.Row="6">
+                                            <StackPanel Orientation="Horizontal">
+                                                <Button x:Name="DdcTimingResetBtn" Content="Reset calibration" Style="{StaticResource Btn}"/>
+                                                <Button x:Name="DdcValuesRereadBtn" Content="Re-read values" Style="{StaticResource Btn}" Margin="8,0,0,0"/>
+                                            </StackPanel>
+                                            <CheckBox x:Name="DdcSaveAfterWriteCheckbox" Content="Save settings to the monitor after a write" Margin="0,12,0,0" ToolTip="Issue VCP 0xB0 after a successful write for a monitor that accepts a change and then reverts it. Rate limited so a slider drag cannot repeat it."/>
                                         </StackPanel>
                                         <TextBlock x:Name="DdcTimingEffectiveText" Grid.Row="8" Text="" TextWrapping="Wrap" Foreground="{DynamicResource TextBrush}"/>
                                         <TextBlock x:Name="DdcTimingWarningText" Grid.Row="10" Text="" TextWrapping="Wrap" Foreground="{DynamicResource WarningBrush}"/>
@@ -5359,7 +5365,7 @@ $gammaGreenSlider = $window.FindName("GammaGreenSlider"); $gammaGreenValue = $wi
 $gammaBlueSlider = $window.FindName("GammaBlueSlider"); $gammaBlueValue = $window.FindName("GammaBlueValue")
 $capabilitiesBox = $window.FindName("CapabilitiesBox"); $ddcReportBox = $window.FindName("DdcReportBox")
 $ddcTimingAdaptiveRadio = $window.FindName("DdcTimingAdaptiveRadio"); $ddcTimingManualRadio = $window.FindName("DdcTimingManualRadio")
-$ddcTimingResetBtn = $window.FindName("DdcTimingResetBtn"); $ddcValuesRereadBtn = $window.FindName("DdcValuesRereadBtn"); $ddcTimingEffectiveText = $window.FindName("DdcTimingEffectiveText")
+$ddcSaveAfterWriteCheckbox = $window.FindName("DdcSaveAfterWriteCheckbox"); $ddcTimingResetBtn = $window.FindName("DdcTimingResetBtn"); $ddcValuesRereadBtn = $window.FindName("DdcValuesRereadBtn"); $ddcTimingEffectiveText = $window.FindName("DdcTimingEffectiveText")
 $ddcTimingWarningText = $window.FindName("DdcTimingWarningText")
 $ddcTimingReadRetriesBox = $window.FindName("DdcTimingReadRetriesBox"); $ddcTimingWriteRetriesBox = $window.FindName("DdcTimingWriteRetriesBox")
 $ddcTimingCapabilityRetriesBox = $window.FindName("DdcTimingCapabilityRetriesBox"); $ddcVerifyPolicyCombo = $window.FindName("DdcVerifyPolicyCombo")
@@ -5444,6 +5450,17 @@ function Update-DdcTimingControls {
         $ddcTimingWriteRetriesBox.Text = [string][int]$timingProfile.WriteRetries
         $ddcTimingCapabilityRetriesBox.Text = [string][int]$timingProfile.CapabilityRetries
         if ($ddcVerifyPolicyCombo) { $ddcVerifyPolicyCombo.SelectedValue = [string]$timing.VerifyPolicy }
+        if ($ddcSaveAfterWriteCheckbox) {
+            $selectedMonitor = if ($script:CurrentMonitorIndex -ge 0 -and $script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) { $script:PhysicalMonitors[$script:CurrentMonitorIndex] } else { $null }
+            $ddcSaveAfterWriteCheckbox.IsChecked = [bool]$timingProfile.SaveAfterWrite
+            $ddcSaveAfterWriteCheckbox.IsEnabled = -not [string]::IsNullOrWhiteSpace($identityKey)
+            $seeded = $null -ne $selectedMonitor -and -not [bool]$timingProfile.SaveAfterWrite -and (Test-MonitorNeedsExplicitSave -Monitor $selectedMonitor)
+            $ddcSaveAfterWriteCheckbox.ToolTip = if ($seeded) {
+                "This model is known to need an explicit save, so saves are issued even with this box clear."
+            } else {
+                "Issue VCP 0xB0 after a successful write for a monitor that accepts a change and then reverts it. Rate limited so a slider drag cannot repeat it."
+            }
+        }
         $ddcTimingReadRetriesBox.IsEnabled = $true
         $ddcTimingWriteRetriesBox.IsEnabled = $true
         $ddcTimingCapabilityRetriesBox.IsEnabled = $true
@@ -10085,6 +10102,21 @@ $ddcTimingCapabilityRetriesBox.Add_LostFocus({ if (-not $script:UpdatingDdcTimin
 $ddcVerifyPolicyCombo.Add_SelectionChanged({
     if ($script:UpdatingDdcTimingUI -or $null -eq $ddcVerifyPolicyCombo.SelectedValue) { return }
     Set-DdcVerifyPolicyFromUi -Policy ([string]$ddcVerifyPolicyCombo.SelectedValue)
+})
+$ddcSaveAfterWriteCheckbox.Add_Click({
+    if ($script:UpdatingDdcTimingUI) { return }
+    $identityKey = Get-SelectedTimingIdentityKey
+    if ([string]::IsNullOrWhiteSpace($identityKey)) { return }
+    $timingProfile = Get-DdcTimingProfile -IdentityKey $identityKey
+    $enabled = [bool]$ddcSaveAfterWriteCheckbox.IsChecked
+    $timingProfile | Add-Member -NotePropertyName SaveAfterWrite -NotePropertyValue $enabled -Force
+    if (-not (Save-DdcTimingSettings)) {
+        $timingProfile | Add-Member -NotePropertyName SaveAfterWrite -NotePropertyValue (-not $enabled) -Force
+        Update-Status "Explicit-save setting could not be saved" -Severity Error -Key "Status.DdcSaveAfterWriteFailed"
+    } else {
+        Update-Status "Explicit save after write $(if ($enabled) { 'on' } else { 'off' }) for this display"
+    }
+    Update-DdcTimingControls
 })
 $displayRestoreEnabledCheckbox.Add_Checked({
     if ($script:UpdatingDisplayStateRestoreUI) { return }
