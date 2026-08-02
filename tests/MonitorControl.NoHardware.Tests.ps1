@@ -294,6 +294,9 @@ public static class MonitorControlVcpWriteProbe
         "Get-UsbInputRulesObject",
         "Save-UsbInputRules",
         "Import-UsbInputRules",
+        "Get-IdleDimModeName",
+        "Test-IdleDimMonitorIsActive",
+        "Get-IdleDimMonitorDecisions",
         "Test-IsSelectedMonitor",
         "Get-MonitorEdidModelId",
         "Get-CapabilitiesBlocklistEntry",
@@ -3651,6 +3654,102 @@ Describe "Profile percentage schema" {
     It "rejects a profile schema newer than this build" {
         $future = [PSCustomObject]@{ SchemaVersion = ($script:ProfileSchemaVersion + 1); Name = "Future" }
         { ConvertTo-CurrentProfileSchema -Profile $future -FallbackName "Future" } | Should -Throw
+    }
+}
+
+Describe "Per-monitor video-aware idle dimming" {
+    BeforeEach {
+        $script:IdleMonitors = @(
+            [PSCustomObject]@{ Name = "Left panel"; IdentityKey = "edid:left"; HMonitor = [IntPtr]901; Handle = [IntPtr]31 },
+            [PSCustomObject]@{ Name = "Right panel"; IdentityKey = "edid:right"; HMonitor = [IntPtr]902; Handle = [IntPtr]32 }
+        )
+    }
+
+    It "normalizes an unknown mode to the shipped system-wide behavior" {
+        Get-IdleDimModeName -Mode "System" | Should -Be "System"
+        Get-IdleDimModeName -Mode "Cursor" | Should -Be "Cursor"
+        Get-IdleDimModeName -Mode "ForegroundWindow" | Should -Be "ForegroundWindow"
+        Get-IdleDimModeName -Mode "nonsense" | Should -Be "System"
+        Get-IdleDimModeName -Mode "" | Should -Be "System"
+    }
+
+    It "dims every display in system mode, which is the default" {
+        $decisions = @(Get-IdleDimMonitorDecisions -Monitors $script:IdleMonitors -Mode "System" -IdleSeconds 900 -ThresholdSeconds 600 -ActiveMonitorHandle ([IntPtr]901) -DisplayRequired $false -RestoreOnActivity $true -ActiveStates @{})
+
+        @($decisions | ForEach-Object { [string]$_.Action }) | Should -Be @("Dim", "Dim")
+    }
+
+    It "spares the display the cursor is on and dims the rest" {
+        $decisions = @(Get-IdleDimMonitorDecisions -Monitors $script:IdleMonitors -Mode "Cursor" -IdleSeconds 900 -ThresholdSeconds 600 -ActiveMonitorHandle ([IntPtr]901) -DisplayRequired $false -RestoreOnActivity $true -ActiveStates @{})
+
+        @($decisions | Where-Object { [string]$_.IdentityKey -eq "edid:left" })[0].Action | Should -Be "None"
+        @($decisions | Where-Object { [string]$_.IdentityKey -eq "edid:right" })[0].Action | Should -Be "Dim"
+    }
+
+    It "spares nothing rather than dimming everything when the active display cannot be resolved" {
+        foreach ($handle in @([IntPtr]::Zero, $null)) {
+            $decisions = @(Get-IdleDimMonitorDecisions -Monitors $script:IdleMonitors -Mode "ForegroundWindow" -IdleSeconds 900 -ThresholdSeconds 600 -ActiveMonitorHandle $handle -DisplayRequired $false -RestoreOnActivity $true -ActiveStates @{})
+            @($decisions | ForEach-Object { [string]$_.Action } | Select-Object -Unique) | Should -Be @("None")
+        }
+    }
+
+    It "refuses to dim while an application holds the display awake" {
+        $decisions = @(Get-IdleDimMonitorDecisions -Monitors $script:IdleMonitors -Mode "System" -IdleSeconds 900 -ThresholdSeconds 600 -ActiveMonitorHandle ([IntPtr]::Zero) -DisplayRequired $true -RestoreOnActivity $true -ActiveStates @{})
+
+        @($decisions | ForEach-Object { [string]$_.Action } | Select-Object -Unique) | Should -Be @("None")
+        @($decisions)[0].Reason | Should -Be "a display-required inhibitor is active"
+    }
+
+    It "restores an already dimmed display when an inhibitor appears rather than stranding it dark" {
+        $states = @{ "edid:left" = [PSCustomObject]@{ PreviousBrightness = 70 } }
+
+        $decisions = @(Get-IdleDimMonitorDecisions -Monitors $script:IdleMonitors -Mode "System" -IdleSeconds 900 -ThresholdSeconds 600 -ActiveMonitorHandle ([IntPtr]::Zero) -DisplayRequired $true -RestoreOnActivity $true -ActiveStates $states)
+
+        $left = @($decisions | Where-Object { [string]$_.IdentityKey -eq "edid:left" })[0]
+        $left.Action | Should -Be "Restore"
+        $left.PreviousBrightness | Should -Be 70
+        $left.Reason | Should -Be "a display-required inhibitor is active"
+    }
+
+    It "restores each display to its own captured brightness" {
+        $states = @{
+            "edid:left" = [PSCustomObject]@{ PreviousBrightness = 70 }
+            "edid:right" = [PSCustomObject]@{ PreviousBrightness = 35 }
+        }
+
+        $decisions = @(Get-IdleDimMonitorDecisions -Monitors $script:IdleMonitors -Mode "System" -IdleSeconds 2 -ThresholdSeconds 600 -ActiveMonitorHandle ([IntPtr]::Zero) -DisplayRequired $false -RestoreOnActivity $true -ActiveStates $states)
+
+        @($decisions | Where-Object { [string]$_.IdentityKey -eq "edid:left" })[0].PreviousBrightness | Should -Be 70
+        @($decisions | Where-Object { [string]$_.IdentityKey -eq "edid:right" })[0].PreviousBrightness | Should -Be 35
+        @($decisions | ForEach-Object { [string]$_.Action } | Select-Object -Unique) | Should -Be @("Restore")
+    }
+
+    It "forgets the captured brightness instead of replaying it when restore is off" {
+        $states = @{ "edid:left" = [PSCustomObject]@{ PreviousBrightness = 70 } }
+
+        $decisions = @(Get-IdleDimMonitorDecisions -Monitors $script:IdleMonitors -Mode "System" -IdleSeconds 2 -ThresholdSeconds 600 -ActiveMonitorHandle ([IntPtr]::Zero) -DisplayRequired $false -RestoreOnActivity $false -ActiveStates $states)
+
+        @($decisions | Where-Object { [string]$_.IdentityKey -eq "edid:left" })[0].Action | Should -Be "Clear"
+    }
+
+    It "restores only the display the user moved onto and leaves the other dimmed" {
+        $states = @{
+            "edid:left" = [PSCustomObject]@{ PreviousBrightness = 70 }
+            "edid:right" = [PSCustomObject]@{ PreviousBrightness = 35 }
+        }
+
+        $decisions = @(Get-IdleDimMonitorDecisions -Monitors $script:IdleMonitors -Mode "Cursor" -IdleSeconds 900 -ThresholdSeconds 600 -ActiveMonitorHandle ([IntPtr]901) -DisplayRequired $false -RestoreOnActivity $true -ActiveStates $states)
+
+        @($decisions | Where-Object { [string]$_.IdentityKey -eq "edid:left" })[0].Action | Should -Be "Restore"
+        @($decisions | Where-Object { [string]$_.IdentityKey -eq "edid:right" })[0].Action | Should -Be "None"
+    }
+
+    It "skips a display with no stable identity" {
+        $monitors = @($script:IdleMonitors) + @([PSCustomObject]@{ Name = "Unidentified"; IdentityKey = ""; HMonitor = [IntPtr]903 })
+
+        $decisions = @(Get-IdleDimMonitorDecisions -Monitors $monitors -Mode "System" -IdleSeconds 900 -ThresholdSeconds 600 -ActiveMonitorHandle ([IntPtr]::Zero) -DisplayRequired $false -RestoreOnActivity $true -ActiveStates @{})
+
+        @($decisions).Count | Should -Be 2
     }
 }
 

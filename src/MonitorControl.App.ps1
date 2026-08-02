@@ -58,7 +58,56 @@ public class MonitorAPI
     public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
     [DllImport("kernel32.dll")]
     public static extern uint GetTickCount();
+    [DllImport("user32.dll")]
+    public static extern bool GetCursorPos(out POINT lpPoint);
+    [DllImport("user32.dll")]
+    public static extern IntPtr MonitorFromPoint(POINT pt, uint dwFlags);
+    [DllImport("user32.dll")]
+    public static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
+    [DllImport("powrprof.dll")]
+    public static extern int CallNtPowerInformation(int InformationLevel, IntPtr InputBuffer, int InputBufferSize, IntPtr OutputBuffer, int OutputBufferSize);
     public delegate bool MonitorEnumDelegate(IntPtr hMonitor, IntPtr hdcMonitor, ref RECT lprcMonitor, IntPtr dwData);
+
+    public const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
+    private const int SystemExecutionState = 16;
+    private const uint ES_DISPLAY_REQUIRED = 0x00000002;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct POINT { public int X; public int Y; }
+
+    // A full-screen video player or a presentation holds ES_DISPLAY_REQUIRED so Windows will not
+    // blank the screen. Reading the same flag is how idle dimming learns that "no input for ten
+    // minutes" does not mean "nobody is looking" - a movie generates no keystrokes.
+    public static bool IsDisplayRequired()
+    {
+        IntPtr buffer = Marshal.AllocHGlobal(4);
+        try {
+            Marshal.WriteInt32(buffer, 0);
+            // A non-zero NTSTATUS means the state could not be read; report false rather than
+            // guessing, so an unreadable state never silently disables dimming forever.
+            if (CallNtPowerInformation(SystemExecutionState, IntPtr.Zero, 0, buffer, 4) != 0) { return false; }
+            uint state = (uint)Marshal.ReadInt32(buffer);
+            return (state & ES_DISPLAY_REQUIRED) != 0;
+        } catch {
+            return false;
+        } finally {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    public static IntPtr GetCursorMonitorHandle()
+    {
+        POINT point;
+        if (!GetCursorPos(out point)) { return IntPtr.Zero; }
+        return MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
+    }
+
+    public static IntPtr GetForegroundWindowMonitorHandle()
+    {
+        IntPtr hwnd = GetForegroundWindow();
+        if (hwnd == IntPtr.Zero) { return IntPtr.Zero; }
+        return MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT { public int Left, Top, Right, Bottom; }
@@ -1260,6 +1309,7 @@ $script:UiStrings = @{
     "A11y.UsbInputWarnings" = "USB input switching warnings"
     "A11y.UsbInputConsent" = "USB rule risky write consent"
     "A11y.UsbInputEnabled" = "USB input switching enabled"
+    "A11y.IdleDimMode" = "Idle measurement mode"
     "A11y.ProfileName" = "Profile name"
     "A11y.ProfilesList" = "Saved profiles"
     "A11y.ProfileCaptureAll" = "Capture all connected displays"
@@ -1388,7 +1438,8 @@ $script:IdleDimBrightness = 20
 $script:IdleDimRestoreOnActivity = $true
 $script:IdleDimTimer = $null
 $script:IdleDimActive = $false
-$script:IdleDimPreviousBrightness = $null
+$script:IdleDimMode = "System"
+$script:IdleDimMonitorStates = @{}
 $script:UpdatingIdleDimUI = $false
 $script:BatteryProfileEnabled = $false
 $script:BatteryBrightness = 35
@@ -2393,6 +2444,7 @@ function Initialize-LocalizationAndAccessibility {
     Set-AccessibleName -Control $usbInputWarningText -Key "A11y.UsbInputWarnings"
     Set-AccessibleName -Control $usbInputRiskyConsentCheckbox -Key "A11y.UsbInputConsent"
     Set-AccessibleName -Control $usbInputEnabledCheckbox -Key "A11y.UsbInputEnabled"
+    Set-AccessibleName -Control $idleDimModeCombo -Key "A11y.IdleDimMode"
     Set-AccessibleName -Control $profileNameBox -Key "A11y.ProfileName"
     Set-AccessibleName -Control $profilesList -Key "A11y.ProfilesList"
     Set-AccessibleName -Control $profileCaptureAllCheckbox -Key "A11y.ProfileCaptureAll"
@@ -2471,7 +2523,7 @@ function Initialize-LocalizationAndAccessibility {
         $appProfileEnabledCheckbox,$appProfileExeBox,$appProfileCaptureBtn,$appProfileProfileCombo,$appProfileRiskyConsentCheckbox,$appProfileAddBtn,$appProfileRemoveBtn,$appProfileRulesList,
         $scheduleEnabledCheckbox,$scheduleTimeBox,$scheduleProfileCombo,$scheduleRiskyConsentCheckbox,$scheduleAddBtn,$scheduleRemoveBtn,$scheduleRulesList,
         $usbInputEnabledCheckbox,$usbInputDeviceBox,$usbInputTriggerCombo,$usbInputSuppressionBox,$usbInputRiskyConsentCheckbox,$usbInputMonitorCombo,$usbInputTargetInputCombo,$usbInputTargetAddBtn,$usbInputTargetRemoveBtn,$usbInputTargetList,$usbInputRulesList,$usbInputRuleAddBtn,$usbInputRuleRemoveBtn,
-        $idleDimEnabledCheckbox,$idleDimMinutesBox,$idleDimBrightnessBox,$idleDimRestoreCheckbox,$idleDimSaveBtn,
+        $idleDimEnabledCheckbox,$idleDimMinutesBox,$idleDimBrightnessBox,$idleDimModeCombo,$idleDimRestoreCheckbox,$idleDimSaveBtn,
         $batteryProfileEnabledCheckbox,$batteryBrightnessBox,$acBrightnessBox,$batteryProfileSaveBtn,
         $displaySettingsBtn,$colorMgmtBtn,$gpuControlPanelBtn,$gammaRedSlider,$gammaGreenSlider,$gammaBlueSlider,$resetGammaBtn,$capabilitiesBox,
         $capabilitiesClearCacheBtn,$ddcTimingAdaptiveRadio,$ddcTimingManualRadio,$ddcTimingReadRetriesBox,$ddcTimingWriteRetriesBox,$ddcTimingCapabilityRetriesBox,$ddcTimingResetBtn,$ddcValuesRereadBtn,$displayRestoreEnabledCheckbox,$cpuMonitorEnabledCheckbox,$presentMonEnabledCheckbox,$optionalHelperStatusBox,$capabilitiesDiscoveryEnabledCheckbox,$capabilitiesMaximumCompatibilityCheckbox,$capabilitiesExcludeCurrentBtn,$capabilitiesClearExclusionsBtn,$riskyVcpEnabledCheckbox,
@@ -4921,7 +4973,10 @@ if ($CliWorker) {
                             <StackPanel><TextBlock Text="After (min)" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,0,0,6"/><TextBox x:Name="IdleDimMinutesBox" Text="10"/></StackPanel>
                             <StackPanel Grid.Column="2"><TextBlock Text="Dim to (%)" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,0,0,6"/><TextBox x:Name="IdleDimBrightnessBox" Text="20"/></StackPanel>
                         </Grid>
-                        <CheckBox x:Name="IdleDimRestoreCheckbox" Grid.Row="4" Content="Restore brightness after activity" VerticalAlignment="Center"/>
+                        <StackPanel Grid.Row="4"><TextBlock Text="Idle is measured" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,0,0,6"/>
+                            <ComboBox x:Name="IdleDimModeCombo" Margin="0,0,0,12"/>
+                            <CheckBox x:Name="IdleDimRestoreCheckbox" Content="Restore brightness after activity" VerticalAlignment="Center"/>
+                            <TextBlock Text="Dimming is suppressed while an application holds the display awake, such as full-screen video or a presentation." TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,10,0,0"/></StackPanel>
                         <Button x:Name="IdleDimSaveBtn" Grid.Row="6" Content="Save" Style="{StaticResource AccBtn}" HorizontalAlignment="Right" MinWidth="120"/>
                     </Grid></Border>
                     <Border Grid.Column="2" Style="{StaticResource PageCard}"><Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="14"/><RowDefinition Height="Auto"/><RowDefinition Height="26"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
@@ -4940,7 +4995,7 @@ if ($CliWorker) {
                     <TextBlock Grid.Row="2" Text="Follow a USB switch box: when the named device arrives or is removed, send each listed display to its input." TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource MutedTextBrush}"/>
                     <Grid Grid.Row="4"><Grid.ColumnDefinitions><ColumnDefinition Width="2*"/><ColumnDefinition Width="10"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="10"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="10"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                         <StackPanel><TextBlock Text="USB device (VID_046D&amp;PID_C52B or 046d:c52b)" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,0,0,6"/><TextBox x:Name="UsbInputDeviceBox"/></StackPanel>
-                        <StackPanel Grid.Column="2" MinWidth="120"><TextBlock Text="Trigger" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,0,0,6"/><ComboBox x:Name="UsbInputTriggerCombo"><ComboBoxItem Content="Arrival" IsSelected="True"/><ComboBoxItem Content="Removal"/></ComboBox></StackPanel>
+                        <StackPanel Grid.Column="2" MinWidth="120"><TextBlock Text="Trigger" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,0,0,6"/><ComboBox x:Name="UsbInputTriggerCombo"/></StackPanel>
                         <StackPanel Grid.Column="4" MinWidth="90"><TextBlock Text="Suppress (s)" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,0,0,6"/><TextBox x:Name="UsbInputSuppressionBox" Text="10"/></StackPanel>
                         <CheckBox x:Name="UsbInputRiskyConsentCheckbox" Grid.Column="6" Content="Risky writes" VerticalAlignment="Bottom" Margin="0,0,0,8" FontSize="12" ToolTip="Separate rule-level consent; every target monitor identity must also be unlocked in System."/>
                     </Grid>
@@ -5293,7 +5348,8 @@ $usbInputRulesList = $window.FindName("UsbInputRulesList"); $usbInputRuleAddBtn 
 $scheduleTimelineCanvas = $window.FindName("ScheduleTimelineCanvas")
 $idleDimEnabledCheckbox = $window.FindName("IdleDimEnabledCheckbox"); $idleDimStatusText = $window.FindName("IdleDimStatusText")
 $idleDimMinutesBox = $window.FindName("IdleDimMinutesBox"); $idleDimBrightnessBox = $window.FindName("IdleDimBrightnessBox")
-$idleDimRestoreCheckbox = $window.FindName("IdleDimRestoreCheckbox"); $idleDimSaveBtn = $window.FindName("IdleDimSaveBtn")
+$idleDimRestoreCheckbox = $window.FindName("IdleDimRestoreCheckbox")
+$idleDimModeCombo = $window.FindName("IdleDimModeCombo"); $idleDimSaveBtn = $window.FindName("IdleDimSaveBtn")
 $batteryProfileEnabledCheckbox = $window.FindName("BatteryProfileEnabledCheckbox"); $batteryProfileStatusText = $window.FindName("BatteryProfileStatusText")
 $batteryBrightnessBox = $window.FindName("BatteryBrightnessBox"); $acBrightnessBox = $window.FindName("AcBrightnessBox"); $batteryProfileSaveBtn = $window.FindName("BatteryProfileSaveBtn")
 $displaySettingsBtn = $window.FindName("DisplaySettingsBtn"); $colorMgmtBtn = $window.FindName("ColorMgmtBtn"); $gpuControlPanelBtn = $window.FindName("GpuControlPanelBtn")
@@ -7992,7 +8048,8 @@ function Reset-ProfileBackedAutomationState {
     $script:IdleDimBrightness = 20
     $script:IdleDimRestoreOnActivity = $true
     $script:IdleDimActive = $false
-    $script:IdleDimPreviousBrightness = $null
+    $script:IdleDimMode = "System"
+    $script:IdleDimMonitorStates = @{}
     $script:BatteryProfileEnabled = $false
     $script:BatteryBrightness = 35
     $script:AcBrightness = 75
@@ -8740,6 +8797,7 @@ function Load-IdleDimSettings {
         $script:IdleDimMinutes = [Math]::Max(1, [Math]::Min(240, [int]$data.Minutes))
         $script:IdleDimBrightness = [Math]::Max(0, [Math]::Min(100, [int]$data.Brightness))
         $script:IdleDimRestoreOnActivity = [bool]$data.RestoreOnActivity
+        if ($data.PSObject.Properties.Name -contains "Mode") { $script:IdleDimMode = Get-IdleDimModeName -Mode ([string]$data.Mode) }
     } catch {
         Update-Status "Idle dim settings could not be loaded"
     }
@@ -8753,6 +8811,7 @@ function Save-IdleDimSettings {
         Minutes = [int]$script:IdleDimMinutes
         Brightness = [int]$script:IdleDimBrightness
         RestoreOnActivity = [bool]$script:IdleDimRestoreOnActivity
+        Mode = [string](Get-IdleDimModeName -Mode $script:IdleDimMode)
     }
     return (Write-JsonFileSafely -Path $script:IdleDimSettingsPath -Data $payload -Depth 4)
 }
@@ -8765,7 +8824,13 @@ function Update-IdleDimControls {
         $idleDimMinutesBox.Text = ([int]$script:IdleDimMinutes).ToString()
         $idleDimBrightnessBox.Text = ([int]$script:IdleDimBrightness).ToString()
         $idleDimRestoreCheckbox.IsChecked = [bool]$script:IdleDimRestoreOnActivity
-        $idleDimStatusText.Text = if ($script:IdleDimEnabled) { if ($script:IdleDimActive) { "Dimmed" } else { "Watching" } } else { "Off" }
+        if ($null -ne $idleDimModeCombo) {
+            $modeName = Get-IdleDimModeName -Mode $script:IdleDimMode
+            $modeItem = @($idleDimModeCombo.Items | Where-Object { [string]$_.Tag -eq $modeName } | Select-Object -First 1)
+            if ($modeItem.Count -gt 0) { $idleDimModeCombo.SelectedItem = $modeItem[0] }
+        }
+        $dimmedCount = $script:IdleDimMonitorStates.Count
+        $idleDimStatusText.Text = if (-not $script:IdleDimEnabled) { "Off" } elseif ($dimmedCount -gt 0) { "Dimmed on $dimmedCount" } else { "Watching" }
     } finally {
         $script:UpdatingIdleDimUI = $false
     }
@@ -8779,6 +8844,9 @@ function Read-IdleDimSettingsFromUI {
     $script:IdleDimMinutes = [Math]::Max(1, [Math]::Min(240, $minutes))
     $script:IdleDimBrightness = [Math]::Max(0, [Math]::Min(100, $brightness))
     $script:IdleDimRestoreOnActivity = [bool]$idleDimRestoreCheckbox.IsChecked
+    if ($null -ne $idleDimModeCombo -and $null -ne $idleDimModeCombo.SelectedItem) {
+        $script:IdleDimMode = Get-IdleDimModeName -Mode ([string]$idleDimModeCombo.SelectedItem.Tag)
+    }
     Update-IdleDimControls
     return $true
 }
@@ -8802,30 +8870,102 @@ function Get-IdleSeconds {
     return Get-IdleSecondsFromTicks -CurrentTick ([MonitorAPI]::GetTickCount()) -LastInputTick $info.dwTime
 }
 
+# A ComboBoxItem declared in XAML keeps its literal Content forever: the localization sweep
+# skips ListBoxItem and ComboBoxItem content because those normally carry runtime data such as
+# monitor labels. A fixed set of choices therefore has to be built here, with the invariant
+# value in Tag so no handler ever has to read displayed text back.
+function Add-LocalizedComboChoices {
+    param($Combo, [string]$Category, $Choices, [string]$SelectedTag)
+    if ($null -eq $Combo) { return }
+    $Combo.Items.Clear()
+    foreach ($choice in @($Choices)) {
+        $item = New-Object System.Windows.Controls.ComboBoxItem
+        $item.Content = Get-UiRuntimeText -Category $Category -DefaultText ([string]$choice.Text) -Key ([string]$choice.Key)
+        $item.Tag = [string]$choice.Tag
+        $Combo.Items.Add($item) | Out-Null
+        if ([string]$choice.Tag -eq $SelectedTag) { $Combo.SelectedItem = $item }
+    }
+    if ($null -eq $Combo.SelectedItem -and $Combo.Items.Count -gt 0) { $Combo.SelectedIndex = 0 }
+}
+
+function Initialize-FixedChoiceCombos {
+    Add-LocalizedComboChoices -Combo $idleDimModeCombo -Category "Choice" -SelectedTag (Get-IdleDimModeName -Mode $script:IdleDimMode) -Choices @(
+        [PSCustomObject]@{ Tag = "System"; Key = "Choice.IdleDimMode.System"; Text = "System-wide (dim every display)" },
+        [PSCustomObject]@{ Tag = "Cursor"; Key = "Choice.IdleDimMode.Cursor"; Text = "By cursor location (spare the display the pointer is on)" },
+        [PSCustomObject]@{ Tag = "ForegroundWindow"; Key = "Choice.IdleDimMode.ForegroundWindow"; Text = "By foreground window (spare the display in use)" }
+    )
+    Add-LocalizedComboChoices -Combo $usbInputTriggerCombo -Category "Choice" -SelectedTag "Arrival" -Choices @(
+        [PSCustomObject]@{ Tag = "Arrival"; Key = "Choice.UsbTrigger.Arrival"; Text = "Arrival" },
+        [PSCustomObject]@{ Tag = "Removal"; Key = "Choice.UsbTrigger.Removal"; Text = "Removal" }
+    )
+}
+
+function Get-IdleDimActiveMonitorHandle {
+    switch (Get-IdleDimModeName -Mode $script:IdleDimMode) {
+        "Cursor" { return [MonitorAPI]::GetCursorMonitorHandle() }
+        "ForegroundWindow" { return [MonitorAPI]::GetForegroundWindowMonitorHandle() }
+        default { return [IntPtr]::Zero }
+    }
+}
+
+function Get-MonitorBrightnessPercent {
+    param($Monitor)
+    if ($null -eq $Monitor) { return $null }
+    $observation = Get-MonitorVcpObservation -Monitor $Monitor -Code ([int][MonitorAPI]::VCP_BRIGHTNESS)
+    if ($null -eq $observation) {
+        if (Test-IsSelectedMonitor -Monitor $Monitor) { return [int](Get-SelectedBrightnessPercent) }
+        return $null
+    }
+    return [int](ConvertTo-VcpPercent -RawValue ([double]$observation.Current) -Maximum ([int]$observation.Maximum))
+}
+
 function Invoke-IdleDimCheck {
     if (-not $script:IdleDimEnabled) { return }
     $idleSeconds = Get-IdleSeconds
     $thresholdSeconds = [Math]::Max(1, [int]$script:IdleDimMinutes) * 60
-    if (-not $script:IdleDimActive -and $idleSeconds -ge $thresholdSeconds) {
-        $script:IdleDimPreviousBrightness = [int](Get-SelectedBrightnessPercent)
-        Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value ([uint32]$script:IdleDimBrightness) -Force -Percent
-        Set-BrightnessSliderFromPercent -Percent ([int]$script:IdleDimBrightness) | Out-Null
-        $script:IdleDimActive = $true
-        Update-IdleDimControls
-        Update-TrayPopupState
-        Update-TrayIconText
-        Update-Status "Idle dim active"
-    } elseif ($script:IdleDimActive -and $idleSeconds -lt 5) {
-        if ($script:IdleDimRestoreOnActivity -and $null -ne $script:IdleDimPreviousBrightness) {
-            Set-VCPValueWithSync -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value ([uint32]$script:IdleDimPreviousBrightness) -Force -Percent
-            Set-BrightnessSliderFromPercent -Percent ([int]$script:IdleDimPreviousBrightness) | Out-Null
+    $displayRequired = $false
+    try { $displayRequired = [bool][MonitorAPI]::IsDisplayRequired() } catch { $displayRequired = $false }
+    $decisions = @(Get-IdleDimMonitorDecisions -Monitors $script:PhysicalMonitors -Mode $script:IdleDimMode `
+        -IdleSeconds $idleSeconds -ThresholdSeconds $thresholdSeconds `
+        -ActiveMonitorHandle (Get-IdleDimActiveMonitorHandle) -DisplayRequired $displayRequired `
+        -RestoreOnActivity ([bool]$script:IdleDimRestoreOnActivity) -ActiveStates $script:IdleDimMonitorStates)
+    $dimmed = 0
+    $restored = 0
+    foreach ($decision in $decisions) {
+        $identityKey = [string]$decision.IdentityKey
+        $monitor = $decision.Monitor
+        if ([string]$decision.Action -eq "Dim") {
+            $previous = Get-MonitorBrightnessPercent -Monitor $monitor
+            if ($null -eq $previous) { continue }
+            Set-VCPValueWithSync -Handle ([IntPtr]$monitor.Handle) -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value ([uint32]$script:IdleDimBrightness) -MonitorName ([string]$monitor.Name) -Force -Percent | Out-Null
+            $script:IdleDimMonitorStates[$identityKey] = [PSCustomObject]@{ PreviousBrightness = [int]$previous }
+            if (Test-IsSelectedMonitor -Monitor $monitor) { Set-BrightnessSliderFromPercent -Percent ([int]$script:IdleDimBrightness) | Out-Null }
+            $dimmed++
+        } elseif ([string]$decision.Action -eq "Restore") {
+            $previous = [int]$decision.PreviousBrightness
+            Set-VCPValueWithSync -Handle ([IntPtr]$monitor.Handle) -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value ([uint32]$previous) -MonitorName ([string]$monitor.Name) -Force -Percent | Out-Null
+            $null = $script:IdleDimMonitorStates.Remove($identityKey)
+            if (Test-IsSelectedMonitor -Monitor $monitor) { Set-BrightnessSliderFromPercent -Percent $previous | Out-Null }
+            $restored++
+        } elseif ([string]$decision.Action -eq "Clear") {
+            # Restore-on-activity is off, so the dimmed level is now the user's level. Forget the
+            # previous value rather than replay it the next time the display goes idle.
+            $null = $script:IdleDimMonitorStates.Remove($identityKey)
+            $restored++
         }
-        $script:IdleDimActive = $false
-        $script:IdleDimPreviousBrightness = $null
-        Update-IdleDimControls
-        Update-TrayPopupState
-        Update-TrayIconText
-        Update-Status "Idle dim restored"
+    }
+    $wasActive = [bool]$script:IdleDimActive
+    $script:IdleDimActive = $script:IdleDimMonitorStates.Count -gt 0
+    if ($dimmed -eq 0 -and $restored -eq 0 -and $wasActive -eq $script:IdleDimActive) { return }
+    Update-IdleDimControls
+    Update-TrayPopupState
+    Update-TrayIconText
+    if ($dimmed -gt 0) {
+        Update-Status "Idle dim active on $dimmed display(s)"
+    } elseif ($restored -gt 0) {
+        $reason = @($decisions | Where-Object { [string]$_.Action -in @("Restore", "Clear") -and -not [string]::IsNullOrWhiteSpace([string]$_.Reason) } | Select-Object -First 1)
+        $reasonText = if ($reason.Count -gt 0) { " ($([string]$reason[0].Reason))" } else { "" }
+        Update-Status "Idle dim restored on $restored display(s)$reasonText"
     }
 }
 
@@ -9524,7 +9664,7 @@ $usbInputRuleAddBtn.Add_Click({
         Update-Status "Suppression window must be 0-3600 seconds" -Severity Error -Key "Status.UsbInputSuppressionInvalid"
         return
     }
-    $trigger = if ($null -ne $usbInputTriggerCombo.SelectedItem) { [string]$usbInputTriggerCombo.SelectedItem.Content } else { "Arrival" }
+    $trigger = if ($null -ne $usbInputTriggerCombo.SelectedItem) { Get-UsbInputRuleTriggerName -Trigger ([string]$usbInputTriggerCombo.SelectedItem.Tag) } else { "Arrival" }
     $rules = @(New-UsbInputRuleObject -DeviceId $deviceId -Trigger $trigger -SuppressionSeconds $suppression -AllowRiskyVcp ([bool]$usbInputRiskyConsentCheckbox.IsChecked) -Targets $script:UsbInputRuleTargetDraft)
     if ($rules.Count -eq 0) {
         Update-Status "The USB rule was rejected as invalid" -Severity Error -Key "Status.UsbInputRuleInvalid"
@@ -10307,7 +10447,7 @@ function Export-NavigationRenders {
 }
 
 # Initialize
-Initialize-WmiBrightness; Load-MonitorIdentitySettings; Import-CapabilitySafetyState; Import-VcpWriteSafetyState; Import-InputSourceSettings; Import-UsbInputRules; Import-OptionalHelperSettings; Import-DisplayStateRestoreSettings; Import-CapabilitiesCache; Import-DdcTimingSettings; Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList; Update-UsbInputControls
+Initialize-WmiBrightness; Load-MonitorIdentitySettings; Import-CapabilitySafetyState; Import-VcpWriteSafetyState; Import-InputSourceSettings; Import-UsbInputRules; Import-OptionalHelperSettings; Import-DisplayStateRestoreSettings; Import-CapabilitiesCache; Import-DdcTimingSettings; Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Initialize-FixedChoiceCombos; Load-MonitorSettings; Update-ProfilesList; Update-UsbInputControls
 Load-AppProfileRules; Update-AppProfileControls; Start-AppProfileWatcher
 Load-ProfileSchedules; Update-ScheduleControls; Start-ProfileScheduleWatcher
 Load-IdleDimSettings; Update-IdleDimControls; Start-IdleDimWatcher

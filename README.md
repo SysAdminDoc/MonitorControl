@@ -283,6 +283,19 @@ Safety and behavior:
 ### Idle Dim
 - Open the **Automation** tab and enable **Idle dim**
 - Set the idle threshold in minutes, target brightness, and whether activity should restore the previous brightness
+- **Idle is measured** chooses what "idle" means:
+  - *System-wide* dims every display once there has been no input anywhere. This is the default and the behavior earlier versions had.
+  - *By cursor location* spares the display the pointer is on and dims the others.
+  - *By foreground window* spares the display holding the active window and dims the others.
+- Each display remembers and restores its own brightness, so dimming an unused display never
+  changes the level of the one in use
+- Dimming is suppressed while any application holds the display-required execution state - the
+  same signal that stops Windows blanking the screen during full-screen video or a presentation.
+  A film generates no keystrokes, so without this a system-wide idle timer dims the display you
+  are watching. If an inhibitor appears while a display is already dimmed, the display is restored
+  rather than left dark
+- If the cursor or foreground display cannot be resolved, nothing is dimmed rather than
+  everything - a wrong dim is more disruptive than a missed one
 - Settings are saved in `%APPDATA%\MonitorControlPro\idle-dim.json`
 
 ### Local Automation Bridge
