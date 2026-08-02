@@ -592,6 +592,60 @@ public sealed class MonitorControlLiveRegionProbe : IDisposable
         if ($applyPreview.Current.IsOffscreen) { throw "The profile apply preview was offscreen on the Profiles page." }
     }
 
+    # The USB input rule editor writes to hardware from a background event, so its consent and
+    # its enable gate are the controls worth proving exist and start off.
+    $automationTab = Get-TabByName -Root $root -Name (Get-SmokeUiText -Text "Automation")
+    $automationTabPattern = $null
+    if ($automationTab.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$automationTabPattern)) {
+        ([System.Windows.Automation.SelectionItemPattern]$automationTabPattern).Select()
+        Start-Sleep -Milliseconds 200
+        foreach ($usbEditName in @("USB device identifier", "USB suppression window in seconds")) {
+            if ($null -eq (Get-ControlByName -Root $root -Name (Get-SmokeUiText -Text $usbEditName) -ControlType ([System.Windows.Automation.ControlType]::Edit))) {
+                throw "The USB input rule field '$usbEditName' was not exposed through UI Automation."
+            }
+        }
+        foreach ($usbComboName in @("USB trigger event", "USB rule target display", "USB rule target input")) {
+            if ($null -eq (Get-ControlByName -Root $root -Name (Get-SmokeUiText -Text $usbComboName) -ControlType ([System.Windows.Automation.ControlType]::ComboBox))) {
+                throw "The USB input rule picker '$usbComboName' was not exposed through UI Automation."
+            }
+        }
+        if ($null -eq (Get-ControlByName -Root $root -Name (Get-SmokeUiText -Text "USB input switching rules") -ControlType ([System.Windows.Automation.ControlType]::List))) {
+            throw "The USB input rule list was not exposed through UI Automation."
+        }
+        $usbEnabled = Get-ControlByName -Root $root -Name (Get-SmokeUiText -Text "USB input switching enabled") -ControlType ([System.Windows.Automation.ControlType]::CheckBox)
+        if ($null -eq $usbEnabled) { throw "The USB input switching enable toggle was not exposed through UI Automation." }
+        $usbEnabledPattern = $null
+        if (-not $usbEnabled.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern, [ref]$usbEnabledPattern)) {
+            throw "The USB input switching enable toggle does not expose TogglePattern."
+        }
+        if (([System.Windows.Automation.TogglePattern]$usbEnabledPattern).Current.ToggleState -ne [System.Windows.Automation.ToggleState]::Off) {
+            throw "USB input switching must default to off; it writes to hardware from a background event."
+        }
+        $usbConsent = Get-ControlByName -Root $root -Name (Get-SmokeUiText -Text "USB rule risky write consent") -ControlType ([System.Windows.Automation.ControlType]::CheckBox)
+        if ($null -eq $usbConsent) { throw "The USB rule risky-write consent control was not exposed through UI Automation." }
+        $usbConsentPattern = $null
+        if (-not $usbConsent.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern, [ref]$usbConsentPattern)) {
+            throw "The USB rule risky-write consent control does not expose TogglePattern."
+        }
+        if (([System.Windows.Automation.TogglePattern]$usbConsentPattern).Current.ToggleState -ne [System.Windows.Automation.ToggleState]::Off) {
+            throw "Rule-level risky-write consent must default to off."
+        }
+        # Adding a rule with no device identifier must be refused, not silently accepted.
+        $usbAddButton = Get-ControlByName -Root $root -Name (Get-SmokeUiText -Text "Add rule") -ControlType ([System.Windows.Automation.ControlType]::Button)
+        if ($null -eq $usbAddButton) { throw "The USB rule add action was not exposed through UI Automation." }
+        $usbAddPattern = $null
+        if (-not $usbAddButton.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$usbAddPattern)) {
+            throw "The USB rule add action does not expose InvokePattern."
+        }
+        ([System.Windows.Automation.InvokePattern]$usbAddPattern).Invoke()
+        Start-Sleep -Milliseconds 300
+        $root = [System.Windows.Automation.AutomationElement]::FromHandle($appWindowHandle)
+        $usbRuleList = Get-ControlByName -Root $root -Name (Get-SmokeUiText -Text "USB input switching rules") -ControlType ([System.Windows.Automation.ControlType]::List)
+        if (@($usbRuleList.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)).Count -ne 0) {
+            throw "A USB rule with no device identifier was accepted."
+        }
+    }
+
     # The DDC timing card is the only place adaptive and manual modes can be seen to be
     # mutually exclusive, so drive it rather than assert against the source text.
     $systemTab = Get-TabByName -Root $root -Name (Get-SmokeUiText -Text "System")

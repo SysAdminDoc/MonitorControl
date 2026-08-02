@@ -251,6 +251,35 @@ This is the same pinned lane used by CI. It gates a pure-ASCII check across ever
 - The watcher applies the latest due rule once per schedule boundary, including the current effective rule when scheduling is enabled
 - Rules are saved in `%APPDATA%\MonitorControlPro\profile-schedules.json`
 
+### USB Input Switching
+
+Make the monitors follow a USB switch box: when the box hands the keyboard and mouse to this
+machine, its USB device arrives, and each listed display is sent to its input.
+
+- Open the **Automation** tab and find **USB input switching**
+- Enter the device as `VID_046D&PID_C52B` (what Device Manager shows under Details > Hardware Ids)
+  or `046d:c52b`. Choose **Arrival** or **Removal** as the trigger
+- Add one **Display** plus **Input** pair per monitor the rule should switch, then **Add rule**
+- Tick **Enabled** to start listening. It is off by default because the rule writes to hardware
+  from a background event
+- Rules are saved in `%APPDATA%\MonitorControlPro\usb-input-rules.json`
+
+Safety and behavior:
+
+- Input switching is a risky VCP write. Both the rule's own **Risky writes** consent *and* the
+  per-identity unlock in **System > Safety** are required; a display missing either is reported
+  and skipped rather than written
+- A display already on the target input is skipped. This is only claimed where the app has
+  actually read that display's current input; it is never inferred
+- **Suppress (s)** is a per-rule window, 10 seconds by default. A USB hub built into a monitor
+  drops and re-enumerates its devices when the panel sleeps, so the same arrival fires again
+  moments later; the window stops that from switching a display you have just moved away from.
+  Set it to 0 to disable suppression
+- A **DisplayPort** target is warned about at configuration time. Deselecting a DisplayPort input
+  drops the link, and a display with no link answers no DDC command - the switch is one way until
+  you use the monitor's own buttons
+- All of a rule's writes go out as one verified transaction, so a partial failure rolls back
+
 ### Idle Dim
 - Open the **Automation** tab and enable **Idle dim**
 - Set the idle threshold in minutes, target brightness, and whether activity should restore the previous brightness

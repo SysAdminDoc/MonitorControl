@@ -599,3 +599,179 @@ function Initialize-CpuMonitor {
     }
     $script:CpuMonitorProvenance = $rejected
 }
+
+# --- USB device triggers for input switching ---------------------------------------------
+# A USB switch box moves one keyboard and mouse between two machines; the monitors do not
+# follow, because they are switched on the panel rather than on the box. Windows already
+# broadcasts the arrival and removal of the device interface, so a rule that maps that
+# broadcast to a per-monitor input plan is the whole feature. Everything here is pure: the
+# caller supplies the monitor list, the last-known input values, and the clock.
+
+# Accepts the three shapes people actually have to hand: what Device Manager shows
+# (VID_046D&PID_C52B), what lsusb-style tools print (046d:c52b), and a full interface path.
+function ConvertTo-UsbDeviceId {
+    param([string]$Text)
+    $trimmed = ([string]$Text).Trim()
+    if ([string]::IsNullOrWhiteSpace($trimmed)) { return "" }
+    if ($trimmed -match '(?i)VID_([0-9A-F]{4})&PID_([0-9A-F]{4})') {
+        return ("VID_{0}&PID_{1}" -f $Matches[1].ToUpperInvariant(), $Matches[2].ToUpperInvariant())
+    }
+    if ($trimmed -match '^(?i)([0-9A-F]{4})[:_-]([0-9A-F]{4})$') {
+        return ("VID_{0}&PID_{1}" -f $Matches[1].ToUpperInvariant(), $Matches[2].ToUpperInvariant())
+    }
+    return ""
+}
+
+function Get-UsbDeviceIdFromInterfacePath {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return "" }
+    if ($Path -notmatch '(?i)(^|[\\#])USB[\\#]') { return "" }
+    return (ConvertTo-UsbDeviceId -Text $Path)
+}
+
+function Get-UsbInputRuleTriggerName {
+    param([string]$Trigger)
+    if ([string]$Trigger -eq "Removal") { return "Removal" }
+    return "Arrival"
+}
+
+function ConvertTo-UsbInputRuleTargets {
+    param($Targets)
+    $seen = New-Object System.Collections.Generic.HashSet[string]
+    $result = @()
+    foreach ($target in @($Targets)) {
+        if ($null -eq $target) { continue }
+        $identityKey = [string]$target.IdentityKey
+        if ([string]::IsNullOrWhiteSpace($identityKey) -or $identityKey.Length -gt 512) { continue }
+        if (-not $seen.Add($identityKey)) { continue }
+        $parsedValue = 0
+        if (-not [int]::TryParse([string]$target.InputValue, [ref]$parsedValue)) { continue }
+        if ($parsedValue -lt 0 -or $parsedValue -gt 255) { continue }
+        $result += [PSCustomObject]@{ IdentityKey = $identityKey; InputValue = [int]$parsedValue }
+        if ($result.Count -ge 16) { break }
+    }
+    return @($result)
+}
+
+function ConvertTo-UsbInputRules {
+    param($Records)
+    $result = @()
+    foreach ($record in @($Records)) {
+        if ($null -eq $record) { continue }
+        $deviceId = ConvertTo-UsbDeviceId -Text ([string]$record.DeviceId)
+        if ([string]::IsNullOrWhiteSpace($deviceId)) { continue }
+        $targets = @(ConvertTo-UsbInputRuleTargets -Targets $record.Targets)
+        if ($targets.Count -eq 0) { continue }
+        $suppression = 10
+        $parsedSuppression = 0
+        if ($record.PSObject.Properties.Name -contains "SuppressionSeconds" -and [int]::TryParse([string]$record.SuppressionSeconds, [ref]$parsedSuppression)) {
+            $suppression = [Math]::Max(0, [Math]::Min(3600, $parsedSuppression))
+        }
+        $id = [string]$record.Id
+        if ([string]::IsNullOrWhiteSpace($id) -or $id.Length -gt 64) { $id = [guid]::NewGuid().ToString("N") }
+        $result += [PSCustomObject]@{
+            Id = $id
+            Enabled = if ($record.PSObject.Properties.Name -contains "Enabled") { [bool]$record.Enabled } else { $true }
+            DeviceId = $deviceId
+            Trigger = Get-UsbInputRuleTriggerName -Trigger ([string]$record.Trigger)
+            SuppressionSeconds = [int]$suppression
+            AllowRiskyVcp = if ($record.PSObject.Properties.Name -contains "AllowRiskyVcp") { [bool]$record.AllowRiskyVcp } else { $false }
+            Targets = @($targets)
+        }
+        if ($result.Count -ge 32) { break }
+    }
+    return @($result)
+}
+
+function New-UsbInputRuleObject {
+    param([string]$DeviceId, [string]$Trigger, [int]$SuppressionSeconds, [bool]$AllowRiskyVcp, $Targets)
+    return @(ConvertTo-UsbInputRules -Records @([PSCustomObject]@{
+        Id = [guid]::NewGuid().ToString("N")
+        Enabled = $true
+        DeviceId = $DeviceId
+        Trigger = $Trigger
+        SuppressionSeconds = $SuppressionSeconds
+        AllowRiskyVcp = $AllowRiskyVcp
+        Targets = $Targets
+    }))
+}
+
+function Test-UsbInputRuleMatches {
+    param($Rule, [string]$DeviceId, [string]$Trigger)
+    if ($null -eq $Rule -or -not [bool]$Rule.Enabled) { return $false }
+    if ([string]::IsNullOrWhiteSpace($DeviceId)) { return $false }
+    if ([string]$Rule.DeviceId -ne (ConvertTo-UsbDeviceId -Text $DeviceId)) { return $false }
+    return ([string]$Rule.Trigger -eq (Get-UsbInputRuleTriggerName -Trigger $Trigger))
+}
+
+# The documented failure of the leading tool: a USB hub built into a monitor drops and
+# re-enumerates its devices when the panel sleeps, so the same arrival fires again seconds
+# later and switches a display the user has just moved away from. The window is per rule and
+# starts when the rule fires.
+function Test-UsbInputRuleSuppressed {
+    param($Rule, $LastFiredUtc, [datetime]$NowUtc)
+    if ($null -eq $Rule -or $null -eq $LastFiredUtc) { return $false }
+    $seconds = [int]$Rule.SuppressionSeconds
+    if ($seconds -le 0) { return $false }
+    return ((($NowUtc - [datetime]$LastFiredUtc).TotalSeconds) -lt $seconds)
+}
+
+# Deselecting a DisplayPort input drops the link, and a monitor with no link cannot be sent the
+# DDC command that would bring it back - the switch is one way until someone uses the panel's
+# own buttons. Name it at configuration time rather than after the display goes dark.
+function Test-InputValueIsDisplayPort {
+    param([int]$Value)
+    return ($Value -eq 0x0F -or $Value -eq 0x10)
+}
+
+function Get-UsbInputSwitchPlan {
+    param($Rule, $Monitors, $CurrentInputs, [datetime]$NowUtc, $LastFiredUtc)
+    if ($null -eq $Rule) { return [PSCustomObject]@{ Suppressed = $false; Entries = @() } }
+    if (Test-UsbInputRuleSuppressed -Rule $Rule -LastFiredUtc $LastFiredUtc -NowUtc $NowUtc) {
+        return [PSCustomObject]@{ Suppressed = $true; Entries = @() }
+    }
+    $entries = @()
+    foreach ($target in @($Rule.Targets)) {
+        $identityKey = [string]$target.IdentityKey
+        $matched = @($Monitors | Where-Object {
+            $null -ne $_ -and ([string]$_.IdentityKey -eq $identityKey -or
+            ($_.PSObject.Properties.Name -contains "IdentityAliases" -and @($_.IdentityAliases) -contains $identityKey))
+        } | Select-Object -First 1)
+        if ($matched.Count -eq 0) {
+            $entries += [PSCustomObject]@{ IdentityKey = $identityKey; MonitorName = ""; InputValue = [int]$target.InputValue; WriteValue = [int]$target.InputValue; Action = "MonitorMissing" }
+            continue
+        }
+        $monitor = $matched[0]
+        $singleByte = Test-MonitorInputSourceSingleByte -Monitor $monitor
+        $action = "Switch"
+        if (-not [bool]$Rule.AllowRiskyVcp) {
+            $action = "NoRuleConsent"
+        } elseif (-not (Test-VcpWriteEnabledForMonitor -Monitor $monitor)) {
+            $action = "NotUnlocked"
+        } else {
+            $current = $null
+            if ($null -ne $CurrentInputs -and $CurrentInputs.Contains($identityKey)) { $current = $CurrentInputs[$identityKey] }
+            if ($null -ne $current -and
+                (Resolve-InputSourceReadValue -Value ([int]$current) -SingleByte $singleByte) -eq (Resolve-InputSourceReadValue -Value ([int]$target.InputValue) -SingleByte $singleByte)) {
+                $action = "AlreadyOnTarget"
+            }
+        }
+        $entries += [PSCustomObject]@{
+            IdentityKey = [string]$monitor.IdentityKey
+            MonitorName = [string]$monitor.Name
+            InputValue = [int]$target.InputValue
+            WriteValue = [int](Resolve-InputSourceWriteValue -Value ([int]$target.InputValue) -SingleByte $singleByte)
+            Action = $action
+        }
+    }
+    return [PSCustomObject]@{ Suppressed = $false; Entries = @($entries) }
+}
+
+function Get-UsbInputRuleDescription {
+    param($Rule)
+    if ($null -eq $Rule) { return "" }
+    $targetText = (@($Rule.Targets) | ForEach-Object { "{0} -> 0x{1:X2}" -f [string]$_.IdentityKey, [int]$_.InputValue }) -join ", "
+    $state = if ([bool]$Rule.Enabled) { "on" } else { "off" }
+    $consent = if ([bool]$Rule.AllowRiskyVcp) { "risky writes allowed" } else { "no rule consent" }
+    return "$([string]$Rule.DeviceId) $([string]$Rule.Trigger) [$state, $([int]$Rule.SuppressionSeconds)s suppression, $consent]: $targetText"
+}

@@ -115,6 +115,60 @@ public class MonitorAPI
     [DllImport("dxva2.dll", SetLastError = true)]
     public static extern bool CapabilitiesRequestAndCapabilitiesReply(IntPtr hMonitor, StringBuilder pszASCIICapabilitiesString, uint dwCapabilitiesStringLengthInCharacters);
 
+    // WM_DEVICECHANGE only carries volume arrivals to an unregistered window. Naming a USB
+    // switch box by VID and PID needs the device-interface broadcast, which requires an
+    // explicit RegisterDeviceNotification with DEVICE_NOTIFY_ALL_INTERFACE_CLASSES.
+    public const int DBT_DEVTYP_DEVICEINTERFACE = 0x00000005;
+    public const int DEVICE_NOTIFY_WINDOW_HANDLE = 0x00000000;
+    public const int DEVICE_NOTIFY_ALL_INTERFACE_CLASSES = 0x00000004;
+    public const int DBT_DEVICEARRIVAL = 0x8000;
+    public const int DBT_DEVICEREMOVECOMPLETE = 0x8004;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct DEV_BROADCAST_HDR {
+        public int dbch_size;
+        public int dbch_devicetype;
+        public int dbch_reserved;
+    }
+
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    public static extern IntPtr RegisterDeviceNotification(IntPtr hRecipient, IntPtr NotificationFilter, int Flags);
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool UnregisterDeviceNotification(IntPtr Handle);
+
+    public static IntPtr RegisterAllDeviceInterfaceNotifications(IntPtr hwnd)
+    {
+        // dbcc_classguid must be present in the filter even when ALL_INTERFACE_CLASSES makes it
+        // irrelevant, so the buffer is header + GUID + one terminating name character.
+        int size = Marshal.SizeOf(typeof(DEV_BROADCAST_HDR)) + 16 + 2;
+        IntPtr buffer = Marshal.AllocHGlobal(size);
+        try {
+            for (int i = 0; i < size; i++) { Marshal.WriteByte(buffer, i, 0); }
+            Marshal.WriteInt32(buffer, 0, size);
+            Marshal.WriteInt32(buffer, 4, DBT_DEVTYP_DEVICEINTERFACE);
+            return RegisterDeviceNotification(hwnd, buffer, DEVICE_NOTIFY_WINDOW_HANDLE | DEVICE_NOTIFY_ALL_INTERFACE_CLASSES);
+        } finally {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    // Returns "" for any broadcast that is not a device interface, so the caller never has to
+    // guess whether an empty string meant "not USB" or "could not read".
+    public static string GetDeviceInterfaceName(IntPtr lParam)
+    {
+        if (lParam == IntPtr.Zero) { return ""; }
+        try {
+            DEV_BROADCAST_HDR header = (DEV_BROADCAST_HDR)Marshal.PtrToStructure(lParam, typeof(DEV_BROADCAST_HDR));
+            if (header.dbch_devicetype != DBT_DEVTYP_DEVICEINTERFACE) { return ""; }
+            int nameOffset = Marshal.SizeOf(typeof(DEV_BROADCAST_HDR)) + 16;
+            if (header.dbch_size <= nameOffset) { return ""; }
+            string name = Marshal.PtrToStringAuto(new IntPtr(lParam.ToInt64() + nameOffset));
+            return name == null ? "" : name;
+        } catch {
+            return "";
+        }
+    }
+
     private class QueuedVcpWrite {
         public IntPtr Handle;
         public byte Code;
@@ -953,6 +1007,13 @@ $script:VcpWriteSafetySettingsPath = ""
 $script:RiskyVcpEnabledIdentityKeys = @{}
 $script:InputSourceSettingsPath = ""
 $script:InputSourceOverrides = @{}
+$script:UsbInputRulesPath = ""
+$script:UsbInputRules = @()
+$script:UsbInputTriggerEnabled = $false
+$script:UsbInputRuleLastFiredUtc = @{}
+$script:UsbInputRuleTargetDraft = @()
+$script:UpdatingUsbInputUI = $false
+$script:UsbDeviceNotificationHandle = [IntPtr]::Zero
 $script:InputSourceDraft = @()
 $script:InputSourceDraftIdentityKey = ""
 $script:InputSourceDraftSingleByte = $false
@@ -1062,6 +1123,7 @@ $script:CapabilitiesSafetySettingsPath = Join-Path $script:DefaultProfilesPath "
 $script:CapabilitiesProbeSentinelPath = Join-Path $script:DefaultProfilesPath "capabilities-probe-pending.json"
 $script:VcpWriteSafetySettingsPath = Join-Path $script:DefaultProfilesPath "vcp-write-safety.json"
 $script:InputSourceSettingsPath = Join-Path $script:DefaultProfilesPath "input-sources.json"
+$script:UsbInputRulesPath = Join-Path $script:DefaultProfilesPath "usb-input-rules.json"
 $script:ProfilesPath = $script:DefaultProfilesPath
 $script:ProfileStorageMode = "Local"
 $script:ProfileStorageOffline = $false
@@ -1087,6 +1149,7 @@ $script:CapabilitiesCacheSchemaVersion = [int]$script:SettingsDocumentRegistry.C
 $script:DdcTimingSchemaVersion = [int]$script:SettingsDocumentRegistry.DdcTiming.CurrentVersion
 $script:ProfileTrashSchemaVersion = [int]$script:SettingsDocumentRegistry.ProfileTrash.CurrentVersion
 $script:InputSourceSchemaVersion = [int]$script:SettingsDocumentRegistry.InputSources.CurrentVersion
+$script:UsbInputRulesSchemaVersion = [int]$script:SettingsDocumentRegistry.UsbInputRules.CurrentVersion
 $script:ProfileTrashPath = Join-Path $script:DefaultProfilesPath "trash"
 $script:ProfileTrashMaxRecords = 20
 $script:ProfileTrashMaxBytes = 10485760
@@ -1125,7 +1188,7 @@ $script:ProfileBundleMaxTotalBytes = 10485760
 $script:ProfileBundleMaxCompressionRatio = 100
 $script:ProfileBundleMaxMonitorSettings = 32
 $script:ProfileExportsPath = Join-Path $script:ProfilesPath "exports"
-$script:ProfileMetadataFiles = @("app-profile-rules.json", "profile-schedules.json", "idle-dim.json", "battery-profile.json", "profile-storage.json", "monitor-identities.json", "automation-bridge.json", "capabilities-safety.json", "capabilities-probe-pending.json", "vcp-write-safety.json", "optional-helpers.json", "display-restore.json", "capabilities-cache.json", "ddc-timing.json", "input-sources.json")
+$script:ProfileMetadataFiles = @("app-profile-rules.json", "profile-schedules.json", "idle-dim.json", "battery-profile.json", "profile-storage.json", "monitor-identities.json", "automation-bridge.json", "capabilities-safety.json", "capabilities-probe-pending.json", "vcp-write-safety.json", "optional-helpers.json", "display-restore.json", "capabilities-cache.json", "ddc-timing.json", "input-sources.json", "usb-input-rules.json")
 $script:MonitorIdentityRecords = @{}
 $script:UpdatingMonitorLabelUI = $false
 $windowsUiCulture = [System.Globalization.CultureInfo]::CurrentUICulture.Name
@@ -1187,6 +1250,16 @@ $script:UiStrings = @{
     "A11y.InputSourceValue" = "Input value"
     "A11y.InputSourceLabel" = "Input label"
     "A11y.InputSourceSingleByte" = "Single-byte input select"
+    "A11y.UsbInputDevice" = "USB device identifier"
+    "A11y.UsbInputTrigger" = "USB trigger event"
+    "A11y.UsbInputSuppression" = "USB suppression window in seconds"
+    "A11y.UsbInputMonitor" = "USB rule target display"
+    "A11y.UsbInputTargetInput" = "USB rule target input"
+    "A11y.UsbInputTargets" = "USB rule target displays"
+    "A11y.UsbInputRules" = "USB input switching rules"
+    "A11y.UsbInputWarnings" = "USB input switching warnings"
+    "A11y.UsbInputConsent" = "USB rule risky write consent"
+    "A11y.UsbInputEnabled" = "USB input switching enabled"
     "A11y.ProfileName" = "Profile name"
     "A11y.ProfilesList" = "Saved profiles"
     "A11y.ProfileCaptureAll" = "Capture all connected displays"
@@ -2310,6 +2383,16 @@ function Initialize-LocalizationAndAccessibility {
     Set-AccessibleName -Control $inputSourceValueBox -Key "A11y.InputSourceValue"
     Set-AccessibleName -Control $inputSourceLabelBox -Key "A11y.InputSourceLabel"
     Set-AccessibleName -Control $inputSourceSingleByteCheckbox -Key "A11y.InputSourceSingleByte"
+    Set-AccessibleName -Control $usbInputDeviceBox -Key "A11y.UsbInputDevice"
+    Set-AccessibleName -Control $usbInputTriggerCombo -Key "A11y.UsbInputTrigger"
+    Set-AccessibleName -Control $usbInputSuppressionBox -Key "A11y.UsbInputSuppression"
+    Set-AccessibleName -Control $usbInputMonitorCombo -Key "A11y.UsbInputMonitor"
+    Set-AccessibleName -Control $usbInputTargetInputCombo -Key "A11y.UsbInputTargetInput"
+    Set-AccessibleName -Control $usbInputTargetList -Key "A11y.UsbInputTargets"
+    Set-AccessibleName -Control $usbInputRulesList -Key "A11y.UsbInputRules"
+    Set-AccessibleName -Control $usbInputWarningText -Key "A11y.UsbInputWarnings"
+    Set-AccessibleName -Control $usbInputRiskyConsentCheckbox -Key "A11y.UsbInputConsent"
+    Set-AccessibleName -Control $usbInputEnabledCheckbox -Key "A11y.UsbInputEnabled"
     Set-AccessibleName -Control $profileNameBox -Key "A11y.ProfileName"
     Set-AccessibleName -Control $profilesList -Key "A11y.ProfilesList"
     Set-AccessibleName -Control $profileCaptureAllCheckbox -Key "A11y.ProfileCaptureAll"
@@ -2387,6 +2470,7 @@ function Initialize-LocalizationAndAccessibility {
         $profileNameBox,$profileCaptureAllCheckbox,$saveProfileBtn,$loadProfileBtn,$deleteProfileBtn,$profilesList,$exportProfilesBtn,$importProfilesBtn,$profileSyncFolderBtn,$profileLocalFolderBtn,
         $appProfileEnabledCheckbox,$appProfileExeBox,$appProfileCaptureBtn,$appProfileProfileCombo,$appProfileRiskyConsentCheckbox,$appProfileAddBtn,$appProfileRemoveBtn,$appProfileRulesList,
         $scheduleEnabledCheckbox,$scheduleTimeBox,$scheduleProfileCombo,$scheduleRiskyConsentCheckbox,$scheduleAddBtn,$scheduleRemoveBtn,$scheduleRulesList,
+        $usbInputEnabledCheckbox,$usbInputDeviceBox,$usbInputTriggerCombo,$usbInputSuppressionBox,$usbInputRiskyConsentCheckbox,$usbInputMonitorCombo,$usbInputTargetInputCombo,$usbInputTargetAddBtn,$usbInputTargetRemoveBtn,$usbInputTargetList,$usbInputRulesList,$usbInputRuleAddBtn,$usbInputRuleRemoveBtn,
         $idleDimEnabledCheckbox,$idleDimMinutesBox,$idleDimBrightnessBox,$idleDimRestoreCheckbox,$idleDimSaveBtn,
         $batteryProfileEnabledCheckbox,$batteryBrightnessBox,$acBrightnessBox,$batteryProfileSaveBtn,
         $displaySettingsBtn,$colorMgmtBtn,$gpuControlPanelBtn,$gammaRedSlider,$gammaGreenSlider,$gammaBlueSlider,$resetGammaBtn,$capabilitiesBox,
@@ -4809,8 +4893,8 @@ if ($CliWorker) {
             </Grid></Border>
         </TabItem>
         <TabItem x:Name="ScheduleTab" Header="Automation" Tag="&#xE823;" ToolTip="Adapt display behavior to time, activity, and power.">
-            <Border Background="Transparent" Padding="0"><Grid>
-                <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+            <Border Background="Transparent" Padding="0"><ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><Grid>
+                <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Border Style="{StaticResource PageCard}"><Grid>
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="14"/><RowDefinition Height="Auto"/><RowDefinition Height="16"/><RowDefinition Height="Auto"/><RowDefinition Height="10"/><RowDefinition Height="*"/></Grid.RowDefinitions>
                     <Grid><TextBlock Text="Scheduled profiles" Style="{StaticResource SectionTitle}"/>
@@ -4849,7 +4933,33 @@ if ($CliWorker) {
                         <Button x:Name="BatteryProfileSaveBtn" Grid.Row="4" Content="Save" Style="{StaticResource AccBtn}" HorizontalAlignment="Right" MinWidth="120"/>
                     </Grid></Border>
                 </Grid>
-            </Grid></Border>
+                <Border Grid.Row="4" Style="{StaticResource PageCard}"><Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="6"/><RowDefinition Height="Auto"/><RowDefinition Height="14"/><RowDefinition Height="Auto"/><RowDefinition Height="10"/><RowDefinition Height="Auto"/><RowDefinition Height="10"/><RowDefinition Height="Auto"/><RowDefinition Height="10"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <Grid><TextBlock Text="USB input switching" Style="{StaticResource SectionTitle}"/>
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right"><CheckBox x:Name="UsbInputEnabledCheckbox" Content="Enabled" VerticalAlignment="Center"/><TextBlock x:Name="UsbInputStatusText" Text="Off" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="12,0,0,0" VerticalAlignment="Center"/></StackPanel></Grid>
+                    <TextBlock Grid.Row="2" Text="Follow a USB switch box: when the named device arrives or is removed, send each listed display to its input." TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource MutedTextBrush}"/>
+                    <Grid Grid.Row="4"><Grid.ColumnDefinitions><ColumnDefinition Width="2*"/><ColumnDefinition Width="10"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="10"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="10"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                        <StackPanel><TextBlock Text="USB device (VID_046D&amp;PID_C52B or 046d:c52b)" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,0,0,6"/><TextBox x:Name="UsbInputDeviceBox"/></StackPanel>
+                        <StackPanel Grid.Column="2" MinWidth="120"><TextBlock Text="Trigger" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,0,0,6"/><ComboBox x:Name="UsbInputTriggerCombo"><ComboBoxItem Content="Arrival" IsSelected="True"/><ComboBoxItem Content="Removal"/></ComboBox></StackPanel>
+                        <StackPanel Grid.Column="4" MinWidth="90"><TextBlock Text="Suppress (s)" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,0,0,6"/><TextBox x:Name="UsbInputSuppressionBox" Text="10"/></StackPanel>
+                        <CheckBox x:Name="UsbInputRiskyConsentCheckbox" Grid.Column="6" Content="Risky writes" VerticalAlignment="Bottom" Margin="0,0,0,8" FontSize="12" ToolTip="Separate rule-level consent; every target monitor identity must also be unlocked in System."/>
+                    </Grid>
+                    <Grid Grid.Row="6"><Grid.ColumnDefinitions><ColumnDefinition Width="2*"/><ColumnDefinition Width="10"/><ColumnDefinition Width="*"/><ColumnDefinition Width="10"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="8"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                        <StackPanel><TextBlock Text="Display" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,0,0,6"/><ComboBox x:Name="UsbInputMonitorCombo"/></StackPanel>
+                        <StackPanel Grid.Column="2"><TextBlock Text="Input" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,0,0,6"/><ComboBox x:Name="UsbInputTargetInputCombo"/></StackPanel>
+                        <Button x:Name="UsbInputTargetAddBtn" Grid.Column="4" Content="Add display" Style="{StaticResource Btn}" VerticalAlignment="Bottom"/>
+                        <Button x:Name="UsbInputTargetRemoveBtn" Grid.Column="6" Content="Remove display" Style="{StaticResource Btn}" VerticalAlignment="Bottom"/>
+                    </Grid>
+                    <ListBox x:Name="UsbInputTargetList" Grid.Row="8" MinHeight="60" MaxHeight="96" Background="{DynamicResource ControlBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Foreground="{DynamicResource TextBrush}" FontSize="12"/>
+                    <Grid Grid.Row="10"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="10"/><RowDefinition Height="Auto"/><RowDefinition Height="10"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                        <TextBlock x:Name="UsbInputWarningText" Text="" TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource WarningBrush}"/>
+                        <Grid Grid.Row="2"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="8"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                            <ListBox x:Name="UsbInputRulesList" MinHeight="64" MaxHeight="110" Background="{DynamicResource ControlBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Foreground="{DynamicResource TextBrush}" FontSize="12"/>
+                            <StackPanel Grid.Column="2" MinWidth="140"><Button x:Name="UsbInputRuleAddBtn" Content="Add rule" Style="{StaticResource AccBtn}"/><Button x:Name="UsbInputRuleRemoveBtn" Content="Remove rule" Style="{StaticResource WarnBtn}" Margin="0,8,0,0"/></StackPanel>
+                        </Grid>
+                    </Grid>
+                </Grid></Border>
+            </Grid></ScrollViewer></Border>
         </TabItem>
         <TabItem x:Name="SystemTab" Header="System" Tag="&#xE713;" ToolTip="Configure safety, diagnostics, integrations, and recovery.">
             <TabControl x:Name="SystemCategoryTabs" Style="{StaticResource SettingsTabControl}">
@@ -5173,6 +5283,13 @@ $appProfileRemoveBtn = $window.FindName("AppProfileRemoveBtn"); $appProfileRules
 $scheduleEnabledCheckbox = $window.FindName("ScheduleEnabledCheckbox"); $scheduleStatusText = $window.FindName("ScheduleStatusText")
 $scheduleTimeBox = $window.FindName("ScheduleTimeBox"); $scheduleProfileCombo = $window.FindName("ScheduleProfileCombo")
 $scheduleAddBtn = $window.FindName("ScheduleAddBtn"); $scheduleRemoveBtn = $window.FindName("ScheduleRemoveBtn"); $scheduleRulesList = $window.FindName("ScheduleRulesList"); $scheduleRiskyConsentCheckbox = $window.FindName("ScheduleRiskyConsentCheckbox")
+$usbInputEnabledCheckbox = $window.FindName("UsbInputEnabledCheckbox"); $usbInputStatusText = $window.FindName("UsbInputStatusText")
+$usbInputDeviceBox = $window.FindName("UsbInputDeviceBox"); $usbInputTriggerCombo = $window.FindName("UsbInputTriggerCombo")
+$usbInputSuppressionBox = $window.FindName("UsbInputSuppressionBox"); $usbInputRiskyConsentCheckbox = $window.FindName("UsbInputRiskyConsentCheckbox")
+$usbInputMonitorCombo = $window.FindName("UsbInputMonitorCombo"); $usbInputTargetInputCombo = $window.FindName("UsbInputTargetInputCombo")
+$usbInputTargetAddBtn = $window.FindName("UsbInputTargetAddBtn"); $usbInputTargetRemoveBtn = $window.FindName("UsbInputTargetRemoveBtn")
+$usbInputTargetList = $window.FindName("UsbInputTargetList"); $usbInputWarningText = $window.FindName("UsbInputWarningText")
+$usbInputRulesList = $window.FindName("UsbInputRulesList"); $usbInputRuleAddBtn = $window.FindName("UsbInputRuleAddBtn"); $usbInputRuleRemoveBtn = $window.FindName("UsbInputRuleRemoveBtn")
 $scheduleTimelineCanvas = $window.FindName("ScheduleTimelineCanvas")
 $idleDimEnabledCheckbox = $window.FindName("IdleDimEnabledCheckbox"); $idleDimStatusText = $window.FindName("IdleDimStatusText")
 $idleDimMinutesBox = $window.FindName("IdleDimMinutesBox"); $idleDimBrightnessBox = $window.FindName("IdleDimBrightnessBox")
@@ -5818,6 +5935,177 @@ function Invoke-DisplayRecoveryEventPump {
     Start-DdcLivenessProbe
 }
 
+function Get-UsbInputTargetDescription {
+    param($Target)
+    $monitor = @($script:PhysicalMonitors | Where-Object { $_ -and [string]$_.IdentityKey -eq [string]$Target.IdentityKey } | Select-Object -First 1)
+    $label = if ($monitor.Count -gt 0) { Get-MonitorDisplayLabel -Monitor $monitor[0] } else { "$([string]$Target.IdentityKey) (not connected)" }
+    $inputLabel = if ($monitor.Count -gt 0) {
+        $entry = @(Get-MonitorInputSourceMap -Monitor $monitor[0] | Where-Object { [int]$_.Value -eq [int]$Target.InputValue } | Select-Object -First 1)
+        if ($entry.Count -gt 0) { [string]$entry[0].Label } else { Get-InputSourceLabelForValue -Value ([int]$Target.InputValue) }
+    } else { Get-InputSourceLabelForValue -Value ([int]$Target.InputValue) }
+    return "{0} -> {1} (0x{2:X2})" -f $label, $inputLabel, [int]$Target.InputValue
+}
+
+function Update-UsbInputTargetInputCombo {
+    if ($null -eq $usbInputTargetInputCombo) { return }
+    $selectedValue = if ($null -ne $usbInputTargetInputCombo.SelectedItem) { [int]$usbInputTargetInputCombo.SelectedItem.Tag } else { $null }
+    $monitor = $null
+    if ($null -ne $usbInputMonitorCombo -and $null -ne $usbInputMonitorCombo.SelectedItem) {
+        $identityKey = [string]$usbInputMonitorCombo.SelectedItem.Tag
+        $matched = @($script:PhysicalMonitors | Where-Object { $_ -and [string]$_.IdentityKey -eq $identityKey } | Select-Object -First 1)
+        if ($matched.Count -gt 0) { $monitor = $matched[0] }
+    }
+    $usbInputTargetInputCombo.Items.Clear()
+    foreach ($entry in @(Get-MonitorInputSourceMap -Monitor $monitor)) {
+        $item = New-Object System.Windows.Controls.ComboBoxItem
+        $item.Content = "{0} (0x{1:X2})" -f [string]$entry.Label, [int]$entry.Value
+        $item.Tag = [int]$entry.Value
+        $usbInputTargetInputCombo.Items.Add($item) | Out-Null
+        if ($null -ne $selectedValue -and [int]$selectedValue -eq [int]$entry.Value) { $usbInputTargetInputCombo.SelectedItem = $item }
+    }
+    if ($null -eq $usbInputTargetInputCombo.SelectedItem -and $usbInputTargetInputCombo.Items.Count -gt 0) { $usbInputTargetInputCombo.SelectedIndex = 0 }
+}
+
+function Update-UsbInputControls {
+    if ($null -eq $usbInputRulesList) { return }
+    $wasUpdating = $script:UpdatingUsbInputUI
+    $script:UpdatingUsbInputUI = $true
+    try {
+        $usbInputEnabledCheckbox.IsChecked = [bool]$script:UsbInputTriggerEnabled
+        $usbInputStatusText.Text = if ($script:UsbInputTriggerEnabled) { "Watching $(@($script:UsbInputRules).Count) rule(s)" } else { "Off" }
+        $usbInputRulesList.Items.Clear()
+        foreach ($rule in @($script:UsbInputRules)) {
+            $item = New-Object System.Windows.Controls.ListBoxItem
+            $item.Content = Get-UsbInputRuleDescription -Rule $rule
+            $item.Tag = [string]$rule.Id
+            $usbInputRulesList.Items.Add($item) | Out-Null
+        }
+        $selectedIdentity = if ($null -ne $usbInputMonitorCombo.SelectedItem) { [string]$usbInputMonitorCombo.SelectedItem.Tag } else { "" }
+        $usbInputMonitorCombo.Items.Clear()
+        foreach ($monitor in @($script:PhysicalMonitors | Where-Object { $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.IdentityKey) })) {
+            $item = New-Object System.Windows.Controls.ComboBoxItem
+            $item.Content = Get-MonitorDisplayLabel -Monitor $monitor
+            $item.Tag = [string]$monitor.IdentityKey
+            $usbInputMonitorCombo.Items.Add($item) | Out-Null
+            if ($selectedIdentity -eq [string]$monitor.IdentityKey) { $usbInputMonitorCombo.SelectedItem = $item }
+        }
+        if ($null -eq $usbInputMonitorCombo.SelectedItem -and $usbInputMonitorCombo.Items.Count -gt 0) { $usbInputMonitorCombo.SelectedIndex = 0 }
+        Update-UsbInputTargetInputCombo
+        $usbInputTargetList.Items.Clear()
+        foreach ($target in @($script:UsbInputRuleTargetDraft)) {
+            $item = New-Object System.Windows.Controls.ListBoxItem
+            $item.Content = Get-UsbInputTargetDescription -Target $target
+            $item.Tag = [string]$target.IdentityKey
+            $usbInputTargetList.Items.Add($item) | Out-Null
+        }
+        Update-UsbInputWarningText
+    } finally {
+        $script:UpdatingUsbInputUI = $wasUpdating
+    }
+}
+
+function Update-UsbInputWarningText {
+    if ($null -eq $usbInputWarningText) { return }
+    $warnings = @()
+    $displayPortTargets = @(@($script:UsbInputRuleTargetDraft) | Where-Object { Test-InputValueIsDisplayPort -Value ([int]$_.InputValue) })
+    if ($displayPortTargets.Count -gt 0) {
+        $warnings += "A DisplayPort target cannot be switched back by this app: deselecting a DisplayPort input drops the link, and a display with no link answers no DDC command. Use the monitor's own buttons to return."
+    }
+    $lockedTargets = @(@($script:UsbInputRuleTargetDraft) | Where-Object {
+        $identityKey = [string]$_.IdentityKey
+        $monitor = @($script:PhysicalMonitors | Where-Object { $_ -and [string]$_.IdentityKey -eq $identityKey } | Select-Object -First 1)
+        $monitor.Count -gt 0 -and -not (Test-VcpWriteEnabledForMonitor -Monitor $monitor[0])
+    })
+    if ($lockedTargets.Count -gt 0) {
+        $warnings += "$($lockedTargets.Count) target display(s) have risky VCP writes disabled; unlock each identity in System before the rule can switch it."
+    }
+    $usbInputWarningText.Text = ($warnings -join " ")
+}
+
+function Register-UsbDeviceNotifications {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Registers a process-local Windows device-notification sink.')]
+    param([IntPtr]$Handle)
+    if ($script:UsbDeviceNotificationHandle -ne [IntPtr]::Zero -or $Handle -eq [IntPtr]::Zero) { return }
+    try {
+        $script:UsbDeviceNotificationHandle = [MonitorAPI]::RegisterAllDeviceInterfaceNotifications($Handle)
+    } catch {
+        $script:UsbDeviceNotificationHandle = [IntPtr]::Zero
+    }
+}
+
+function Unregister-UsbDeviceNotifications {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Releases a process-local Windows device-notification sink.')]
+    param()
+    if ($script:UsbDeviceNotificationHandle -eq [IntPtr]::Zero) { return }
+    try { [MonitorAPI]::UnregisterDeviceNotification($script:UsbDeviceNotificationHandle) | Out-Null } catch { $null = $_ }
+    $script:UsbDeviceNotificationHandle = [IntPtr]::Zero
+}
+
+# The current input of every monitor as far as the app can honestly claim to know it. An entry
+# is present only where a 0x60 read actually succeeded, so "already on the target input" is
+# never inferred from a value nobody read.
+function Get-KnownMonitorInputValues {
+    $known = @{}
+    foreach ($monitor in @($script:PhysicalMonitors | Where-Object { $_ })) {
+        $observation = Get-MonitorVcpObservation -Monitor $monitor -Code ([int][MonitorAPI]::VCP_INPUT_SOURCE)
+        if ($null -ne $observation) { $known[[string]$monitor.IdentityKey] = [int]$observation.Current }
+    }
+    return $known
+}
+
+function Invoke-UsbInputTrigger {
+    param([string]$InterfacePath, [string]$Trigger)
+    if (-not $script:UsbInputTriggerEnabled -or @($script:UsbInputRules).Count -eq 0) { return }
+    $deviceId = Get-UsbDeviceIdFromInterfacePath -Path $InterfacePath
+    if ([string]::IsNullOrWhiteSpace($deviceId)) { return }
+    $nowUtc = [DateTime]::UtcNow
+    $knownInputs = Get-KnownMonitorInputValues
+    foreach ($rule in @($script:UsbInputRules)) {
+        if (-not (Test-UsbInputRuleMatches -Rule $rule -DeviceId $deviceId -Trigger $Trigger)) { continue }
+        $lastFired = if ($script:UsbInputRuleLastFiredUtc.ContainsKey([string]$rule.Id)) { $script:UsbInputRuleLastFiredUtc[[string]$rule.Id] } else { $null }
+        $plan = Get-UsbInputSwitchPlan -Rule $rule -Monitors $script:PhysicalMonitors -CurrentInputs $knownInputs -NowUtc $nowUtc -LastFiredUtc $lastFired
+        if ([bool]$plan.Suppressed) {
+            Update-Status "USB $Trigger for $deviceId ignored inside the $([int]$rule.SuppressionSeconds)s suppression window"
+            continue
+        }
+        $switches = @($plan.Entries | Where-Object { [string]$_.Action -eq "Switch" })
+        # The window opens on every match, not only on a match that wrote something. A bounce
+        # that arrives while a monitor is mid-switch would otherwise be evaluated against a
+        # stale input value and fire for real.
+        $script:UsbInputRuleLastFiredUtc[[string]$rule.Id] = $nowUtc
+        if ($switches.Count -eq 0) {
+            $reasons = @($plan.Entries | ForEach-Object { "$([string]$_.MonitorName): $([string]$_.Action)" }) -join "; "
+            Update-Status "USB $Trigger for $deviceId switched nothing ($reasons)" -Severity Warning -Key "Status.UsbInputNoTargets"
+            continue
+        }
+        # One transaction for the whole rule: the write worker is a single slot, and a switch
+        # box that moves three displays must not lose two of them to a busy worker.
+        $operations = @()
+        foreach ($entry in $switches) {
+            $monitor = @($script:PhysicalMonitors | Where-Object { $_ -and [string]$_.IdentityKey -eq [string]$entry.IdentityKey } | Select-Object -First 1)
+            if ($monitor.Count -eq 0 -or $monitor[0].Handle -eq [IntPtr]::Zero) { continue }
+            $operations += Get-VcpWriteOperation -Monitor $monitor[0] -Code ([int][MonitorAPI]::VCP_INPUT_SOURCE) -Value ([uint32]$entry.WriteValue)
+        }
+        if ($operations.Count -eq 0) {
+            Update-Status "USB $Trigger for $deviceId found no DDC/CI write target" -Severity Warning -Key "Status.UsbInputNoTargets"
+            continue
+        }
+        $usbCompletionDevice = $deviceId
+        $usbCompletionCount = $operations.Count
+        $usbCompletion = {
+            param($result)
+            if ([bool]$result.Success) {
+                Update-Status "USB trigger $usbCompletionDevice switched $usbCompletionCount display(s)"
+            } else {
+                Update-Status "USB trigger $usbCompletionDevice failed ($($result.Outcome)); restore: $($result.Rollback)" -Severity Error -Key "Status.UsbInputSwitchFailed"
+            }
+        }.GetNewClosure()
+        if (-not (Start-VerifiedVcpTransactionWorker -Operations $operations -ActionLabel "USB trigger $deviceId" -CompletionAction $usbCompletion)) {
+            Update-Status "USB trigger $deviceId skipped; a DDC transaction is already running" -Severity Warning -Key "Status.UsbInputBusy"
+        }
+    }
+}
+
 function Initialize-DisplayRecoveryEventPipeline {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Registers process-local Windows event listeners.')]
     param()
@@ -5839,7 +6127,20 @@ function Initialize-DisplayRecoveryEventPipeline {
                 $reason = ""
                 switch ($message) {
                     0x007E { $reason = "display-change" }
-                    0x0219 { $reason = "device-change" }
+                    0x0219 {
+                        $reason = "device-change"
+                        $deviceEvent = [int]$wParam.ToInt64()
+                        if ($deviceEvent -eq [MonitorAPI]::DBT_DEVICEARRIVAL -or $deviceEvent -eq [MonitorAPI]::DBT_DEVICEREMOVECOMPLETE) {
+                            $interfaceName = [MonitorAPI]::GetDeviceInterfaceName($lParam)
+                            if (-not [string]::IsNullOrWhiteSpace($interfaceName)) {
+                                $trigger = if ($deviceEvent -eq [MonitorAPI]::DBT_DEVICEARRIVAL) { "Arrival" } else { "Removal" }
+                                # A device interface arriving is not a display topology change,
+                                # so it must not force a re-enumeration on its own.
+                                $reason = ""
+                                Invoke-UsbInputTrigger -InterfacePath $interfaceName -Trigger $trigger
+                            }
+                        }
+                    }
                     0x0218 {
                         $powerEvent = [int]$wParam.ToInt64()
                         if ($powerEvent -in @(0x0006, 0x0007, 0x0012)) { $reason = "resume" }
@@ -5850,6 +6151,7 @@ function Initialize-DisplayRecoveryEventPipeline {
             }
             if ($script:DisplayRecoveryHwndSource) {
                 $script:DisplayRecoveryHwndSource.AddHook($script:DisplayRecoveryWindowHook)
+                Register-UsbDeviceNotifications -Handle $interop.Handle
             }
         } catch {
             $script:DisplayRecoveryHwndSource = $null
@@ -5882,6 +6184,7 @@ function Stop-DisplayRecoveryEventPipeline {
     if ($script:DisplayRecoveryDebounceTimer) { $script:DisplayRecoveryDebounceTimer.Stop() }
     if ($script:DisplayRecoveryEventPumpTimer) { $script:DisplayRecoveryEventPumpTimer.Stop() }
     Stop-DdcLivenessWorker -Cancel
+    Unregister-UsbDeviceNotifications
     if ($script:DisplayRecoveryHwndSource -and $script:DisplayRecoveryWindowHook) {
         try { $script:DisplayRecoveryHwndSource.RemoveHook($script:DisplayRecoveryWindowHook) } catch { $null = $_ }
     }
@@ -9170,6 +9473,92 @@ $inputSourceCombo.Add_SelectionChanged({
     $writeValue = Resolve-InputSourceWriteValue -Value ([int]$inputSourceCombo.SelectedItem.Tag) -SingleByte (Test-MonitorInputSourceSingleByte -Monitor $monitor)
     Invoke-ManualVcpWrite -Code ([MonitorAPI]::VCP_INPUT_SOURCE) -Value ([uint32]$writeValue) -ActionLabel "Change monitor input to $($inputSourceCombo.SelectedItem.Content)" | Out-Null
 })
+$usbInputEnabledCheckbox.Add_Click({
+    if ($script:UpdatingUsbInputUI) { return }
+    $enabled = [bool]$usbInputEnabledCheckbox.IsChecked
+    if ($enabled -and @($script:UsbInputRules).Count -eq 0) {
+        Update-Status "Add a USB rule before enabling USB input switching" -Severity Warning -Key "Status.UsbInputNoRules"
+        $usbInputEnabledCheckbox.IsChecked = $false
+        return
+    }
+    $script:UsbInputTriggerEnabled = $enabled
+    if (-not (Save-UsbInputRules)) {
+        $script:UsbInputTriggerEnabled = -not $enabled
+        Update-Status "USB input rules could not be saved" -Severity Error -Key "Status.UsbInputSaveFailed"
+    }
+    Update-UsbInputControls
+})
+$usbInputMonitorCombo.Add_SelectionChanged({
+    if ($script:UpdatingUsbInputUI) { return }
+    Update-UsbInputTargetInputCombo
+})
+$usbInputTargetAddBtn.Add_Click({
+    if ($null -eq $usbInputMonitorCombo.SelectedItem -or $null -eq $usbInputTargetInputCombo.SelectedItem) {
+        Update-Status "Select a display and an input first" -Severity Warning -Key "Status.UsbInputTargetIncomplete"
+        return
+    }
+    $identityKey = [string]$usbInputMonitorCombo.SelectedItem.Tag
+    $draft = @(@($script:UsbInputRuleTargetDraft) | Where-Object { [string]$_.IdentityKey -ne $identityKey })
+    $draft += [PSCustomObject]@{ IdentityKey = $identityKey; InputValue = [int]$usbInputTargetInputCombo.SelectedItem.Tag }
+    $script:UsbInputRuleTargetDraft = @(ConvertTo-UsbInputRuleTargets -Targets $draft)
+    Update-UsbInputControls
+})
+$usbInputTargetRemoveBtn.Add_Click({
+    if ($null -eq $usbInputTargetList.SelectedItem) { return }
+    $identityKey = [string]$usbInputTargetList.SelectedItem.Tag
+    $script:UsbInputRuleTargetDraft = @(@($script:UsbInputRuleTargetDraft) | Where-Object { [string]$_.IdentityKey -ne $identityKey })
+    Update-UsbInputControls
+})
+$usbInputRuleAddBtn.Add_Click({
+    $deviceId = ConvertTo-UsbDeviceId -Text ([string]$usbInputDeviceBox.Text)
+    if ([string]::IsNullOrWhiteSpace($deviceId)) {
+        Update-Status "Enter a USB device as VID_xxxx&PID_xxxx or xxxx:xxxx" -Severity Error -Key "Status.UsbInputDeviceInvalid"
+        return
+    }
+    if (@($script:UsbInputRuleTargetDraft).Count -eq 0) {
+        Update-Status "Add at least one display to the rule" -Severity Error -Key "Status.UsbInputTargetsMissing"
+        return
+    }
+    $suppression = 0
+    if (-not [int]::TryParse(([string]$usbInputSuppressionBox.Text).Trim(), [ref]$suppression) -or $suppression -lt 0 -or $suppression -gt 3600) {
+        Update-Status "Suppression window must be 0-3600 seconds" -Severity Error -Key "Status.UsbInputSuppressionInvalid"
+        return
+    }
+    $trigger = if ($null -ne $usbInputTriggerCombo.SelectedItem) { [string]$usbInputTriggerCombo.SelectedItem.Content } else { "Arrival" }
+    $rules = @(New-UsbInputRuleObject -DeviceId $deviceId -Trigger $trigger -SuppressionSeconds $suppression -AllowRiskyVcp ([bool]$usbInputRiskyConsentCheckbox.IsChecked) -Targets $script:UsbInputRuleTargetDraft)
+    if ($rules.Count -eq 0) {
+        Update-Status "The USB rule was rejected as invalid" -Severity Error -Key "Status.UsbInputRuleInvalid"
+        return
+    }
+    $previousRules = @($script:UsbInputRules)
+    $script:UsbInputRules = @($previousRules) + @($rules)
+    if (-not (Save-UsbInputRules)) {
+        $script:UsbInputRules = $previousRules
+        Update-Status "USB input rules could not be saved" -Severity Error -Key "Status.UsbInputSaveFailed"
+        return
+    }
+    $script:UsbInputRuleTargetDraft = @()
+    Update-UsbInputControls
+    Update-Status "Added USB $trigger rule for $deviceId"
+})
+$usbInputRuleRemoveBtn.Add_Click({
+    if ($null -eq $usbInputRulesList.SelectedItem) { return }
+    $ruleId = [string]$usbInputRulesList.SelectedItem.Tag
+    $previousRules = @($script:UsbInputRules)
+    $previousEnabled = [bool]$script:UsbInputTriggerEnabled
+    $script:UsbInputRules = @($previousRules | Where-Object { [string]$_.Id -ne $ruleId })
+    if (@($script:UsbInputRules).Count -eq 0) { $script:UsbInputTriggerEnabled = $false }
+    if (-not (Save-UsbInputRules)) {
+        $script:UsbInputRules = $previousRules
+        $script:UsbInputTriggerEnabled = $previousEnabled
+        Update-Status "USB input rules could not be saved" -Severity Error -Key "Status.UsbInputSaveFailed"
+        return
+    }
+    $null = $script:UsbInputRuleLastFiredUtc.Remove($ruleId)
+    Update-UsbInputControls
+    Update-Status "Removed the USB input rule"
+})
+
 function Get-InputSourceEditorMonitor {
     if ($script:CurrentMonitorIndex -lt 0 -or $script:CurrentMonitorIndex -ge $script:PhysicalMonitors.Count) { return $null }
     return $script:PhysicalMonitors[$script:CurrentMonitorIndex]
@@ -9918,7 +10307,7 @@ function Export-NavigationRenders {
 }
 
 # Initialize
-Initialize-WmiBrightness; Load-MonitorIdentitySettings; Import-CapabilitySafetyState; Import-VcpWriteSafetyState; Import-InputSourceSettings; Import-OptionalHelperSettings; Import-DisplayStateRestoreSettings; Import-CapabilitiesCache; Import-DdcTimingSettings; Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList
+Initialize-WmiBrightness; Load-MonitorIdentitySettings; Import-CapabilitySafetyState; Import-VcpWriteSafetyState; Import-InputSourceSettings; Import-UsbInputRules; Import-OptionalHelperSettings; Import-DisplayStateRestoreSettings; Import-CapabilitiesCache; Import-DdcTimingSettings; Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Load-MonitorSettings; Update-ProfilesList; Update-UsbInputControls
 Load-AppProfileRules; Update-AppProfileControls; Start-AppProfileWatcher
 Load-ProfileSchedules; Update-ScheduleControls; Start-ProfileScheduleWatcher
 Load-IdleDimSettings; Update-IdleDimControls; Start-IdleDimWatcher
