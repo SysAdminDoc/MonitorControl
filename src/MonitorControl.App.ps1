@@ -3812,6 +3812,11 @@ function Open-UpdateCheckRelease {
     try { Start-Process -FilePath $url | Out-Null; return $true } catch { return $false }
 }
 
+function Open-DdcCompatibilityIssue {
+    $url = "https://github.com/SysAdminDoc/MonitorControl/issues/new?template=ddc-compatibility.yml"
+    try { Start-Process -FilePath $url | Out-Null; return $true } catch { return $false }
+}
+
 function Dismiss-UpdateCheckRelease {
     if ([string]::IsNullOrWhiteSpace([string]$script:UpdateCheckLastVersion)) { return }
     $script:UpdateCheckDismissedVersion = [string]$script:UpdateCheckLastVersion
@@ -5399,7 +5404,7 @@ if ($CliWorker) {
                                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="10"/><RowDefinition Height="Auto"/><RowDefinition Height="10"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                                 <Grid>
                                     <StackPanel><TextBlock Text="DDC support bundle" Style="{StaticResource SectionTitle}"/><TextBlock Text="The preview below is the exact human-readable report saved with a structured JSON copy." Foreground="{DynamicResource MutedTextBrush}" Margin="0,3,0,0"/></StackPanel>
-                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center"><Button x:Name="DdcReportGenerateBtn" Content="Build report" Style="{StaticResource GreenBtn}" AutomationProperties.Name="Build DDC compatibility report"/><Button x:Name="DdcReportCopyBtn" Content="Copy report" Style="{StaticResource Btn}" Margin="8,0,0,0"/></StackPanel>
+                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center"><Button x:Name="DdcReportGenerateBtn" Content="Build report" Style="{StaticResource GreenBtn}" AutomationProperties.Name="Build DDC compatibility report"/><Button x:Name="DdcReportCopyBtn" Content="Copy report" Style="{StaticResource Btn}" Margin="8,0,0,0"/><Button x:Name="DdcReportSubmitBtn" Content="Submit report" Style="{StaticResource Btn}" Margin="8,0,0,0" AutomationProperties.Name="Submit DDC compatibility report"/></StackPanel>
                                 </Grid>
                                 <StackPanel Grid.Row="2">
                                     <TextBlock Text="Identifiers and local names are pseudonymized by default. Addresses and credential-like values are always redacted." Foreground="{DynamicResource MutedTextBrush}" TextWrapping="Wrap"/>
@@ -5576,7 +5581,7 @@ $automationBridgeKeyBox = $window.FindName("AutomationBridgeKeyBox"); $automatio
 $runAtLoginEnabledCheckbox = $window.FindName("RunAtLoginEnabledCheckbox"); $runAtLoginStatusText = $window.FindName("RunAtLoginStatusText")
 $updateCheckEnabledCheckbox = $window.FindName("UpdateCheckEnabledCheckbox"); $updateCheckStatusText = $window.FindName("UpdateCheckStatusText")
 $updateCheckNowBtn = $window.FindName("UpdateCheckNowBtn"); $updateCheckOpenBtn = $window.FindName("UpdateCheckOpenBtn"); $updateCheckDismissBtn = $window.FindName("UpdateCheckDismissBtn")
-$ddcReportGenerateBtn = $window.FindName("DdcReportGenerateBtn"); $ddcReportCopyBtn = $window.FindName("DdcReportCopyBtn")
+$ddcReportGenerateBtn = $window.FindName("DdcReportGenerateBtn"); $ddcReportCopyBtn = $window.FindName("DdcReportCopyBtn"); $ddcReportSubmitBtn = $window.FindName("DdcReportSubmitBtn")
 $ddcReportIncludeIdentifiersCheckbox = $window.FindName("DdcReportIncludeIdentifiersCheckbox"); $ddcReportIncludeNamesCheckbox = $window.FindName("DdcReportIncludeNamesCheckbox")
 $statusText = $window.FindName("StatusText"); $autoModeText = $window.FindName("AutoModeText")
 $transactionProgressPanel = $window.FindName("TransactionProgressPanel"); $transactionProgressText = $window.FindName("TransactionProgressText")
@@ -10533,6 +10538,12 @@ $ddcReportGenerateBtn.Add_Click({ Start-DdcReportWorker })
 $ddcReportCopyBtn.Add_Click({
     $text = if ($script:DdcReportLastText) { $script:DdcReportLastText } else { $ddcReportBox.Text }
     if (Copy-DdcCompatibilityReport -Text $text) { Update-Status "DDC report copied" } else { Update-Status "No DDC report to copy" }
+})
+$ddcReportSubmitBtn.Add_Click({
+    $text = if ($script:DdcReportLastText) { $script:DdcReportLastText } else { $ddcReportBox.Text }
+    if (-not $text) { Update-Status "Build a DDC report first"; return }
+    if (-not (Copy-DdcCompatibilityReport -Text $text)) { Update-Status "DDC report could not be copied"; return }
+    if (Open-DdcCompatibilityIssue) { Update-Status "Report copied; compatibility issue form opened" } else { Update-Status "Report copied; issue form could not be opened" }
 })
 $fpsOverlayStartBtn.Add_Click({ Show-FpsOverlay })
 $fpsOverlayStopBtn.Add_Click({ Hide-FpsOverlay })

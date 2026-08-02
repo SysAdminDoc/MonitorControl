@@ -903,6 +903,71 @@ function Get-MonitorEdidModelId {
     return ($manufacturer + $model).ToUpperInvariant()
 }
 
+function Get-DdcCompatibilityDatabasePath {
+    if (-not [string]::IsNullOrWhiteSpace([string]$script:DdcCompatibilityDatabasePathOverride)) {
+        return [string]$script:DdcCompatibilityDatabasePathOverride
+    }
+    $root = [string]$script:MonitorControlRoot
+    if ([string]::IsNullOrWhiteSpace($root)) { return "" }
+    return (Join-Path $root "ddc-compatibility.json")
+}
+
+function Import-DdcCompatibilityDatabase {
+    $path = Get-DdcCompatibilityDatabasePath
+    if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path -PathType Leaf)) { return @() }
+    if ($script:DdcCompatibilityDatabaseLoadedPath -eq $path -and $null -ne $script:DdcCompatibilityDatabaseCache) {
+        return @($script:DdcCompatibilityDatabaseCache)
+    }
+    $script:DdcCompatibilityDatabaseLoadedPath = $path
+    $script:DdcCompatibilityDatabaseCache = @()
+    try {
+        $document = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        if ($null -eq $document -or [int]$document.SchemaVersion -ne 1) { return @() }
+        $entries = @()
+        foreach ($entry in @($document.Entries)) {
+            $edidId = ([string]$entry.EdidId).Trim().ToUpperInvariant()
+            $action = ([string]$entry.CapabilityAction).Trim()
+            if ($edidId -notmatch '^[A-Z0-9]{3,32}$' -or $action -notin @("Exclude", "Observe")) { continue }
+            $model = ([string]$entry.Model).Trim()
+            if ($model.Length -gt 160) { $model = $model.Substring(0, 160) }
+            $notes = ([string]$entry.Notes).Trim()
+            if ($notes.Length -gt 1000) { $notes = $notes.Substring(0, 1000) }
+            $knownCodes = @($entry.KnownVcpCodes | ForEach-Object { [string]$_ } | Where-Object { $_ -match '^(?i)0x[0-9a-f]{1,2}$' } | Select-Object -First 64)
+            $badCodes = @($entry.KnownBadVcpCodes | ForEach-Object { [string]$_ } | Where-Object { $_ -match '^(?i)0x[0-9a-f]{1,2}$' } | Select-Object -First 64)
+            $inputValues = @($entry.InputValues | ForEach-Object { [int]$_ } | Where-Object { $_ -ge 0 -and $_ -le 255 } | Select-Object -First 64)
+            $references = @($entry.References | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -match '^https?://[^\s]{1,512}$' } | Select-Object -First 8)
+            $rate = 0
+            if ($null -ne $entry.WriteRateLimitPerHour) { $rate = [Math]::Max(0, [Math]::Min(100000, [int]$entry.WriteRateLimitPerHour)) }
+            $entries += [PSCustomObject]@{
+                EdidId = $edidId
+                Model = $model
+                CapabilityAction = $action
+                KnownVcpCodes = $knownCodes
+                KnownBadVcpCodes = $badCodes
+                InputValues = $inputValues
+                WriteRateLimitPerHour = $rate
+                Notes = $notes
+                References = $references
+                Source = "BundledDatabase"
+            }
+        }
+        $script:DdcCompatibilityDatabaseCache = @($entries)
+        return @($script:DdcCompatibilityDatabaseCache)
+    } catch {
+        return @()
+    }
+}
+
+function Get-DdcCompatibilityDatabaseEntry {
+    param($Monitor)
+    $edidId = Get-MonitorEdidModelId -Monitor $Monitor
+    if ([string]::IsNullOrWhiteSpace($edidId)) { return $null }
+    foreach ($entry in @(Import-DdcCompatibilityDatabase)) {
+        if ([string]$entry.EdidId -eq $edidId) { return $entry }
+    }
+    return $null
+}
+
 function Get-CapabilitiesBlocklistEntry {
     param($Monitor)
     $edidId = Get-MonitorEdidModelId -Monitor $Monitor
@@ -910,6 +975,8 @@ function Get-CapabilitiesBlocklistEntry {
     foreach ($entry in @($script:CapabilitiesKnownBadModels)) {
         if ([string]$entry.EdidId -eq $edidId) { return $entry }
     }
+    $databaseEntry = Get-DdcCompatibilityDatabaseEntry -Monitor $Monitor
+    if ($databaseEntry -and [string]$databaseEntry.CapabilityAction -eq "Exclude") { return $databaseEntry }
     return $null
 }
 

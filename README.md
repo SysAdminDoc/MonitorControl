@@ -414,6 +414,8 @@ otherwise load or execute from the folder it was extracted into, so both are **o
 - Use **Exclude selected** or **Clear exclusions** in **System > Display & DDC** to manage the per-monitor exclusion list
 - A successful read is cached in `%APPDATA%\MonitorControlPro\capabilities-cache.json` and replayed on later launches; use **Clear cache** to force a re-read
 - Monitor models known upstream to fault the Windows kernel during a capability read are skipped before any probe, with the reason shown in the DDC compatibility report
+- The shipped `ddc-compatibility.json` database adds a second-line model lookup for capability safety. Built-in emergency blocks remain authoritative; database entries are validated and ignored if malformed.
+- In **System > Diagnostics**, choose **Submit report** to copy the redacted report and open the [DDC compatibility issue form](https://github.com/SysAdminDoc/MonitorControl/issues/new?template=ddc-compatibility.yml). Review the clipboard before submitting and remove any private details.
 
 ### DDC Timing Per Monitor
 
