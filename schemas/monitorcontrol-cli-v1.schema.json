@@ -1,0 +1,33 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/SysAdminDoc/MonitorControl/schemas/monitorcontrol-cli-v1.schema.json",
+  "title": "MonitorControl Pro CLI JSON envelope v1",
+  "description": "Stable JSON output for the portable headless CLI. Unknown fields are intentionally allowed for forward-compatible readers.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["SchemaVersion", "Command", "Success", "ExitCode", "Data", "Error"],
+  "properties": {
+    "SchemaVersion": { "const": 1 },
+    "Command": {
+      "type": "string",
+      "enum": ["list", "get", "set", "profile", "diagnostics", "b", "s"]
+    },
+    "Success": { "type": "boolean" },
+    "ExitCode": { "type": "integer", "enum": [0, 2, 3, 4, 5, 6, 10] },
+    "Data": {},
+    "Error": {
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["Code", "Message"],
+          "properties": {
+            "Code": { "type": "string", "minLength": 1 },
+            "Message": { "type": "string" }
+          }
+        }
+      ]
+    }
+  }
+}

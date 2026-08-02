@@ -5436,6 +5436,19 @@ Describe "Headless CLI contract" {
         (($result.Envelope | ConvertTo-Json -Depth 10 -Compress) | ConvertFrom-Json).Error | Should -BeNullOrEmpty
     }
 
+    It "ships a forward-compatible CLI envelope schema" {
+        $schemaPath = Join-Path $script:RepoRoot "schemas\monitorcontrol-cli-v1.schema.json"
+        Test-Path -LiteralPath $schemaPath -PathType Leaf | Should -BeTrue
+        $schema = Get-Content -LiteralPath $schemaPath -Raw | ConvertFrom-Json
+        $schema.properties.SchemaVersion.const | Should -Be 1
+        @($schema.required) | Should -Contain "SchemaVersion"
+        @($schema.required) | Should -Contain "Error"
+        $schema.additionalProperties | Should -BeTrue
+        @($schema.properties.ExitCode.enum) | Should -Contain 10
+        @($schema.properties.Command.enum) | Should -Contain "diagnostics"
+        $schema.properties.Error.anyOf[1].additionalProperties | Should -BeTrue
+    }
+
     It "requires a stable monitor selector when more than one target is usable" {
         $monitors = @((New-CliTestMonitor), (New-CliTestMonitor -Identity "winrt:stable-b" -Label "Side display" -Handle ([IntPtr]0x7002)))
         $result = Invoke-MonitorControlCli -Command get -Argument 0x10 -MonitorData $monitors -ReadAction { throw "must not read" }
