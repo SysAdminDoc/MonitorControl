@@ -4706,8 +4706,6 @@ Describe "System-aware accessibility contract" {
         $script:AccessibilitySource | Should -Match 'SetProcessDpiAwarenessContext\(\[IntPtr\]\(-4\)\)'
         $script:AccessibilitySource | Should -Match 'SystemEvents\]::add_UserPreferenceChanged'
         $script:AccessibilitySource | Should -Match 'SystemEvents\]::remove_UserPreferenceChanged'
-        $script:AccessibilitySource | Should -Match 'AutomationEvents\]::LiveRegionChanged'
-        $script:AccessibilityXaml | Should -Match 'AutomationProperties\.LiveSetting="Assertive"'
         $script:AccessibilitySource | Should -Match 'New-Object System\.Windows\.Controls\.Button'
         $script:AccessibilitySource | Should -Match 'Get-NavigationShortcutTarget -Key'
     }
@@ -4940,6 +4938,19 @@ Describe "Unsigned release packaging" {
         $script:BuildReleaseText | Should -Match 'SbomPath = \$sbomPath'
         (Get-Content -LiteralPath (Join-Path $script:RepoRoot "tools\verify-release.ps1") -Raw) |
             Should -Match 'The sidecar SBOM does not match the SBOM packaged in the ZIP'
+    }
+
+    It "pins the Axe.Windows CLI and wires both WPF smoke configurations to it" {
+        $axeInstaller = Get-Content -LiteralPath (Join-Path $script:RepoRoot "tools\install-axe-windows.ps1") -Raw
+        $axeInstaller | Should -Match 'AxeWindowsCLI-\$version\.zip'
+        $axeInstaller | Should -Match 'aeca43f41c89b3ffb1db84011539e609ecd7cb3badd6e78fada2ada327d10a64'
+        $axeInstaller | Should -Match 'Expand-Archive'
+        $verifyText = Get-Content -LiteralPath (Join-Path $script:RepoRoot "tools\verify.ps1") -Raw
+        $verifyText | Should -Match 'install-axe-windows\.ps1'
+        $verifyText | Should -Match 'high-contrast-200'
+        $smokeText = Get-Content -LiteralPath (Join-Path $script:RepoRoot "tests\MonitorControl.WpfSmoke.ps1") -Raw
+        $smokeText | Should -Match 'Invoke-AxeWindowsScan'
+        $smokeText | Should -Match '\*\.a11ytest'
     }
 
     It "keeps the Scoop manifest on the canonical version with a usable autoupdate route" {

@@ -243,7 +243,7 @@ Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser
 .\tools\verify.ps1
 ```
 
-This is the same pinned lane used by CI. It gates a pure-ASCII check across every PowerShell source, static-analysis errors and warnings against `PSScriptAnalyzerSettings.psd1`, deterministic protocol/persistence/concurrency tests, isolated standard and high-contrast/200%-text UI Automation smokes, native accessibility-event delivery, and an unsigned portable ZIP build. The WPF smoke tests redirect `APPDATA` and `LOCALAPPDATA` to disposable directories and verify that the real `%APPDATA%\MonitorControlPro` tree is unchanged.
+This is the same pinned lane used by CI. It gates a pure-ASCII check across every PowerShell source, static-analysis errors and warnings against `PSScriptAnalyzerSettings.psd1`, deterministic protocol/persistence/concurrency tests, isolated standard and high-contrast/200%-text UI Automation smokes, native accessibility-event delivery, Axe.Windows 2.4.2 scans, and an unsigned portable ZIP build. The WPF smoke tests redirect `APPDATA` and `LOCALAPPDATA` to disposable directories and verify that the real `%APPDATA%\MonitorControlPro` tree is unchanged. The lane downloads the self-contained Axe.Windows CLI from its pinned upstream release and verifies its SHA-256 before use; `.a11ytest` artifacts remain under `dist\accessibility\` for inspection after a pass or failure.
 
 ## Usage
 
