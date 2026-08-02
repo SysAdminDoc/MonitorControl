@@ -192,6 +192,12 @@ best-effort rollback from the GUI transaction path. JSON mode emits exactly one 
 {"SchemaVersion":1,"Command":"get","Success":true,"ExitCode":0,"Data":{"Identity":"winrt:0123456789abcdef","Vcp":"0x10","Current":50,"Maximum":100,"Type":0},"Error":null}
 ```
 
+The envelope contract is versioned in [`schemas/monitorcontrol-cli-v1.schema.json`](schemas/monitorcontrol-cli-v1.schema.json)
+and is also packaged as `monitorcontrol-cli-v1.schema.json` in release ZIPs. Readers must use
+`SchemaVersion` and tolerate unknown fields; a breaking change requires a new schema version.
+Error objects always contain a stable `Code` and a human-readable `Message`, and the JSON output
+never includes bridge keys or other credentials.
+
 | Exit code | Meaning |
 |---:|---|
 | `0` | Success, including an `-IfNeeded` no-op |
@@ -201,6 +207,14 @@ best-effort rollback from the GUI transaction path. JSON mode emits exactly one 
 | `5` | Monitor read, write, verification, or profile transaction failed |
 | `6` | Risky write denied by the shared per-identity safety policy |
 | `10` | Unexpected internal or worker-start failure |
+
+The localhost bridge shares the same stable monitor selectors and uses these routes: an exact,
+body-free `GET /api/health` returns `{ "ok": true }` without authentication; authenticated
+`GET /api/monitors`, `/api/profiles`, and `/api/brightness` read state; authenticated `POST
+/api/brightness` accepts a percentage `value` and optional `monitor`; authenticated `POST
+/api/profile` accepts a profile `name`. Credentials are accepted only through
+`X-MonitorControl-Key` or `Authorization: Bearer`, never query strings or JSON bodies. Unknown
+routes and malformed requests return deterministic 4xx JSON responses.
 
 ### Build a Release ZIP
 ```powershell

@@ -1,5 +1,6 @@
 # Changelog
 
+- Added: the headless CLI and localhost bridge now publish a versioned v1 JSON contract with a forward-compatible schema, stable exit codes, documented selectors/routes, and release-packaged schema fixtures.
 - Added: release builds now emit an offline-verifiable manifest with payload and ZIP SHA-256 hashes, source commit, runtime metadata, and a CycloneDX SBOM. Tagged CI builds publish GitHub artifact provenance; releases remain intentionally unsigned.
 - Added: an opt-in, notify-only update check under **System > Overview**. It queries the GitHub releases API with an `ETag` cache, compares the release tag with the installed version, and offers dismissible links to the release page without downloading or executing anything; failures stay silent beyond diagnostics.
 - Added: the UI now selects the Windows display language by default, resolves static, runtime, tray, dialog, and automation-accessible text through invariant resource keys with English fallback, and formats displayed values with the selected culture. A `-Culture` override and expanded/accented `qps-ploc` pseudo-locale exercise localization without requiring a translated build.
