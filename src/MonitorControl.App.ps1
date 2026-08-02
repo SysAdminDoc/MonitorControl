@@ -37,6 +37,7 @@ using System.Runtime.InteropServices;
 using System.Collections.Generic;
 using System.Text;
 using System.Threading;
+using System.Diagnostics;
 
 public class MonitorAPI
 {
@@ -224,6 +225,7 @@ public class MonitorAPI
         public uint Value;
         public string Key;
         public string MonitorName;
+        public string IdentityKey;
         public bool Force;
     }
 
@@ -237,6 +239,7 @@ public class MonitorAPI
     public class VcpWriteResult {
         public string MonitorName;
         public string Key;
+        public string IdentityKey;
         public byte Code;
         public uint Value;
         public bool Success;
@@ -244,6 +247,8 @@ public class MonitorAPI
         public int Attempts;
         public string ErrorMessage;
         public DateTime TimestampUtc;
+        public long RoundTripMilliseconds;
+        public bool Suppressed;
     }
 
     // Last value known to be on the panel for a given handle+code, seeded by successful reads
@@ -344,7 +349,7 @@ public class MonitorAPI
 
     public static bool QueueVCPWrite(IntPtr hMonitor, byte bVCPCode, uint dwNewValue, string coalesceKey, string monitorName)
     {
-        return QueueVCPWrite(hMonitor, bVCPCode, dwNewValue, coalesceKey, monitorName, false);
+        return QueueVCPWrite(hMonitor, bVCPCode, dwNewValue, coalesceKey, monitorName, "", false);
     }
 
     // Pure predicate so the decision can be exercised without touching hardware.
@@ -357,17 +362,35 @@ public class MonitorAPI
 
     public static bool QueueVCPWrite(IntPtr hMonitor, byte bVCPCode, uint dwNewValue, string coalesceKey, string monitorName, bool force)
     {
+        return QueueVCPWrite(hMonitor, bVCPCode, dwNewValue, coalesceKey, monitorName, "", force);
+    }
+
+    public static bool QueueVCPWrite(IntPtr hMonitor, byte bVCPCode, uint dwNewValue, string coalesceKey, string monitorName, string identityKey, bool force)
+    {
         if (hMonitor == IntPtr.Zero) { return false; }
         if (ShouldSuppressVcpWrite(hMonitor, bVCPCode, dwNewValue, force))
         {
             Interlocked.Increment(ref SuppressedVcpWrites);
+            AddVcpWriteResult(new VcpWriteResult {
+                MonitorName = monitorName,
+                IdentityKey = identityKey,
+                Key = coalesceKey,
+                Code = bVCPCode,
+                Value = dwNewValue,
+                Success = true,
+                Suppressed = true,
+                Attempts = 0,
+                ErrorMessage = "",
+                TimestampUtc = DateTime.UtcNow,
+                RoundTripMilliseconds = 0
+            });
             return true;
         }
         string key = String.IsNullOrEmpty(coalesceKey) ? hMonitor.ToInt64().ToString("X") + ":" + bVCPCode.ToString("X2") : coalesceKey;
         lock (VcpWriteQueueLock)
         {
             if (VcpWriteCancellationRequested) { return false; }
-            QueuedVcpWrites[key] = new QueuedVcpWrite { Handle = hMonitor, Code = bVCPCode, Value = dwNewValue, Key = key, MonitorName = monitorName, Force = force };
+            QueuedVcpWrites[key] = new QueuedVcpWrite { Handle = hMonitor, Code = bVCPCode, Value = dwNewValue, Key = key, MonitorName = monitorName, IdentityKey = identityKey, Force = force };
             if (!VcpWriteWorkerActive)
             {
                 VcpWriteWorkerActive = true;
@@ -554,6 +577,19 @@ public class MonitorAPI
                     if (suppress)
                     {
                         Interlocked.Increment(ref SuppressedVcpWrites);
+                        AddVcpWriteResult(new VcpWriteResult {
+                            MonitorName = write.MonitorName,
+                            IdentityKey = write.IdentityKey,
+                            Key = write.Key,
+                            Code = write.Code,
+                            Value = write.Value,
+                            Success = true,
+                            Suppressed = true,
+                            Attempts = 0,
+                            ErrorMessage = "",
+                            TimestampUtc = DateTime.UtcNow,
+                            RoundTripMilliseconds = 0
+                        });
                         Thread.Sleep(50);
                         continue;
                     }
@@ -562,6 +598,7 @@ public class MonitorAPI
                 int attempts = 0;
                 bool success = false;
                 string errorMessage = "";
+                Stopwatch stopwatch = Stopwatch.StartNew();
                 try
                 {
                     success = SetVCPWithRetry(write.Handle, write.Code, write.Value, VcpWriteRetryCount, out lastError, out attempts);
@@ -570,8 +607,10 @@ public class MonitorAPI
                 {
                     errorMessage = ex.Message;
                 }
+                stopwatch.Stop();
                 AddVcpWriteResult(new VcpWriteResult {
                     MonitorName = write.MonitorName,
+                    IdentityKey = write.IdentityKey,
                     Key = write.Key,
                     Code = write.Code,
                     Value = write.Value,
@@ -579,7 +618,9 @@ public class MonitorAPI
                     LastError = lastError,
                     Attempts = attempts,
                     ErrorMessage = errorMessage,
-                    TimestampUtc = DateTime.UtcNow
+                    TimestampUtc = DateTime.UtcNow,
+                    RoundTripMilliseconds = stopwatch.ElapsedMilliseconds,
+                    Suppressed = false
                 });
                 Thread.Sleep(50);
             }
@@ -1142,6 +1183,8 @@ $script:AutomationBridgeEntropyPath = Join-Path $script:DefaultProfilesPath "aut
 $script:AutomationBridgeWriteLogPath = Join-Path $script:DefaultProfilesPath "automation-bridge-writes.jsonl"
 $script:CapabilitiesCachePath = Join-Path $script:DefaultProfilesPath "capabilities-cache.json"
 $script:DdcTimingSettingsPath = Join-Path $script:DefaultProfilesPath "ddc-timing.json"
+$script:DdcHealthSettingsPath = Join-Path $script:DefaultProfilesPath "ddc-health.json"
+$script:DdcHealthRecords = @{}
 $script:CapabilitiesCache = @{}
 # Reading a capability string is the one call Microsoft documents as able to bring down
 # Windows on a monitor with a malformed EDID, so a model known to do that is never asked.
@@ -1214,6 +1257,7 @@ $script:UpdateCheckSchemaVersion = [int]$script:SettingsDocumentRegistry.UpdateC
 $script:DisplayStateRestoreSchemaVersion = [int]$script:SettingsDocumentRegistry.DisplayRestore.CurrentVersion
 $script:CapabilitiesCacheSchemaVersion = [int]$script:SettingsDocumentRegistry.CapabilitiesCache.CurrentVersion
 $script:DdcTimingSchemaVersion = [int]$script:SettingsDocumentRegistry.DdcTiming.CurrentVersion
+$script:DdcHealthSchemaVersion = [int]$script:SettingsDocumentRegistry.DdcHealth.CurrentVersion
 $script:ProfileTrashSchemaVersion = [int]$script:SettingsDocumentRegistry.ProfileTrash.CurrentVersion
 $script:InputSourceSchemaVersion = [int]$script:SettingsDocumentRegistry.InputSources.CurrentVersion
 $script:UsbInputRulesSchemaVersion = [int]$script:SettingsDocumentRegistry.UsbInputRules.CurrentVersion
@@ -1283,6 +1327,7 @@ $script:UiStrings = @{
     "Action.Refresh" = "Refresh"
     "Action.Save" = "Save"
     "Action.Reset" = "Reset"
+    "Action.ResetHealth" = "Reset health"
     "Action.Query" = "Query"
     "Action.Set" = "Set"
     "Action.ScanAll" = "Scan All"
@@ -2412,6 +2457,7 @@ function Initialize-LocalizationAndAccessibility {
     Set-LocalizedText -Control $refreshBtn -Key "Action.Refresh"
     Set-LocalizedText -Control $monitorLabelSaveBtn -Key "Action.Save"
     Set-LocalizedText -Control $monitorLabelResetBtn -Key "Action.Reset"
+    Set-LocalizedText -Control $monitorHealthResetBtn -Key "Action.ResetHealth"
     Set-LocalizedText -Control $vcpQueryBtn -Key "Action.Query"
     Set-LocalizedText -Control $vcpSetBtn -Key "Action.Set"
     Set-LocalizedText -Control $vcpScanBtn -Key "Action.ScanAll"
@@ -2534,7 +2580,7 @@ function Initialize-LocalizationAndAccessibility {
     }
 
     Set-TabOrder -Controls @(
-        $applyAllCheckbox,$identifyBtn,$refreshBtn,$monitorLabelBox,$monitorLabelSaveBtn,$monitorLabelResetBtn,
+        $applyAllCheckbox,$identifyBtn,$refreshBtn,$monitorLabelBox,$monitorLabelSaveBtn,$monitorLabelResetBtn,$monitorHealthResetBtn,
         $brightnessSlider,$contrastSlider,$redSlider,$greenSlider,$blueSlider,$colorTempWarm,$colorTemp6500,$colorTempCool,$colorTempSRGB,
         $presetDay,$presetNight,$presetAutoMode,$presetAmbientMode,$presetReset,$dynamicContrastOff,$dynamicContrastOn,$pictureModeWeb,$pictureModeCinema,$pictureModeGame,
         $inputSourceCombo,$inputSourceEditorExpander,$inputSourceList,$inputSourceValueBox,$inputSourceLabelBox,$inputSourceAddBtn,$inputSourceRemoveBtn,$inputSourceResetBtn,$inputSourceSingleByteCheckbox,$inputSourceSaveBtn,$powerOffBtn,$powerStandbyBtn,$powerOnBtn,$volumeSlider,$muteCheckbox,$sharpnessSlider,$resetColorBtn,$factoryResetBtn,$allMonitorsStandbyBtn,
@@ -3067,6 +3113,7 @@ function Update-VerifiedVcpTransactionWorkerOutput {
     }
     $result = $transaction[0]
     $isCurrent = Test-VerifiedVcpTransactionTargetsCurrent -Targets $targets -Generation $generation
+    if ($isCurrent) { Register-DdcHealthVerificationResult -Transaction $result }
     Stop-VerifiedVcpTransactionWorker
     if (-not $isCurrent) {
         Update-Status "$actionLabel result discarded after the display configuration changed"
@@ -3277,6 +3324,7 @@ function Invoke-ManualVcpWrite {
         return [PSCustomObject]@{ Success = $true; Outcome = "Started"; Results = @(); Rollback = "NotNeeded" }
     }
     $result = & $Transaction $operations
+    Register-DdcHealthVerificationResult -Transaction $result
     $rollback = [string]$result.Rollback
     switch ($result.Outcome) {
         "Verified" { Update-Status "Verified VCP $codeText" }
@@ -4108,6 +4156,7 @@ function Update-MonitorSettingsWorkerOutput {
         $timingProfile = Get-DdcTimingProfile -IdentityKey ([string]$target.IdentityKey)
         $otherCodesResponded = $successes.Count -gt 0 -or (Test-DdcMonitorResponded -IdentityKey ([string]$target.IdentityKey))
         foreach ($settingResult in $targetResults) {
+            Register-DdcHealthRead -IdentityKey ([string]$settingResult.IdentityKey) -Success ([bool]$settingResult.Success) -RoundTripMilliseconds ([int64]$settingResult.RoundTripMilliseconds)
             if (Register-DdcCodeOutcome -TimingProfile $timingProfile -Code ([int]$settingResult.Code) -Success ([bool]$settingResult.Success) -LastError ([int]$settingResult.LastError) -Attempts ([int]$settingResult.Attempts) -OtherCodesResponded $otherCodesResponded) {
                 $timingDirty = $true
             }
@@ -4220,7 +4269,9 @@ function Start-MonitorSettingsWorker {
                 $lastError = [int]0
                 $attempts = [int]0
                 if (@($target.SkipCodes) -contains [int]$code) { continue }
+                $stopwatch = [Diagnostics.Stopwatch]::StartNew()
                 $ok = [MonitorAPI]::ReadVCPWithRetry($target.Handle, [byte]$code, [int]$target.ReadRetries, [int]$target.DelayMilliseconds, [bool]$target.StopOnNullResponse, [ref]$vct, [ref]$current, [ref]$maximum, [ref]$lastError, [ref]$attempts)
+                $stopwatch.Stop()
                 if ($ok) { $anySuccess = $true }
                 [PSCustomObject]@{
                     Kind = "Setting"
@@ -4232,6 +4283,7 @@ function Start-MonitorSettingsWorker {
                     LastError = [int]$lastError
                     Attempts = [int]$attempts
                     RetryCount = [Math]::Max(0, $attempts - 1)
+                    RoundTripMilliseconds = [int64]$stopwatch.ElapsedMilliseconds
                     MonitorName = [string]$target.MonitorName
                     IdentityKey = [string]$target.IdentityKey
                     MonitorIndex = [int]$target.MonitorIndex
@@ -4247,7 +4299,9 @@ function Start-MonitorSettingsWorker {
                 $maximum = [uint32]0
                 $lastError = [int]0
                 $attempts = [int]0
+                $stopwatch = [Diagnostics.Stopwatch]::StartNew()
                 $ok = [MonitorAPI]::ReadVCPWithRetry($target.Handle, [byte]0x00, [int]$target.NullProbeRetries, [int]$target.DelayMilliseconds, [ref]$vct, [ref]$current, [ref]$maximum, [ref]$lastError, [ref]$attempts)
+                $stopwatch.Stop()
                 [PSCustomObject]@{
                     Kind = "NullProbe"
                     Code = 0
@@ -4258,6 +4312,7 @@ function Start-MonitorSettingsWorker {
                     LastError = [int]$lastError
                     Attempts = [int]$attempts
                     RetryCount = [Math]::Max(0, $attempts - 1)
+                    RoundTripMilliseconds = [int64]$stopwatch.ElapsedMilliseconds
                     MonitorName = [string]$target.MonitorName
                     IdentityKey = [string]$target.IdentityKey
                     MonitorIndex = [int]$target.MonitorIndex
@@ -4951,8 +5006,8 @@ if ($CliWorker) {
                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Border Style="{StaticResource PageCard}"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="72"/><ColumnDefinition Width="18"/><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                     <TextBlock Text="&#xE7F8;" FontFamily="Segoe MDL2 Assets" FontSize="42" Foreground="{DynamicResource AccentBrush}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                    <StackPanel Grid.Column="2"><TextBlock Text="Label" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,0,0,6"/><TextBox x:Name="MonitorLabelBox"/><TextBlock x:Name="MonitorIdentityText" Text="Identity: unknown" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,8,0,0" TextTrimming="CharacterEllipsis"/></StackPanel>
-                    <StackPanel Grid.Column="4" Width="130"><Button x:Name="MonitorLabelSaveBtn" Content="Save" Style="{StaticResource AccBtn}"/><Button x:Name="MonitorLabelResetBtn" Content="Reset" Style="{StaticResource Btn}" Margin="0,8,0,0"/></StackPanel>
+                    <StackPanel Grid.Column="2"><TextBlock Text="Label" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,0,0,6"/><TextBox x:Name="MonitorLabelBox"/><TextBlock x:Name="MonitorIdentityText" Text="Identity: unknown" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,8,0,0" TextTrimming="CharacterEllipsis"/><TextBlock x:Name="MonitorDdcHealthText" Text="DDC health: no activity recorded" FontSize="12" Foreground="{DynamicResource MutedTextBrush}" Margin="0,4,0,0" TextWrapping="Wrap"/></StackPanel>
+                    <StackPanel Grid.Column="4" Width="130"><Button x:Name="MonitorLabelSaveBtn" Content="Save" Style="{StaticResource AccBtn}"/><Button x:Name="MonitorLabelResetBtn" Content="Reset" Style="{StaticResource Btn}" Margin="0,8,0,0"/><Button x:Name="MonitorHealthResetBtn" Content="Reset health" Style="{StaticResource Btn}" Margin="0,8,0,0"/></StackPanel>
                 </Grid></Border>
                 <Grid Grid.Row="2"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                     <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
@@ -5483,8 +5538,8 @@ $profilesTab = $window.FindName("ProfilesTab"); $scheduleTab = $window.FindName(
 $monitorCanvas = $window.FindName("MonitorCanvas"); $selectedMonitorName = $window.FindName("SelectedMonitorName")
 $selectedMonitorRes = $window.FindName("SelectedMonitorRes"); $selectedMonitorInfo = $window.FindName("SelectedMonitorInfo")
 $selectedMonitorHealthDot = $window.FindName("SelectedMonitorHealthDot"); $selectedMonitorHealthText = $window.FindName("SelectedMonitorHealthText")
-$monitorLabelBox = $window.FindName("MonitorLabelBox"); $monitorLabelSaveBtn = $window.FindName("MonitorLabelSaveBtn"); $monitorLabelResetBtn = $window.FindName("MonitorLabelResetBtn")
-$monitorIdentityText = $window.FindName("MonitorIdentityText")
+$monitorLabelBox = $window.FindName("MonitorLabelBox"); $monitorLabelSaveBtn = $window.FindName("MonitorLabelSaveBtn"); $monitorLabelResetBtn = $window.FindName("MonitorLabelResetBtn"); $monitorHealthResetBtn = $window.FindName("MonitorHealthResetBtn")
+$monitorIdentityText = $window.FindName("MonitorIdentityText"); $monitorDdcHealthText = $window.FindName("MonitorDdcHealthText")
 $applyAllCheckbox = $window.FindName("ApplyAllCheckbox"); $refreshBtn = $window.FindName("RefreshBtn"); $identifyBtn = $window.FindName("IdentifyBtn")
 $brightnessSlider = $window.FindName("BrightnessSlider"); $brightnessValue = $window.FindName("BrightnessValue")
 $contrastSlider = $window.FindName("ContrastSlider"); $contrastValue = $window.FindName("ContrastValue")
@@ -5605,8 +5660,10 @@ function Update-SelectedMonitorRecoveryUi {
     $lastSuccessUtc = $null
     $failures = 0
     $lastError = ""
+    $selectedIdentityKey = ""
     if ($script:PhysicalMonitors.Count -gt 0 -and $script:CurrentMonitorIndex -ge 0 -and $script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) {
         $monitor = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
+        $selectedIdentityKey = [string]$monitor.IdentityKey
         if ($monitor.PSObject.Properties.Name -contains "RecoveryState") { $state = [string]$monitor.RecoveryState }
         if ($monitor.PSObject.Properties.Name -contains "RecoveryLastSuccessUtc") { $lastSuccessUtc = $monitor.RecoveryLastSuccessUtc }
         if ($monitor.PSObject.Properties.Name -contains "RecoveryConsecutiveFailures") { $failures = [int]$monitor.RecoveryConsecutiveFailures }
@@ -5629,6 +5686,9 @@ function Update-SelectedMonitorRecoveryUi {
     if (-not [string]::IsNullOrWhiteSpace($lastError)) { $tooltip += "`n$lastError" }
     $selectedMonitorHealthText.ToolTip = $tooltip
     $selectedMonitorHealthDot.ToolTip = $tooltip
+    if ($null -ne $monitorDdcHealthText) {
+        $monitorDdcHealthText.Text = Get-DdcHealthSummaryText -IdentityKey $selectedIdentityKey
+    }
 }
 
 function Get-SelectedTimingIdentityKey {
@@ -8259,7 +8319,7 @@ function Update-ProfileStorageControls {
     $writeEnabled = -not $script:ProfileStorageOffline
     foreach ($control in @(
         $profileNameBox, $saveProfileBtn, $deleteProfileBtn, $importProfilesBtn,
-        $monitorLabelBox, $monitorLabelSaveBtn, $monitorLabelResetBtn,
+        $monitorLabelBox, $monitorLabelSaveBtn, $monitorLabelResetBtn, $monitorHealthResetBtn,
         $appProfileEnabledCheckbox, $appProfileExeBox, $appProfileCaptureBtn, $appProfileProfileCombo, $appProfileRiskyConsentCheckbox, $appProfileAddBtn, $appProfileRemoveBtn,
         $scheduleEnabledCheckbox, $scheduleTimeBox, $scheduleProfileCombo, $scheduleRiskyConsentCheckbox, $scheduleAddBtn, $scheduleRemoveBtn,
         $idleDimEnabledCheckbox, $idleDimMinutesBox, $idleDimBrightnessBox, $idleDimRestoreCheckbox, $idleDimSaveBtn,
@@ -9753,6 +9813,13 @@ $monitorLabelResetBtn.Add_Click({
         Update-Status "Monitor label reset: $(Get-MonitorDisplayLabel -Monitor $mon)"
     }
 })
+$monitorHealthResetBtn.Add_Click({
+    $identityKey = Get-SelectedTimingIdentityKey
+    if ([string]::IsNullOrWhiteSpace($identityKey)) { return }
+    Reset-DdcHealthRecord -IdentityKey $identityKey | Out-Null
+    Update-SelectedMonitorRecoveryUi
+    Update-Status "DDC health counters reset"
+})
 
 $brightnessSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$brightnessSlider.Value; $brightnessValue.Text = $v; Set-ScaledVcpFromSlider -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -RawValue $v | Out-Null; Update-DisplayStateRestoreFromUi; Update-TrayPopupState; Update-TrayIconText })
 $contrastSlider.Add_ValueChanged({ if ($script:UpdatingUI) { return }; $v = [int]$contrastSlider.Value; $contrastValue.Text = $v; Set-ScaledVcpFromSlider -VCPCode ([MonitorAPI]::VCP_CONTRAST) -RawValue $v | Out-Null })
@@ -10672,7 +10739,7 @@ function Export-NavigationRenders {
 }
 
 # Initialize
-Initialize-WmiBrightness; Load-MonitorIdentitySettings; Import-CapabilitySafetyState; Import-VcpWriteSafetyState; Import-InputSourceSettings; Import-UsbInputRules; Import-OptionalHelperSettings; Import-UpdateCheckSettings; Import-DisplayStateRestoreSettings; Import-CapabilitiesCache; Import-DdcTimingSettings; Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Initialize-FixedChoiceCombos; Load-MonitorSettings; Update-ProfilesList; Update-UsbInputControls
+Initialize-WmiBrightness; Load-MonitorIdentitySettings; Import-CapabilitySafetyState; Import-VcpWriteSafetyState; Import-InputSourceSettings; Import-UsbInputRules; Import-OptionalHelperSettings; Import-UpdateCheckSettings; Import-DisplayStateRestoreSettings; Import-CapabilitiesCache; Import-DdcTimingSettings; Import-DdcHealthSettings; Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Initialize-FixedChoiceCombos; Load-MonitorSettings; Update-ProfilesList; Update-UsbInputControls
 Load-AppProfileRules; Update-AppProfileControls; Start-AppProfileWatcher
 Load-ProfileSchedules; Update-ScheduleControls; Start-ProfileScheduleWatcher
 Load-IdleDimSettings; Update-IdleDimControls; Start-IdleDimWatcher

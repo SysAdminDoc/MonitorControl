@@ -490,7 +490,7 @@ function Set-AutomationBridgeBrightness {
     foreach ($index in $targets) {
         $mon = $script:PhysicalMonitors[$index]
         $rawTarget = [uint32](ConvertTo-VcpRawValue -Percent ([double]$value) -Maximum (Get-VcpMaximumForMonitor -Monitor $mon -Code ([int][MonitorAPI]::VCP_BRIGHTNESS)))
-        if (Queue-VCPValue -Handle $mon.Handle -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value $rawTarget -Key "bridge:$index`:0x10" -MonitorName $mon.Name) { $queued++ }
+        if (Queue-VCPValue -Handle $mon.Handle -VCPCode ([MonitorAPI]::VCP_BRIGHTNESS) -Value $rawTarget -Key "bridge:$index`:0x10" -MonitorName $mon.Name -IdentityKey $mon.IdentityKey) { $queued++ }
         if ($index -eq $script:CurrentMonitorIndex) {
             $script:UpdatingUI = $true
             try {

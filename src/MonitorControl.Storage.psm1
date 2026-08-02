@@ -291,6 +291,7 @@ function Initialize-MonitorControlSettingsDocumentRegistry {
         [PSCustomObject]@{ Name = "DisplayRestore"; FileName = "display-restore.json"; CurrentVersion = 1; LegacyVersion = 0; MigrationHandler = "Import-DisplayStateRestoreSettings" }
         [PSCustomObject]@{ Name = "CapabilitiesCache"; FileName = "capabilities-cache.json"; CurrentVersion = 1; LegacyVersion = 0; MigrationHandler = "Import-CapabilitiesCache" }
         [PSCustomObject]@{ Name = "DdcTiming"; FileName = "ddc-timing.json"; CurrentVersion = 3; LegacyVersion = 1; MigrationHandler = "Import-DdcTimingSettings" }
+        [PSCustomObject]@{ Name = "DdcHealth"; FileName = "ddc-health.json"; CurrentVersion = 1; LegacyVersion = 0; MigrationHandler = "Import-DdcHealthSettings" }
         [PSCustomObject]@{ Name = "InputSources"; FileName = "input-sources.json"; CurrentVersion = 1; LegacyVersion = 0; MigrationHandler = "Import-InputSourceSettings" }
         [PSCustomObject]@{ Name = "UsbInputRules"; FileName = "usb-input-rules.json"; CurrentVersion = 1; LegacyVersion = 0; MigrationHandler = "Import-UsbInputRules" }
         [PSCustomObject]@{ Name = "UpdateCheck"; FileName = "update-check.json"; CurrentVersion = 1; LegacyVersion = 0; MigrationHandler = "Import-UpdateCheckSettings" }
@@ -781,6 +782,71 @@ function Import-DdcTimingSettings {
         $timingProfile.UnsupportedCodes = @($codes)
         $script:DdcTimingProfiles[$identityKey] = $timingProfile
     }
+}
+
+function Get-DdcHealthSettingsObject {
+    if ($null -eq $script:DdcHealthRecords) { $script:DdcHealthRecords = @{} }
+    $records = @()
+    foreach ($key in @($script:DdcHealthRecords.Keys)) {
+        $entry = $script:DdcHealthRecords[$key]
+        if ($null -eq $entry) { continue }
+        $records += [PSCustomObject]@{
+            IdentityKey = [string]$key
+            WritesSent = [int64]$entry.WritesSent
+            WritesSuppressed = [int64]$entry.WritesSuppressed
+            LastSuccessfulReadUtc = [string]$entry.LastSuccessfulReadUtc
+            LastSuccessfulWriteUtc = [string]$entry.LastSuccessfulWriteUtc
+            ConsecutiveFailures = [int]$entry.ConsecutiveFailures
+            LastRoundTripMilliseconds = [int64]$entry.LastRoundTripMilliseconds
+            LastVerifyOutcome = [string]$entry.LastVerifyOutcome
+            UpdatedAtUtc = [string]$entry.UpdatedAtUtc
+        }
+    }
+    return [PSCustomObject]@{
+        SchemaVersion = [int]$script:DdcHealthSchemaVersion
+        Monitors = @($records)
+    }
+}
+
+function Save-DdcHealthSettings {
+    if ([string]::IsNullOrWhiteSpace([string]$script:DdcHealthSettingsPath)) { return $false }
+    return (Write-JsonFileSafely -Path $script:DdcHealthSettingsPath -Data (Get-DdcHealthSettingsObject) -Depth 5)
+}
+
+function Import-DdcHealthSettings {
+    $script:DdcHealthRecords = @{}
+    if (-not (Test-Path -LiteralPath $script:DdcHealthSettingsPath)) { return }
+    $data = Read-JsonFileSafely -Path $script:DdcHealthSettingsPath -Label "DDC health settings"
+    if ($null -eq $data) { return }
+    $schema = [int](Get-ProfilePropertyValue -Object $data -Property "SchemaVersion" -Default 1)
+    if ($schema -gt $script:DdcHealthSchemaVersion) {
+        Update-Status "DDC health settings use schema v$schema; defaults will be used instead"
+        return
+    }
+    foreach ($record in @((Get-ProfilePropertyValue -Object $data -Property "Monitors" -Default @()))) {
+        if ($null -eq $record) { continue }
+        $identityKey = [string](Get-ProfilePropertyValue -Object $record -Property "IdentityKey" -Default "")
+        if ([string]::IsNullOrWhiteSpace($identityKey)) { continue }
+        $script:DdcHealthRecords[$identityKey] = [PSCustomObject]@{
+            WritesSent = [int64](Get-ProfilePropertyValue -Object $record -Property "WritesSent" -Default 0)
+            WritesSuppressed = [int64](Get-ProfilePropertyValue -Object $record -Property "WritesSuppressed" -Default 0)
+            LastSuccessfulReadUtc = [string](Get-ProfilePropertyValue -Object $record -Property "LastSuccessfulReadUtc" -Default "")
+            LastSuccessfulWriteUtc = [string](Get-ProfilePropertyValue -Object $record -Property "LastSuccessfulWriteUtc" -Default "")
+            ConsecutiveFailures = [int](Get-ProfilePropertyValue -Object $record -Property "ConsecutiveFailures" -Default 0)
+            LastRoundTripMilliseconds = [int64](Get-ProfilePropertyValue -Object $record -Property "LastRoundTripMilliseconds" -Default 0)
+            LastVerifyOutcome = [string](Get-ProfilePropertyValue -Object $record -Property "LastVerifyOutcome" -Default "unknown")
+            UpdatedAtUtc = [string](Get-ProfilePropertyValue -Object $record -Property "UpdatedAtUtc" -Default "")
+        }
+    }
+}
+
+function Reset-DdcHealthRecord {
+    param([string]$IdentityKey)
+    if ([string]::IsNullOrWhiteSpace($IdentityKey)) { return $false }
+    $removed = $script:DdcHealthRecords.ContainsKey($IdentityKey)
+    if ($removed) { $script:DdcHealthRecords.Remove($IdentityKey) }
+    Save-DdcHealthSettings | Out-Null
+    return [bool]$removed
 }
 
 function Get-DisplayStateRestoreSettingsObject {

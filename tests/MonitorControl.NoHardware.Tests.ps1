@@ -346,6 +346,15 @@ public static class MonitorControlVcpWriteProbe
         "Get-MonitorDisplayLabel",
         "Wait-DdcWriteQueueIdle",
         "Drain-DdcWriteResults",
+        "Get-DdcHealthRecord",
+        "Register-DdcHealthRead",
+        "Register-DdcHealthWriteResult",
+        "Register-DdcHealthVerificationResult",
+        "Get-DdcHealthSummaryText",
+        "Get-DdcHealthSettingsObject",
+        "Save-DdcHealthSettings",
+        "Import-DdcHealthSettings",
+        "Reset-DdcHealthRecord",
         "Register-DdcDiagnostic",
         "Get-VcpWriteRiskNote",
         "Invoke-SelectedMonitorVcpReread",
@@ -946,7 +955,7 @@ Describe "Unified settings document registry" {
             "Profile", "ProfileBundle", "ProfileStorage", "MonitorIdentity", "AppProfileRules",
             "ProfileSchedules", "IdleDim", "BatteryProfile", "AutomationBridge", "CapabilitiesSafety",
             "CapabilitiesProbeSentinel", "VcpWriteSafety", "OptionalHelpers", "DisplayRestore",
-            "CapabilitiesCache", "DdcTiming", "InputSources", "UsbInputRules", "UpdateCheck", "ProfileTrash"
+            "CapabilitiesCache", "DdcTiming", "DdcHealth", "InputSources", "UsbInputRules", "UpdateCheck", "ProfileTrash"
         )
         @($script:SettingsDocumentRegistry.Keys) | Should -Be $expected
         foreach ($definition in $script:SettingsDocumentRegistry.Values) {
@@ -4839,6 +4848,7 @@ Authorization: Bearer secret-token-value api_key=another-secret
             Manufacturer = "DEL"; EdidModel = "4098"; EdidSerial = "SERIAL-ABC"; EdidName = "Alice Monitor"
             PhysicalConnector = "DisplayPort"; Resolution = "2560x1440@60Hz"; Primary = $true
             CapabilityStatus = "Known"; SupportedCodes = @(16, 18); RecoveryState = "Fresh"
+            DdcHealth = [pscustomobject]@{ WritesSent = 4; WritesSuppressed = 6; LastSuccessfulReadUtc = "2026-08-01T11:00:00Z"; LastSuccessfulWriteUtc = "2026-08-01T11:30:00Z"; ConsecutiveFailures = 0; LastRoundTripMilliseconds = 14; LastVerifyOutcome = "applied"; UpdatedAtUtc = "2026-08-01T11:30:00Z" }
         }
         $probe = [PSCustomObject]@{ TargetIndex = 0; ProbeIndex = 1; Code = 16; Success = $true; Current = 50; Maximum = 100; Type = 0; LastError = 0; Attempts = 1 }
         $error = [PSCustomObject]@{ Timestamp = [datetime]"2026-08-01T12:00:00Z"; Operation = "Read"; Monitor = "Alice Office"; Code = 16; LastError = 5; Attempts = 2 }
@@ -4850,6 +4860,9 @@ Authorization: Bearer secret-token-value api_key=another-secret
         $document.Privacy.RawMonitorIdentifiersIncluded | Should -BeFalse
         $document.Privacy.RawNamesIncluded | Should -BeFalse
         $document.Monitors[0].Label | Should -Be "Display 1"
+        $document.Monitors[0].DdcHealth.WritesSent | Should -Be 4
+        $document.Monitors[0].DdcHealth.WritesSuppressed | Should -Be 6
+        $document.Monitors[0].DdcHealth.LastRoundTripMilliseconds | Should -Be 14
         foreach ($secret in @("Alice", "SERIAL-ABC", "\\.\DISPLAY9", "MONITOR\DEL4098")) {
             $json | Should -Not -Match ([regex]::Escape($secret))
         }
@@ -5840,6 +5853,71 @@ Describe "Ambient light hysteresis" {
         }
         $writes | Should -Be 1
         $brightness | Should -Be 40
+    }
+}
+
+Describe "DDC health accounting" {
+    BeforeEach {
+        $script:DdcHealthRecords = @{}
+        $script:DdcHealthSettingsPath = Join-Path $TestDrive "ddc-health.json"
+        $script:DdcHealthSchemaVersion = 1
+    }
+
+    It "tracks reads, writes, round trips, and persists the record" {
+        Register-DdcHealthRead -IdentityKey "edid:test" -Success $true -RoundTripMilliseconds 8
+        $result = [pscustomobject]@{
+            IdentityKey = "edid:test"
+            Suppressed = $false
+            Success = $true
+            TimestampUtc = [DateTime]::UtcNow
+            RoundTripMilliseconds = 12
+        }
+        Register-DdcHealthWriteResult -Result $result
+        $record = Get-DdcHealthRecord -IdentityKey "edid:test"
+
+        $record.WritesSent | Should -Be 1
+        $record.WritesSuppressed | Should -Be 0
+        $record.ConsecutiveFailures | Should -Be 0
+        $record.LastRoundTripMilliseconds | Should -Be 12
+        [string]::IsNullOrWhiteSpace([string]$record.LastSuccessfulReadUtc) | Should -BeFalse
+        [string]::IsNullOrWhiteSpace([string]$record.LastSuccessfulWriteUtc) | Should -BeFalse
+        Test-Path -LiteralPath $script:DdcHealthSettingsPath | Should -BeTrue
+        $script:DdcHealthRecords = @{}
+        Import-DdcHealthSettings
+        (Get-DdcHealthRecord -IdentityKey "edid:test").WritesSent | Should -Be 1
+        (Get-DdcHealthRecord -IdentityKey "edid:test").LastRoundTripMilliseconds | Should -Be 12
+    }
+
+    It "tracks suppressed writes and resets one monitor without affecting another" {
+        Register-DdcHealthRead -IdentityKey "edid:a" -Success $false -RoundTripMilliseconds 20
+        Register-DdcHealthWriteResult -Result ([pscustomobject]@{ IdentityKey = "edid:a"; Suppressed = $true; Success = $true; TimestampUtc = [DateTime]::UtcNow; RoundTripMilliseconds = 0 })
+        Register-DdcHealthWriteResult -Result ([pscustomobject]@{ IdentityKey = "edid:b"; Suppressed = $true; Success = $true; TimestampUtc = [DateTime]::UtcNow; RoundTripMilliseconds = 0 })
+
+        $a = Get-DdcHealthRecord -IdentityKey "edid:a"
+        $a.WritesSuppressed | Should -Be 1
+        $a.ConsecutiveFailures | Should -Be 1
+        (Get-DdcHealthSummaryText -IdentityKey "edid:a") | Should -Match "suppressed"
+
+        Reset-DdcHealthRecord -IdentityKey "edid:a" | Should -BeTrue
+        Get-DdcHealthRecord -IdentityKey "edid:a" | Should -Not -BeNullOrEmpty
+        (Get-DdcHealthRecord -IdentityKey "edid:a").WritesSuppressed | Should -Be 0
+        (Get-DdcHealthRecord -IdentityKey "edid:b").WritesSuppressed | Should -Be 1
+    }
+
+    It "records verified transaction outcomes and write latency" {
+        $operation = [pscustomobject]@{ IdentityKey = "edid:verified" }
+        $transaction = [pscustomobject]@{
+            Results = @(
+                [pscustomobject]@{ Operation = $operation; WriteSuccess = $true; Verification = "VerifiedAfterRetry"; WriteRoundTripMilliseconds = 17 },
+                [pscustomobject]@{ Operation = $operation; WriteSuccess = $false; Verification = "WriteFailed"; WriteRoundTripMilliseconds = 4 }
+            )
+        }
+        Register-DdcHealthVerificationResult -Transaction $transaction
+        $record = Get-DdcHealthRecord -IdentityKey "edid:verified"
+        $record.WritesSent | Should -Be 2
+        $record.LastRoundTripMilliseconds | Should -Be 4
+        $record.LastVerifyOutcome | Should -Be "WriteFailed"
+        $record.ConsecutiveFailures | Should -Be 1
     }
 }
 
