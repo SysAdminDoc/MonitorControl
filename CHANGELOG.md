@@ -1,5 +1,6 @@
 # Changelog
 
+- Added: a versioned `ddc-compatibility.json` database is consulted before capability enumeration, seeded with the two known kernel-fault models, and Diagnostics now offers a one-click redacted report handoff to the compatibility issue form.
 - Changed: CI now runs the deterministic no-hardware suite on both pinned Pester 5.9.0 and Pester 6.0.0, making the supported test-tool policy explicit while keeping the Windows PowerShell 5.1 GUI runtime unchanged.
 - Added: the headless CLI and localhost bridge now publish a versioned v1 JSON contract with a forward-compatible schema, stable exit codes, documented selectors/routes, and release-packaged schema fixtures.
 - Added: release builds now emit an offline-verifiable manifest with payload and ZIP SHA-256 hashes, source commit, runtime metadata, and a CycloneDX SBOM. Tagged CI builds publish GitHub artifact provenance; releases remain intentionally unsigned.

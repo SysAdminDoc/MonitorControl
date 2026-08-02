@@ -1,0 +1,27 @@
+{
+  "SchemaVersion": 1,
+  "Entries": [
+    {
+      "EdidId": "LTM2C02",
+      "Model": "LG 27MR400 counterfeit EDID",
+      "CapabilityAction": "Exclude",
+      "KnownVcpCodes": ["0x10", "0x12"],
+      "KnownBadVcpCodes": [],
+      "InputValues": [],
+      "WriteRateLimitPerHour": 0,
+      "Notes": "Skip capability-string reads because malformed EDID reports were associated with a Windows kernel fault.",
+      "References": ["https://github.com/microsoft/PowerToys/issues/47556"]
+    },
+    {
+      "EdidId": "GSM7714",
+      "Model": "LG UltraWide HDR WFHD",
+      "CapabilityAction": "Exclude",
+      "KnownVcpCodes": ["0x10", "0x12"],
+      "KnownBadVcpCodes": [],
+      "InputValues": [],
+      "WriteRateLimitPerHour": 0,
+      "Notes": "Skip capability-string reads because malformed EDID reports were associated with a Windows kernel fault.",
+      "References": ["https://github.com/microsoft/PowerToys/issues/47968"]
+    }
+  ]
+}

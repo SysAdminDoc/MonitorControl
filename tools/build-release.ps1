@@ -18,8 +18,9 @@ $licensePath = Join-Path $repoRoot "LICENSE"
 $iconPath = Join-Path $repoRoot "icon.ico"
 $screenshotPath = Join-Path $repoRoot "screenshot.png"
 $cliSchemaPath = Join-Path $repoRoot "schemas\monitorcontrol-cli-v1.schema.json"
+$ddcCompatibilityPath = Join-Path $repoRoot "ddc-compatibility.json"
 
-foreach ($required in @($metadataPath, $scriptPath, $compilePath, $readmePath, $licensePath, $iconPath, $screenshotPath, $cliSchemaPath)) {
+foreach ($required in @($metadataPath, $scriptPath, $compilePath, $readmePath, $licensePath, $iconPath, $screenshotPath, $cliSchemaPath, $ddcCompatibilityPath)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Missing release input: $required" }
 }
 
@@ -249,6 +250,7 @@ Copy-Item -LiteralPath $licensePath -Destination (Join-Path $stageRoot "LICENSE"
 Copy-Item -LiteralPath $iconPath -Destination (Join-Path $stageRoot "icon.ico") -Force
 Copy-Item -LiteralPath $screenshotPath -Destination (Join-Path $stageRoot "screenshot.png") -Force
 Copy-Item -LiteralPath $cliSchemaPath -Destination (Join-Path $stageRoot "monitorcontrol-cli-v1.schema.json") -Force
+Copy-Item -LiteralPath $ddcCompatibilityPath -Destination (Join-Path $stageRoot "ddc-compatibility.json") -Force
 
 # Scoop resolves `shortcuts` against a file it can execute. A bare .ps1 is not one, and a GUI
 # app should not get a `bin` shim either, so the ZIP carries a launcher that starts the script

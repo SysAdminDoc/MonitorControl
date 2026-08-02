@@ -301,6 +301,9 @@ public static class MonitorControlVcpWriteProbe
         "Get-IdleDimMonitorDecisions",
         "Test-IsSelectedMonitor",
         "Get-MonitorEdidModelId",
+        "Get-DdcCompatibilityDatabasePath",
+        "Import-DdcCompatibilityDatabase",
+        "Get-DdcCompatibilityDatabaseEntry",
         "Get-CapabilitiesBlocklistEntry",
         "Get-CapabilitiesCacheKey",
         "Save-CapabilitiesCache",
@@ -2878,6 +2881,27 @@ Describe "Capability cache and known-bad monitor list" {
             [PSCustomObject]@{ EdidId = "LTM2C02"; Note = "Counterfeit-EDID LG 27MR400" }
             [PSCustomObject]@{ EdidId = "GSM7714"; Note = "LG UltraWide HDR WFHD" }
         )
+        $script:DdcCompatibilityDatabasePathOverride = Join-Path $TestDrive "ddc-compatibility.json"
+        $script:DdcCompatibilityDatabaseLoadedPath = ""
+        $script:DdcCompatibilityDatabaseCache = $null
+        [System.IO.File]::WriteAllText($script:DdcCompatibilityDatabasePathOverride, @'
+{
+  "SchemaVersion": 1,
+  "Entries": [
+    {
+      "EdidId": "ACM1234",
+      "Model": "Test compatibility fixture",
+      "CapabilityAction": "Exclude",
+      "KnownVcpCodes": ["0x10"],
+      "KnownBadVcpCodes": [],
+      "InputValues": [],
+      "WriteRateLimitPerHour": 0,
+      "Notes": "Fixture",
+      "References": ["https://example.test/compatibility"]
+    }
+  ]
+}
+'@)
         $script:LastStatusMessage = ""
     }
 
@@ -2898,6 +2922,14 @@ Describe "Capability cache and known-bad monitor list" {
 
     It "probes a model that is not on the list" {
         (Get-CapabilityProbeDecision -Monitor (New-CapMonitor)).Action | Should -Be "Probe"
+    }
+
+    It "uses the bundled compatibility database as a second-line capability guard" {
+        $script:CapabilitiesKnownBadModels = @()
+        $entry = Get-DdcCompatibilityDatabaseEntry -Monitor (New-CapMonitor -Manufacturer "ACM" -Model "1234")
+        $entry.EdidId | Should -Be "ACM1234"
+        $entry.Source | Should -Be "BundledDatabase"
+        (Get-CapabilityProbeDecision -Monitor (New-CapMonitor -Manufacturer "ACM" -Model "1234")).Action | Should -Be "Blocked"
     }
 
     It "replays a cached capability string instead of probing again" {
@@ -4898,6 +4930,11 @@ Describe "Unsigned release packaging" {
         $script:BuildReleaseText | Should -Match 'Sha256Path = \$sidecarPath'
     }
 
+    It "requires and packages the monitor compatibility database" {
+        $script:BuildReleaseText | Should -Match '\$ddcCompatibilityPath'
+        Test-Path -LiteralPath (Join-Path $script:RepoRoot "ddc-compatibility.json") -PathType Leaf | Should -BeTrue
+    }
+
     It "writes a manifest and CycloneDX SBOM sidecar for offline verification" {
         $script:BuildReleaseText | Should -Match 'ManifestPath = \$manifestPath'
         $script:BuildReleaseText | Should -Match 'SbomPath = \$sbomPath'
@@ -4951,6 +4988,7 @@ Describe "Unsigned release packaging" {
             $manifest.Payload.Count | Should -BeGreaterThan 5
             @($manifest.Payload | ForEach-Object { $_.Name }) | Should -Contain "MonitorControlPro.ps1"
             @($manifest.Payload | ForEach-Object { $_.Name }) | Should -Contain "MonitorControlPro.cmd"
+            @($manifest.Payload | ForEach-Object { $_.Name }) | Should -Contain "ddc-compatibility.json"
             $manifest.SourceCommit | Should -Match '^[0-9a-f]{40}$'
             $first.ManifestPath | Should -Exist
             $first.SbomPath | Should -Exist
