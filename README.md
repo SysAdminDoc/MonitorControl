@@ -114,8 +114,11 @@ Windows 10 Home and Pro reached end of support on October 14, 2025 and are unsup
 1. Download `MonitorControlPro-vX.Y.Z.zip` from the GitHub release.
 2. Verify the download against the `MonitorControlPro-vX.Y.Z.zip.sha256` asset published beside it:
    `(Get-FileHash MonitorControlPro-vX.Y.Z.zip -Algorithm SHA256).Hash -eq ((Get-Content MonitorControlPro-vX.Y.Z.zip.sha256).Split(' ')[0])`
-3. Extract the ZIP to a writable folder.
-4. Verify `SHA256SUMS` for the extracted payload, then run `MonitorControlPro.ps1` (or the
+3. Optionally verify the release manifest and CycloneDX SBOM offline:
+   `.\tools\verify-release.ps1 -ZipPath .\MonitorControlPro-vX.Y.Z.zip`
+   (the `.manifest.json` and `.sbom.json` sidecars must be beside the ZIP).
+4. Extract the ZIP to a writable folder.
+5. Verify `SHA256SUMS` for the extracted payload, then run `MonitorControlPro.ps1` (or the
    `MonitorControlPro.cmd` launcher, which starts it hidden with the STA host it needs).
 
 ### Option 1a: Scoop
@@ -204,7 +207,7 @@ best-effort rollback from the GUI transaction path. JSON mode emits exactly one 
 .\tools\build-release.ps1
 ```
 
-Run the release builder under Windows PowerShell 5.1. It reads the canonical version from `src\MonitorControl.Metadata.psd1`, composes the source modules into one portable script, and writes an unsigned `dist\MonitorControlPro-vX.Y.Z.zip`. The ZIP includes `RELEASE.json`, `SIGNING.txt`, and `SHA256SUMS`; entry order and timestamps are deterministic. Set `SOURCE_DATE_EPOCH` to reproduce an earlier build byte for byte under the same pinned runtime. The portable ZIP does not require the development `src` directory.
+Run the release builder under Windows PowerShell 5.1. It reads the canonical version from `src\MonitorControl.Metadata.psd1`, composes the source modules into one portable script, and writes an unsigned `dist\MonitorControlPro-vX.Y.Z.zip`. The ZIP includes `RELEASE.json`, `SBOM.cdx.json`, `SIGNING.txt`, and `SHA256SUMS`; adjacent `.manifest.json` and `.sbom.json` sidecars add the ZIP hash, payload sizes/hashes, source commit, runtime, and CycloneDX metadata. `tools\verify-release.ps1` checks all of these without network access. Entry order and timestamps are deterministic. Set `SOURCE_DATE_EPOCH` to reproduce an earlier build byte for byte under the same pinned runtime. The portable ZIP does not require the development `src` directory.
 
 ### Run No-Hardware Tests
 ```powershell

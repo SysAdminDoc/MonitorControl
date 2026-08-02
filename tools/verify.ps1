@@ -99,6 +99,14 @@ try {
     if ([string]::IsNullOrWhiteSpace([string]$release.Sha256) -or $release.Signing -notlike "Unsigned:*") {
         throw "The release result did not preserve the checksum and explicit unsigned contract."
     }
+    $integrity = & (Join-Path $repoRoot "tools\verify-release.ps1") `
+        -ZipPath $release.ZipPath `
+        -ManifestPath $release.ManifestPath `
+        -SbomPath $release.SbomPath `
+        -Sha256Path $release.Sha256Path
+    if ($null -eq $integrity -or [string]$integrity.Sha256 -ne [string]$release.Sha256) {
+        throw "The release integrity verifier did not validate the generated artifact."
+    }
 } finally {
     Remove-ValidatedVerificationDirectory -Path $verificationRoot
 }

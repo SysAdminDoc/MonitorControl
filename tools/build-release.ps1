@@ -82,6 +82,41 @@ function Get-OrdinalFileNames {
     return $names
 }
 
+function Get-GitSourceCommit {
+    $commit = "unknown"
+    try {
+        $gitCommand = Get-Command git -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -ne $gitCommand) {
+            $candidate = ([string](& $gitCommand.Source -C $repoRoot rev-parse --verify HEAD 2>$null)).Trim()
+            if ($candidate -match '^[0-9a-fA-F]{40}$') { $commit = $candidate.ToLowerInvariant() }
+        }
+    } catch {}
+    if ($commit -eq "unknown") {
+        try {
+            $gitDirectory = Join-Path $repoRoot ".git"
+            $headPath = Join-Path $gitDirectory "HEAD"
+            $head = (Get-Content -LiteralPath $headPath -Raw).Trim()
+            if ($head -match '^ref:\s+(.+)$') {
+                $refPath = Join-Path $gitDirectory ($matches[1] -replace '/', '\\')
+                $head = (Get-Content -LiteralPath $refPath -Raw).Trim()
+            }
+            if ($head -match '^[0-9a-fA-F]{40}$') { $commit = $head.ToLowerInvariant() }
+        } catch {}
+    }
+    return $commit
+}
+
+function Get-FileManifestRecord {
+    param([string]$Directory, [string]$Name)
+    $path = Join-Path $Directory $Name
+    $item = Get-Item -LiteralPath $path -Force
+    return [ordered]@{
+        Name = $Name
+        Size = [long]$item.Length
+        Sha256 = Get-Sha256Hash -Path $path
+    }
+}
+
 function Get-DeterministicBuildTime {
     $sourceDateEpoch = [long]946684800
     if (-not [string]::IsNullOrWhiteSpace($env:SOURCE_DATE_EPOCH)) {
@@ -94,6 +129,56 @@ function Get-DeterministicBuildTime {
         throw "SOURCE_DATE_EPOCH must resolve to a ZIP-compatible UTC time from 1980 through 2107."
     }
     return [PSCustomObject]@{ SourceDateEpoch = $sourceDateEpoch; Timestamp = $timestamp }
+}
+
+function New-CycloneDxSbom {
+    param(
+        [string]$AppName,
+        [string]$Version,
+        [string]$BuiltAt,
+        [string]$SourceCommit,
+        [string]$ApplicationSha256
+    )
+    $components = @(
+        [ordered]@{
+            type = "application"
+            name = $AppName
+            version = $Version
+            "bom-ref" = "pkg:generic/monitorcontrol-pro@$Version"
+            hashes = @([ordered]@{ alg = "SHA-256"; content = $ApplicationSha256 })
+        },
+        [ordered]@{
+            type = "framework"
+            name = "Windows PowerShell"
+            version = "5.1"
+            scope = "required"
+        },
+        [ordered]@{
+            type = "framework"
+            name = ".NET Framework WPF"
+            version = "4.8+"
+            scope = "required"
+        }
+    )
+    return [ordered]@{
+        bomFormat = "CycloneDX"
+        specVersion = "1.5"
+        serialNumber = "urn:monitorcontrol:$($SourceCommit):$Version"
+        version = 1
+        metadata = [ordered]@{
+            timestamp = $BuiltAt
+            component = [ordered]@{
+                type = "application"
+                name = $AppName
+                version = $Version
+            }
+            properties = @(
+                [ordered]@{ name = "monitorcontrol.sourceCommit"; value = $SourceCommit }
+                [ordered]@{ name = "monitorcontrol.runtime"; value = "Windows PowerShell 5.1" }
+            )
+        }
+        components = $components
+    }
 }
 
 function New-DeterministicZip {
@@ -183,15 +268,30 @@ $signingText = @(
 ) -join "`r`n"
 [System.IO.File]::WriteAllText((Join-Path $stageRoot "SIGNING.txt"), $signingText + "`r`n", (New-Object System.Text.ASCIIEncoding))
 
+$sourceCommit = Get-GitSourceCommit
+$applicationSha256 = Get-Sha256Hash -Path $releaseScript
+$sbomDocument = New-CycloneDxSbom `
+    -AppName $appName `
+    -Version $Version `
+    -BuiltAt $builtAt `
+    -SourceCommit $sourceCommit `
+    -ApplicationSha256 $applicationSha256
+$sbomJson = ($sbomDocument | ConvertTo-Json -Depth 8) + "`r`n"
+[System.IO.File]::WriteAllText((Join-Path $stageRoot "SBOM.cdx.json"), $sbomJson, (New-Object System.Text.ASCIIEncoding))
+
+$payloadNames = @(Get-OrdinalFileNames -Directory $stageRoot | Where-Object { $_ -notin @("RELEASE.json", "SHA256SUMS") })
+$payloadRecords = @($payloadNames | ForEach-Object { Get-FileManifestRecord -Directory $stageRoot -Name $_ })
 $releaseManifest = [ordered]@{
-    SchemaVersion = 1
+    SchemaVersion = 2
     AppName = $appName
     Version = $Version
     BuiltAt = $builtAt
     SourceDateEpoch = $buildTime.SourceDateEpoch
+    SourceCommit = $sourceCommit
     Runtime = "Windows PowerShell 5.1"
+    BuildTool = "tools/build-release.ps1"
     Signing = "Unsigned"
-    Payload = @("MonitorControlPro.ps1", "MonitorControlPro.cmd", "README.md", "LICENSE", "icon.ico", "screenshot.png", "SIGNING.txt")
+    Payload = $payloadRecords
 }
 $manifestJson = ($releaseManifest | ConvertTo-Json -Depth 3) + "`r`n"
 [System.IO.File]::WriteAllText((Join-Path $stageRoot "RELEASE.json"), $manifestJson, (New-Object System.Text.ASCIIEncoding))
@@ -207,6 +307,34 @@ $hashLines = foreach ($name in Get-OrdinalFileNames -Directory $stageRoot) {
 
 New-DeterministicZip -SourceDirectory $stageRoot -DestinationPath $zipPath -Timestamp $buildTime.Timestamp
 $zipHash = Get-Sha256Hash -Path $zipPath
+$zipItem = Get-Item -LiteralPath $zipPath -Force
+
+$distributionManifest = [ordered]@{
+    SchemaVersion = 2
+    AppName = $appName
+    Version = $Version
+    BuiltAt = $builtAt
+    SourceDateEpoch = $buildTime.SourceDateEpoch
+    SourceCommit = $sourceCommit
+    Runtime = "Windows PowerShell 5.1"
+    BuildTool = "tools/build-release.ps1"
+    Signing = "Unsigned"
+    Artifact = [ordered]@{
+        Name = [System.IO.Path]::GetFileName($zipPath)
+        Size = [long]$zipItem.Length
+        Sha256 = $zipHash
+    }
+    Payload = $payloadRecords
+}
+$basePath = [System.IO.Path]::Combine($OutputRoot, [System.IO.Path]::GetFileNameWithoutExtension($zipPath))
+$manifestPath = "$basePath.manifest.json"
+$sbomPath = "$basePath.sbom.json"
+[System.IO.File]::WriteAllText(
+    $manifestPath,
+    (($distributionManifest | ConvertTo-Json -Depth 5) + "`r`n"),
+    (New-Object System.Text.ASCIIEncoding)
+)
+[System.IO.File]::WriteAllText($sbomPath, $sbomJson, (New-Object System.Text.ASCIIEncoding))
 
 # Scoop autoupdate fetches `$url.sha256` and expects a bare hash or a `hash *name` line. The
 # SHA256SUMS inside the ZIP covers the payload; this sidecar covers the ZIP itself, which is
@@ -224,6 +352,8 @@ if (Test-Path -LiteralPath $sidecarPath) { Remove-Item -LiteralPath $sidecarPath
     ZipPath = $zipPath
     Sha256Path = $sidecarPath
     Sha256 = $zipHash
+    ManifestPath = $manifestPath
+    SbomPath = $sbomPath
     Signing = $signStatus
     SourceDateEpoch = $buildTime.SourceDateEpoch
     Files = @(Get-OrdinalFileNames -Directory $stageRoot)

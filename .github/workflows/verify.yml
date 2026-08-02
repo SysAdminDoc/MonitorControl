@@ -28,3 +28,34 @@ jobs:
       - name: Run deterministic verification
         run: .\tools\verify.ps1
 
+  release-integrity:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-2025
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Build and verify release integrity metadata
+        id: release
+        run: |
+          $outputRoot = Join-Path $env:GITHUB_WORKSPACE "dist\ci-release"
+          New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
+          $release = & .\tools\build-release.ps1 -OutputRoot $outputRoot
+          & .\tools\verify-release.ps1 -ZipPath $release.ZipPath -ManifestPath $release.ManifestPath -SbomPath $release.SbomPath -Sha256Path $release.Sha256Path | Out-Host
+          "zip=$($release.ZipPath)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "sbom=$($release.SbomPath)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Publish GitHub artifact attestation
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        with:
+          subject-path: ${{ steps.release.outputs.zip }}
+          sbom-path: ${{ steps.release.outputs.sbom }}
