@@ -1,0 +1,43 @@
+{
+  "Actions": [
+    {
+      "Name": "actions/checkout",
+      "Version": "v4.2.2",
+      "Ref": "11bd71901bbe5b1630ceea73d27597364c9af683"
+    },
+    {
+      "Name": "actions/attest",
+      "Version": "v4",
+      "Ref": "508db95dd578ae2727ebd6217d5ba78e4fbda05d"
+    }
+  ],
+  "PowerShellModules": [
+    {
+      "Name": "Pester",
+      "Version": "5.9.0",
+      "PackageUri": "https://www.powershellgallery.com/api/v2/package/Pester/5.9.0",
+      "Sha256": "5a0fd80b361600bf4bbd4c307c1fd01b17f11668bab19e657add41b00ad22ab9"
+    },
+    {
+      "Name": "Pester",
+      "Version": "6.0.0",
+      "PackageUri": "https://www.powershellgallery.com/api/v2/package/Pester/6.0.0",
+      "Sha256": "238d9aa37a55d7b4afcb66245f36fc7410774c067fec40084e00eea474de9862"
+    },
+    {
+      "Name": "PSScriptAnalyzer",
+      "Version": "1.25.0",
+      "PackageUri": "https://www.powershellgallery.com/api/v2/package/PSScriptAnalyzer/1.25.0",
+      "Sha256": "14e634c828eb98efb9f40b2918ba90f139ed5eccdf663a2a747736d996995d60"
+    }
+  ],
+  "DownloadedCLIs": [
+    {
+      "Name": "Axe.Windows CLI",
+      "Version": "2.4.2",
+      "Script": "tools/install-axe-windows.ps1",
+      "DownloadUri": "https://github.com/microsoft/axe-windows/releases/download/v2.4.2/AxeWindowsCLI-2.4.2.zip",
+      "Sha256": "aeca43f41c89b3ffb1db84011539e609ecd7cb3badd6e78fada2ada327d10a64"
+    }
+  ]
+}

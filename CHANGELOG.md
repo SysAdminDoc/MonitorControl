@@ -1,5 +1,6 @@
 # Changelog
 
+- Added: CI now keeps external verification dependencies in a version-and-SHA-256 manifest, validates workflow and downloader pins on every verification run, and performs a scheduled read-only release, advisory, and archive-hash freshness audit without changing the pinned test lane.
 - Added: the full Windows verification lane now runs pinned Axe.Windows 2.4.2 scans against both standard and high-contrast/200% WPF smokes, fails on scanner violations, and retains `.a11ytest` artifacts for review.
 - Added: a versioned `ddc-compatibility.json` database is consulted before capability enumeration, seeded with the two known kernel-fault models, and Diagnostics now offers a one-click redacted report handoff to the compatibility issue form.
 - Changed: CI now runs the deterministic no-hardware suite on both pinned Pester 5.9.0 and Pester 6.0.0, making the supported test-tool policy explicit while keeping the Windows PowerShell 5.1 GUI runtime unchanged.
