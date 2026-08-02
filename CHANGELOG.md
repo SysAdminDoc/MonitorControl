@@ -14,8 +14,10 @@
 
 All notable changes to MonitorControl will be documented in this file.
 
-## [Unreleased]
+## [v3.38.0] - 2026-08-01
 
+- Added: a per-monitor **Save settings to the monitor after a write** option issues VCP `0xB0` once a transaction has fully succeeded, for the documented class of panels that accept a write, report success, and then revert. It is off by default, seeded for the Iiyama models ddcutil records as needing it, rate limited to one save per display per ten seconds so a slider drag cannot repeat it, and never issued after a failed transaction - committing a partial write to non-volatile settings would make rollback unable to undo itself. The flag and the session save count appear in the DDC report.
+- Fixed: wrapping the verified transaction's own `List[object]` in an array subexpression threw "Argument types do not match" on Windows PowerShell 5.1; the results are now enumerated directly.
 - Fixed: `MonitorControlPro.ps1 diagnostics` failed with a bare `CommandNotFoundException`. Every source file is dot-sourced into one scope, but the headless CLI dispatches partway through the application source, so `Get-ProfilePropertyValue` and `Test-ProfileStorageWriteAllowed` did not exist yet when the settings importers called them. Both now live in the storage module, and a test refuses any new application-layer call from that module beyond the deferred status sinks.
 - Added: release builds emit a `<zip>.sha256` sidecar beside the ZIP and package a `MonitorControlPro.cmd` launcher inside it, so a package manager can verify the download and resolve a shortcut to something executable.
 - Added: a Scoop manifest at `packaging/scoop/monitorcontrol-pro.json` with `checkver: "github"` and `autoupdate.hash.url: "$url.sha256"`, generated from a real local build by `tools/update-scoop-manifest.ps1`. Deterministic release builds mean the hash it records is the hash of the published asset.

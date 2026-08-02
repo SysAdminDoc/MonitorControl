@@ -294,6 +294,8 @@ public static class MonitorControlVcpWriteProbe
         "Get-UsbInputRulesObject",
         "Save-UsbInputRules",
         "Import-UsbInputRules",
+        "Test-MonitorNeedsExplicitSave",
+        "Get-DdcSaveSettingsPlan",
         "Get-IdleDimModeName",
         "Test-IdleDimMonitorIsActive",
         "Get-IdleDimMonitorDecisions",
@@ -3654,6 +3656,122 @@ Describe "Profile percentage schema" {
     It "rejects a profile schema newer than this build" {
         $future = [PSCustomObject]@{ SchemaVersion = ($script:ProfileSchemaVersion + 1); Name = "Future" }
         { ConvertTo-CurrentProfileSchema -Profile $future -FallbackName "Future" } | Should -Throw
+    }
+}
+
+Describe "Explicit save for monitors that revert a write" {
+    BeforeAll {
+        function global:New-SaveTestResult {
+            param($Monitor, [int]$Code = 0x10, [bool]$WriteSuccess = $true, [string]$Backend = "DDC")
+            return [PSCustomObject]@{
+                WriteSuccess = $WriteSuccess
+                Operation = [PSCustomObject]@{
+                    Monitor = $Monitor
+                    MonitorName = [string]$Monitor.Name
+                    IdentityKey = [string]$Monitor.IdentityKey
+                    Code = $Code
+                    Backend = $Backend
+                }
+            }
+        }
+    }
+
+    BeforeEach {
+        # These are module script variables; the harness re-emits functions into the test scope,
+        # so the constants they read have to be established here too.
+        $script:VcpSaveSettingsCode = 0xB0
+        $script:VcpSaveSettingsValue = 0x01
+        $script:VcpSaveSettingsMinimumIntervalSeconds = 10
+        $script:VcpSaveSettingsKnownModels = @("IVMPL2492H", "IVMPL2792Q")
+        $script:DdcTimingProfiles = @{}
+        $script:DdcSaveSettingsLastUtc = @{}
+        $script:SaveNow = [datetime]"2026-08-01T12:00:00Z"
+        $script:PlainMonitor = [PSCustomObject]@{ Name = "Plain panel"; IdentityKey = "edid:plain"; Manufacturer = "DEL"; EdidModel = "A1B2"; Handle = [IntPtr]41; VcpMaximums = @{} }
+        $script:QuirkMonitor = [PSCustomObject]@{ Name = "Iiyama"; IdentityKey = "edid:iiyama"; Manufacturer = "IVM"; EdidModel = "PL2492H"; Handle = [IntPtr]42; VcpMaximums = @{} }
+    }
+
+    It "leaves the quirk off for an ordinary monitor" {
+        Test-MonitorNeedsExplicitSave -Monitor $script:PlainMonitor | Should -BeFalse
+        Test-MonitorNeedsExplicitSave -Monitor $null | Should -BeFalse
+        @(Get-DdcSaveSettingsPlan -Results @(New-SaveTestResult -Monitor $script:PlainMonitor) -NowUtc $script:SaveNow -LastSavedUtc @{}).Count | Should -Be 0
+    }
+
+    It "seeds the quirk for a model documented as needing it" {
+        Test-MonitorNeedsExplicitSave -Monitor $script:QuirkMonitor | Should -BeTrue
+
+        $plan = @(Get-DdcSaveSettingsPlan -Results @(New-SaveTestResult -Monitor $script:QuirkMonitor) -NowUtc $script:SaveNow -LastSavedUtc @{})
+
+        @($plan).Count | Should -Be 1
+        $plan[0].IdentityKey | Should -Be "edid:iiyama"
+    }
+
+    It "honours a per-identity flag set by the user" {
+        (Get-DdcTimingProfile -IdentityKey "edid:plain") | Add-Member -NotePropertyName SaveAfterWrite -NotePropertyValue $true -Force
+
+        Test-MonitorNeedsExplicitSave -Monitor $script:PlainMonitor | Should -BeTrue
+        @(Get-DdcSaveSettingsPlan -Results @(New-SaveTestResult -Monitor $script:PlainMonitor) -NowUtc $script:SaveNow -LastSavedUtc @{}).Count | Should -Be 1
+    }
+
+    It "issues one save per monitor no matter how many codes were written" {
+        $results = @(
+            (New-SaveTestResult -Monitor $script:QuirkMonitor -Code 0x10),
+            (New-SaveTestResult -Monitor $script:QuirkMonitor -Code 0x12),
+            (New-SaveTestResult -Monitor $script:QuirkMonitor -Code 0x16)
+        )
+
+        @(Get-DdcSaveSettingsPlan -Results $results -NowUtc $script:SaveNow -LastSavedUtc @{}).Count | Should -Be 1
+    }
+
+    It "rate limits a slider drag and allows a save once the window has passed" {
+        $justSaved = @{ "edid:iiyama" = $script:SaveNow.AddSeconds(-2) }
+        $longAgo = @{ "edid:iiyama" = $script:SaveNow.AddSeconds(-30) }
+        $results = @(New-SaveTestResult -Monitor $script:QuirkMonitor)
+
+        @(Get-DdcSaveSettingsPlan -Results $results -NowUtc $script:SaveNow -LastSavedUtc $justSaved).Count | Should -Be 0
+        @(Get-DdcSaveSettingsPlan -Results $results -NowUtc $script:SaveNow -LastSavedUtc $longAgo).Count | Should -Be 1
+    }
+
+    It "never saves after a write that failed, a WMI write, or the save command itself" {
+        @(Get-DdcSaveSettingsPlan -Results @(New-SaveTestResult -Monitor $script:QuirkMonitor -WriteSuccess $false) -NowUtc $script:SaveNow -LastSavedUtc @{}).Count | Should -Be 0
+        @(Get-DdcSaveSettingsPlan -Results @(New-SaveTestResult -Monitor $script:QuirkMonitor -Backend "WMI") -NowUtc $script:SaveNow -LastSavedUtc @{}).Count | Should -Be 0
+        @(Get-DdcSaveSettingsPlan -Results @(New-SaveTestResult -Monitor $script:QuirkMonitor -Code 0xB0) -NowUtc $script:SaveNow -LastSavedUtc @{}).Count | Should -Be 0
+    }
+
+    It "commits to non-volatile settings only after the whole transaction succeeded" {
+        $writes = New-Object System.Collections.Generic.List[object]
+        $operations = @(
+            (Get-VcpWriteOperation -Monitor $script:QuirkMonitor -Code 0x10 -Value 40),
+            (Get-VcpWriteOperation -Monitor $script:QuirkMonitor -Code 0x12 -Value 50)
+        )
+        # The second write fails, so the transaction fails and nothing may be committed.
+        $result = Invoke-VerifiedVcpTransaction -Operations $operations -RollbackOnFailure `
+            -ReadValue { param($Operation) [PSCustomObject]@{ Success = $true; Current = [uint32]$Operation.Value; Maximum = [uint32]100 } } `
+            -WriteValue {
+                param($Operation, [uint32]$TargetValue)
+                $writes.Add([int]$Operation.Code)
+                return ([int]$Operation.Code -ne 0x12)
+            } `
+            -DelayAction { param([int]$Milliseconds) }
+
+        $result.Success | Should -BeFalse
+        $writes | Should -Not -Contain 0xB0
+    }
+
+    It "commits once after a transaction that fully succeeded" {
+        $writes = New-Object System.Collections.Generic.List[object]
+        $operations = @(
+            (Get-VcpWriteOperation -Monitor $script:QuirkMonitor -Code 0x10 -Value 40),
+            (Get-VcpWriteOperation -Monitor $script:QuirkMonitor -Code 0x12 -Value 50)
+        )
+        $result = Invoke-VerifiedVcpTransaction -Operations $operations `
+            -ReadValue { param($Operation) [PSCustomObject]@{ Success = $true; Current = [uint32]$Operation.Value; Maximum = [uint32]100 } } `
+            -WriteValue { param($Operation, [uint32]$TargetValue) $writes.Add([int]$Operation.Code); return $true } `
+            -DelayAction { param([int]$Milliseconds) }
+
+        $result.Success | Should -BeTrue
+        @($writes | Where-Object { $_ -eq 0xB0 }).Count | Should -Be 1
+        @($result.SavedIdentities) | Should -Be @("edid:iiyama")
+        (Get-DdcTimingProfile -IdentityKey "edid:iiyama").SavesIssued | Should -Be 1
     }
 }
 

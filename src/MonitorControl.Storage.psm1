@@ -724,6 +724,7 @@ function Get-DdcTimingSettingsObject {
             NullMeansUnsupported = [bool]$entry.NullMeansUnsupported
             NullSemanticsClassifiedAt = [string]$entry.NullSemanticsClassifiedAt
             NullProbeLastError = [int]$entry.NullProbeLastError
+            SaveAfterWrite = [bool]$entry.SaveAfterWrite
             UnsupportedCodes = @(@($entry.UnsupportedCodes) | ForEach-Object {
                 [PSCustomObject]@{ Code = [int]$_.Code; LastError = [int]$_.LastError; ObservedAt = [string]$_.ObservedAt }
             })
@@ -766,6 +767,7 @@ function Import-DdcTimingSettings {
         $timingProfile.NullMeansUnsupported = [bool](Get-ProfilePropertyValue -Object $record -Property "NullMeansUnsupported" -Default $false)
         $timingProfile.NullSemanticsClassifiedAt = [string](Get-ProfilePropertyValue -Object $record -Property "NullSemanticsClassifiedAt" -Default "")
         $timingProfile.NullProbeLastError = [int](Get-ProfilePropertyValue -Object $record -Property "NullProbeLastError" -Default 0)
+        $timingProfile.SaveAfterWrite = [bool](Get-ProfilePropertyValue -Object $record -Property "SaveAfterWrite" -Default $false)
         $codes = @()
         foreach ($codeRecord in @((Get-ProfilePropertyValue -Object $record -Property "UnsupportedCodes" -Default @()))) {
             if ($null -eq $codeRecord) { continue }

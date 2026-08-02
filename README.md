@@ -326,6 +326,24 @@ Safety and behavior:
 - Brightness is expressed as a percentage in both directions. `GET /api/brightness` also returns the `raw` DDC value and the monitor's reported `maximum`, and `GET /api/monitors` reports `BrightnessMaximum` per display
 - The bridge is HTTP only. There is no MQTT or Home Assistant transport; a settings file from an older version that still carries the unused `MqttEnabled` field loads normally and the field is dropped on the next save
 
+### Monitors That Revert a Change
+
+A documented class of panels accepts a VCP write, reports success, and then reverts - because the
+value only ever reached volatile state. This looks like a hardware fault, but the missing piece is
+a "save current settings" command.
+
+Open **System > Display & DDC** and tick **Save settings to the monitor after a write** for the
+affected display. It issues VCP `0xB0` once a write transaction has fully succeeded.
+
+- Off by default, set per stable monitor identity, and stored in `ddc-timing.json`
+- Already enabled for the Iiyama models that ddcutil records as needing it, without ticking the box
+- Rate limited to one save per display per ten seconds, so dragging a slider cannot repeat it. The
+  save is the write that actually reaches the panel's EEPROM, and EEPROM endurance is the main
+  reason some tools avoid DDC/CI altogether
+- Never issued after a failed transaction: committing a partial write to non-volatile settings
+  would leave the rollback unable to undo itself
+- The DDC compatibility report shows the flag and how many saves were issued this session
+
 ### Restoring Brightness After Sleep
 
 Many monitors forget their brightness across a power or sleep cycle and come back at full
