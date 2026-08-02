@@ -775,3 +775,81 @@ function Get-UsbInputRuleDescription {
     $consent = if ([bool]$Rule.AllowRiskyVcp) { "risky writes allowed" } else { "no rule consent" }
     return "$([string]$Rule.DeviceId) $([string]$Rule.Trigger) [$state, $([int]$Rule.SuppressionSeconds)s suppression, $consent]: $targetText"
 }
+
+# --- Per-monitor, video-aware idle dimming ------------------------------------------------
+# System-wide idle is the only signal `GetLastInputInfo` gives, and it is wrong twice over on a
+# multi-display desk: it dims the display the user is watching a film on, and it cannot dim the
+# unused display while the user works on another. The two extra modes ask *where* the user is,
+# and the display-required execution state answers *whether they are watching something*.
+
+function Get-IdleDimModeName {
+    param([string]$Mode)
+    if ([string]$Mode -eq "Cursor") { return "Cursor" }
+    if ([string]$Mode -eq "ForegroundWindow") { return "ForegroundWindow" }
+    return "System"
+}
+
+# In System mode every monitor shares one verdict, which is exactly the behaviour that shipped
+# before per-monitor idle existed. Cursor and ForegroundWindow spare the monitor the user is on
+# and dim the rest; when the active monitor cannot be resolved they fall back to sparing nothing
+# rather than dimming everything, because a wrong dim is more disruptive than a missed one.
+function Test-IdleDimMonitorIsActive {
+    param($Monitor, [string]$Mode, $ActiveMonitorHandle)
+    if ((Get-IdleDimModeName -Mode $Mode) -eq "System") { return $false }
+    if ($null -eq $Monitor -or $null -eq $ActiveMonitorHandle) { return $true }
+    if ([IntPtr]$ActiveMonitorHandle -eq [IntPtr]::Zero) { return $true }
+    if ($null -eq $Monitor.PSObject.Properties["HMonitor"]) { return $true }
+    return ([IntPtr]$Monitor.HMonitor -eq [IntPtr]$ActiveMonitorHandle)
+}
+
+function Get-IdleDimMonitorDecisions {
+    param(
+        $Monitors,
+        [string]$Mode,
+        [int]$IdleSeconds,
+        [int]$ThresholdSeconds,
+        $ActiveMonitorHandle,
+        [bool]$DisplayRequired,
+        [bool]$RestoreOnActivity,
+        $ActiveStates
+    )
+    $modeName = Get-IdleDimModeName -Mode $Mode
+    $decisions = @()
+    foreach ($monitor in @($Monitors | Where-Object { $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.IdentityKey) })) {
+        $identityKey = [string]$monitor.IdentityKey
+        $state = $null
+        if ($null -ne $ActiveStates -and $ActiveStates.Contains($identityKey)) { $state = $ActiveStates[$identityKey] }
+        $isDimmed = $null -ne $state
+        $isActiveMonitor = Test-IdleDimMonitorIsActive -Monitor $monitor -Mode $modeName -ActiveMonitorHandle $ActiveMonitorHandle
+        # An inhibitor suppresses *entering* the dim, never leaving it. A film starting while a
+        # display is already dimmed should restore it, not strand it dark.
+        $shouldDim = $IdleSeconds -ge $ThresholdSeconds -and -not $isActiveMonitor -and -not $DisplayRequired
+        $action = "None"
+        $reason = ""
+        if (-not $isDimmed -and $shouldDim) {
+            $action = "Dim"
+        } elseif ($isDimmed -and -not $shouldDim) {
+            $action = if ($RestoreOnActivity) { "Restore" } else { "Clear" }
+            $reason = if ($DisplayRequired) {
+                "a display-required inhibitor is active"
+            } elseif ($isActiveMonitor) {
+                "the user is on this display"
+            } else {
+                "activity resumed"
+            }
+        } elseif (-not $isDimmed -and $IdleSeconds -ge $ThresholdSeconds) {
+            $reason = if ($DisplayRequired) { "a display-required inhibitor is active" } else { "the user is on this display" }
+        }
+        $decisions += [PSCustomObject]@{
+            IdentityKey = $identityKey
+            MonitorName = [string]$monitor.Name
+            Monitor = $monitor
+            IsActiveMonitor = [bool]$isActiveMonitor
+            IsDimmed = [bool]$isDimmed
+            PreviousBrightness = if ($isDimmed) { [int]$state.PreviousBrightness } else { $null }
+            Action = $action
+            Reason = $reason
+        }
+    }
+    return @($decisions)
+}

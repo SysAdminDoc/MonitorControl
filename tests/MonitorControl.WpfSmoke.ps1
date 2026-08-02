@@ -612,6 +612,32 @@ public sealed class MonitorControlLiveRegionProbe : IDisposable
         if ($null -eq (Get-ControlByName -Root $root -Name (Get-SmokeUiText -Text "USB input switching rules") -ControlType ([System.Windows.Automation.ControlType]::List))) {
             throw "The USB input rule list was not exposed through UI Automation."
         }
+        # Idle measurement mode must exist and must still default to the shipped system-wide
+        # behavior, so an upgrade does not silently change which displays dim.
+        $idleModeCombo = Get-ControlByName -Root $root -Name (Get-SmokeUiText -Text "Idle measurement mode") -ControlType ([System.Windows.Automation.ControlType]::ComboBox)
+        if ($null -eq $idleModeCombo) { throw "The idle measurement mode picker was not exposed through UI Automation." }
+        $idleModeSelection = $null
+        if (-not $idleModeCombo.TryGetCurrentPattern([System.Windows.Automation.SelectionPattern]::Pattern, [ref]$idleModeSelection)) {
+            throw "The idle measurement mode picker does not expose SelectionPattern."
+        }
+        $idleModeSelected = @(([System.Windows.Automation.SelectionPattern]$idleModeSelection).Current.GetSelection())
+        if ($idleModeSelected.Count -ne 1) { throw "The idle measurement mode picker had no single selection." }
+        if ($idleModeSelected[0].Current.Name -ne (Get-SmokeUiText -Text "System-wide (dim every display)")) {
+            throw "Idle measurement must default to system-wide; got '$($idleModeSelected[0].Current.Name)'."
+        }
+        $idleModeExpand = $null
+        if (-not $idleModeCombo.TryGetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern, [ref]$idleModeExpand)) {
+            throw "The idle measurement mode picker does not expose ExpandCollapsePattern."
+        }
+        ([System.Windows.Automation.ExpandCollapsePattern]$idleModeExpand).Expand()
+        Start-Sleep -Milliseconds 200
+        $idleModeItems = @($idleModeCombo.FindAll([System.Windows.Automation.TreeScope]::Descendants, (New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [System.Windows.Automation.ControlType]::ListItem
+        ))))
+        if ($idleModeItems.Count -ne 3) { throw "Expected three idle measurement modes, found $($idleModeItems.Count)." }
+        ([System.Windows.Automation.ExpandCollapsePattern]$idleModeExpand).Collapse()
+        Start-Sleep -Milliseconds 150
         $usbEnabled = Get-ControlByName -Root $root -Name (Get-SmokeUiText -Text "USB input switching enabled") -ControlType ([System.Windows.Automation.ControlType]::CheckBox)
         if ($null -eq $usbEnabled) { throw "The USB input switching enable toggle was not exposed through UI Automation." }
         $usbEnabledPattern = $null
