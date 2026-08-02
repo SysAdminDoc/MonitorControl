@@ -1,0 +1,35 @@
+{
+    "version":  "3.37.0",
+    "description":  "Portable Windows DDC/CI display control center for brightness, contrast, color temperature, input switching, and profiles.",
+    "homepage":  "https://github.com/SysAdminDoc/MonitorControl",
+    "license":  "MIT",
+    "notes":  [
+                  "MonitorControl Pro is distributed unsigned. SmartScreen may warn on first launch.",
+                  "Requires Windows PowerShell 5.1, which ships with Windows.",
+                  "Monitors must have DDC/CI enabled in their own on-screen menu.",
+                  "Settings and profiles live in %APPDATA%\\MonitorControlPro and survive an update or uninstall."
+              ],
+    "architecture":  {
+                         "64bit":  {
+                                       "url":  "https://github.com/SysAdminDoc/MonitorControl/releases/download/v3.37.0/MonitorControlPro-v3.37.0.zip",
+                                       "hash":  "de4408bf5ab5a368ba7b62366f8ff00d91a91990f1fa78a5dfe6b679f8f1021b"
+                                   }
+                     },
+    "shortcuts":  [
+                      [
+                          "MonitorControlPro.cmd",
+                          "MonitorControl Pro"
+                      ]
+                  ],
+    "checkver":  "github",
+    "autoupdate":  {
+                       "architecture":  {
+                                            "64bit":  {
+                                                          "url":  "https://github.com/SysAdminDoc/MonitorControl/releases/download/v$version/MonitorControlPro-v$version.zip"
+                                                      }
+                                        },
+                       "hash":  {
+                                    "url":  "$url.sha256"
+                                }
+                   }
+}
