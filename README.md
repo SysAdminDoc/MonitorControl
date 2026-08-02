@@ -228,7 +228,7 @@ Run the release builder under Windows PowerShell 5.1. It reads the canonical ver
 .\tools\run-tests.ps1
 ```
 
-The deterministic suite requires Pester 5.9.0, composes the same standalone script as the release builder, and imports only selected function definitions from that disposable output. It does not enumerate displays, open the WPF app, or require DDC/CI hardware.
+The deterministic suite requires Pester 5.9.0, composes the same standalone script as the release builder, and imports only selected function definitions from that disposable output. It does not enumerate displays, open the WPF app, or require DDC/CI hardware. CI also runs the same suite on pinned Pester 6.0.0; this compatibility lane does not change the Windows PowerShell 5.1 GUI runtime contract.
 
 The suite also replays the versioned fixtures under `tests\fixtures\ddc` through the production
 verified-transaction path. Fixtures contain connector-scoped, redacted capability/read/write
