@@ -167,6 +167,48 @@ function Get-SafeProfileName {
     return $safeName
 }
 
+# Every Save-* in this module gates on this, so it belongs here for the same definition-order
+# reason as the profile helpers below. Update-Status is the one application-layer call the
+# storage layer keeps: it is a status sink, it is guarded by a Get-Command check where it runs
+# before the UI exists, and nothing here depends on its return value.
+function Test-ProfileStorageWriteAllowed {
+    param([string]$Operation = "change profile storage", [switch]$SuppressStatus)
+    if (-not $script:ProfileStorageOffline) { return $true }
+    if (-not $SuppressStatus) {
+        Update-Status "Profile storage is offline; $Operation is read-only until storage is reconnected or migrated"
+    }
+    return $false
+}
+
+# These live here, not in the WPF layer, because Storage's own document importers call them.
+# MonitorControlPro.ps1 dot-sources every source file into one scope, but the headless CLI
+# dispatches partway through the application source - so a helper defined after that dispatch
+# point does not exist yet when an importer needs it, and `diagnostics` fails with a bare
+# CommandNotFoundException. Definition order is a real dependency in a dot-sourced build.
+function Get-ProfilePropertyValue {
+    param($Object, [string]$Property, $Default = $null)
+    if ($null -ne $Object -and $Object.PSObject.Properties.Name -contains $Property -and $null -ne $Object.$Property) { return $Object.$Property }
+    return $Default
+}
+
+function Get-ProfileIntValue {
+    param($Object, [string]$Property, [int]$Default = 0)
+    $value = Get-ProfilePropertyValue -Object $Object -Property $Property -Default $null
+    if ($null -eq $value -or [string]::IsNullOrWhiteSpace([string]$value)) { return $Default }
+    return [int]$value
+}
+
+# Schema v4 stores every scaled DDC value as a percentage. Profiles written before v4 held
+# a raw value captured on whatever range the source monitor reported, so clamp them into
+# the percentage domain rather than replaying an out-of-range number to the hardware.
+function Get-ProfilePercentValue {
+    param($Object, [string]$Property, [int]$Default = 50)
+    $value = Get-ProfileIntValue -Object $Object -Property $Property -Default $Default
+    if ($value -lt 0) { return 0 }
+    if ($value -gt 100) { return 100 }
+    return [int]$value
+}
+
 function Load-MonitorIdentitySettings {
     $script:MonitorIdentityRecords = @{}
     if (-not (Test-Path -LiteralPath $script:MonitorIdentitySettingsPath)) { return }

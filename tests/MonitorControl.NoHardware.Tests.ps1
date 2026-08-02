@@ -3657,6 +3657,58 @@ Describe "Profile percentage schema" {
     }
 }
 
+Describe "Storage layer self-sufficiency" {
+    BeforeAll {
+        function Get-SourceFunctionNames {
+            param([string]$Path)
+            $tokens = $null
+            $errors = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors)
+            if ($errors.Count) { throw ($errors | Out-String) }
+            return @($ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) | ForEach-Object { $_.Name })
+        }
+        $script:StorageModulePath = Join-Path $script:RepoRoot "src\MonitorControl.Storage.psm1"
+        $script:AppSourcePath = Join-Path $script:RepoRoot "src\MonitorControl.App.ps1"
+        $script:ModuleFunctionNames = New-Object System.Collections.Generic.HashSet[string] ([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($modulePath in @(Get-ChildItem -LiteralPath (Join-Path $script:RepoRoot "src") -Filter "*.psm1")) {
+            foreach ($name in Get-SourceFunctionNames -Path $modulePath.FullName) { $null = $script:ModuleFunctionNames.Add($name) }
+        }
+        $script:AppFunctionNames = New-Object System.Collections.Generic.HashSet[string] ([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($name in Get-SourceFunctionNames -Path $script:AppSourcePath) { $null = $script:AppFunctionNames.Add($name) }
+    }
+
+    # MonitorControlPro.ps1 dot-sources every source file into one scope, so a call from a module
+    # to a function defined in the application source appears to work - until the headless CLI,
+    # which dispatches partway through the application source and never reaches the definitions
+    # below that point. Storage runs its document importers on the CLI path, so it must be able
+    # to stand alone apart from the two status sinks that are deliberately deferred.
+    It "calls no application-layer function except the deferred status sinks" {
+        $allowed = @("Update-Status", "Set-DeferredStatus")
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:StorageModulePath, [ref]$tokens, [ref]$errors)
+        if ($errors.Count) { throw ($errors | Out-String) }
+        $offenders = @()
+        foreach ($command in @($ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true))) {
+            $name = $command.GetCommandName()
+            if ([string]::IsNullOrWhiteSpace($name)) { continue }
+            if ($allowed -contains $name) { continue }
+            if ($script:ModuleFunctionNames.Contains($name)) { continue }
+            if (-not $script:AppFunctionNames.Contains($name)) { continue }
+            $offenders += "$name (line $($command.Extent.StartLineNumber))"
+        }
+
+        $offenders | Should -Be @()
+    }
+
+    It "keeps the profile document helpers in the storage layer" {
+        foreach ($name in @("Get-ProfilePropertyValue", "Get-ProfileIntValue", "Get-ProfilePercentValue")) {
+            $script:ModuleFunctionNames.Contains($name) | Should -BeTrue
+            $script:AppFunctionNames.Contains($name) | Should -BeFalse
+        }
+    }
+}
+
 Describe "Per-monitor video-aware idle dimming" {
     BeforeEach {
         $script:IdleMonitors = @(
@@ -4619,6 +4671,33 @@ Describe "Unsigned release packaging" {
             [System.IO.File]::ReadAllText((Join-Path $script:RepoRoot $relativePath)) |
                 Should -Not -Match [regex]::Escape($script:ReleaseMetadata.Version)
         }
+    }
+
+    It "ships a launcher a package manager can make a shortcut to" {
+        # Scoop resolves `shortcuts` against an executable file; a bare .ps1 is not one.
+        $script:BuildReleaseText | Should -Match 'MonitorControlPro\.cmd'
+        $script:BuildReleaseText | Should -Match '"MonitorControlPro\.ps1", "MonitorControlPro\.cmd"'
+    }
+
+    It "writes a checksum sidecar beside the ZIP" {
+        $script:BuildReleaseText | Should -Match '\$sidecarPath = "\$zipPath\.sha256"'
+        $script:BuildReleaseText | Should -Match 'Sha256Path = \$sidecarPath'
+    }
+
+    It "keeps the Scoop manifest on the canonical version with a usable autoupdate route" {
+        $manifestPath = Join-Path $script:RepoRoot "packaging\scoop\monitorcontrol-pro.json"
+        Test-Path -LiteralPath $manifestPath -PathType Leaf | Should -BeTrue
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+
+        $manifest.version | Should -Be $script:ReleaseMetadata.Version
+        $manifest.architecture."64bit".url | Should -Be "https://github.com/SysAdminDoc/MonitorControl/releases/download/v$($script:ReleaseMetadata.Version)/MonitorControlPro-v$($script:ReleaseMetadata.Version).zip"
+        $manifest.architecture."64bit".hash | Should -Match '^[0-9a-f]{64}$'
+        $manifest.checkver | Should -Be "github"
+        # The sidecar is what makes autoupdate work without a hosted build re-hashing the asset.
+        $manifest.autoupdate.hash.url | Should -Be '$url.sha256'
+        @($manifest.shortcuts)[0][0] | Should -Be "MonitorControlPro.cmd"
+        # No signing requirement may creep into the manifest.
+        (Get-Content -LiteralPath $manifestPath -Raw) | Should -Not -Match '(?i)certificate|authenticode|signtool'
     }
 
     It "rejects a dangerous output root before packaging" {

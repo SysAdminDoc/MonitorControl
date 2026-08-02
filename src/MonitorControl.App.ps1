@@ -6568,30 +6568,6 @@ function Remove-ProfileAndDependencies {
     return $true
 }
 
-function Get-ProfilePropertyValue {
-    param($Object, [string]$Property, $Default = $null)
-    if ($null -ne $Object -and $Object.PSObject.Properties.Name -contains $Property -and $null -ne $Object.$Property) { return $Object.$Property }
-    return $Default
-}
-
-function Get-ProfileIntValue {
-    param($Object, [string]$Property, [int]$Default = 0)
-    $value = Get-ProfilePropertyValue -Object $Object -Property $Property -Default $null
-    if ($null -eq $value -or [string]::IsNullOrWhiteSpace([string]$value)) { return $Default }
-    return [int]$value
-}
-
-# Schema v4 stores every scaled DDC value as a percentage. Profiles written before v4 held
-# a raw value captured on whatever range the source monitor reported, so clamp them into
-# the percentage domain rather than replaying an out-of-range number to the hardware.
-function Get-ProfilePercentValue {
-    param($Object, [string]$Property, [int]$Default = 50)
-    $value = Get-ProfileIntValue -Object $Object -Property $Property -Default $Default
-    if ($value -lt 0) { return 0 }
-    if ($value -gt 100) { return 100 }
-    return [int]$value
-}
-
 # The selected index is -1 before the first enumeration and can outlive a topology change,
 # and PowerShell resolves a negative index to the end of the array instead of failing. Every
 # "is this the monitor whose sliders are on screen" test goes through here so a stale index
@@ -7649,15 +7625,6 @@ function Write-ProfileStoragePointer {
 function Save-ProfileStorageSettings {
     $configuredPath = if ($script:ProfileStorageOffline) { $script:ProfileStorageConfiguredPath } else { $script:ProfilesPath }
     return (Write-ProfileStoragePointer -Mode $script:ProfileStorageMode -ProfilePath $configuredPath -FallbackPath $script:ProfileStorageFallbackPath -PreviousPath $script:ProfileStoragePreviousPath)
-}
-
-function Test-ProfileStorageWriteAllowed {
-    param([string]$Operation = "change profile storage", [switch]$SuppressStatus)
-    if (-not $script:ProfileStorageOffline) { return $true }
-    if (-not $SuppressStatus) {
-        Update-Status "Profile storage is offline; $Operation is read-only until storage is reconnected or migrated"
-    }
-    return $false
 }
 
 function Get-ProfileStorageMigrationPlan {

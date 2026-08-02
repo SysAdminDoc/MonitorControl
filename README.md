@@ -111,8 +111,25 @@ Windows 10 Home and Pro reached end of support on October 14, 2025 and are unsup
 
 ### Option 1: Portable Release ZIP
 1. Download `MonitorControlPro-vX.Y.Z.zip` from the GitHub release.
-2. Extract the ZIP to a writable folder.
-3. Verify `SHA256SUMS`, then run `MonitorControlPro.ps1`.
+2. Verify the download against the `MonitorControlPro-vX.Y.Z.zip.sha256` asset published beside it:
+   `(Get-FileHash MonitorControlPro-vX.Y.Z.zip -Algorithm SHA256).Hash -eq ((Get-Content MonitorControlPro-vX.Y.Z.zip.sha256).Split(' ')[0])`
+3. Extract the ZIP to a writable folder.
+4. Verify `SHA256SUMS` for the extracted payload, then run `MonitorControlPro.ps1` (or the
+   `MonitorControlPro.cmd` launcher, which starts it hidden with the STA host it needs).
+
+### Option 1a: Scoop
+
+The repository ships a Scoop manifest at [`packaging/scoop/monitorcontrol-pro.json`](packaging/scoop/monitorcontrol-pro.json).
+It is generated from a real local release build by `tools/update-scoop-manifest.ps1`, never by a
+hosted build, and its `autoupdate` block reads the published `.sha256` sidecar - so upgrades need
+no manual re-hashing. Add it to a bucket, or install the manifest directly:
+
+```powershell
+scoop install https://raw.githubusercontent.com/SysAdminDoc/MonitorControl/main/packaging/scoop/monitorcontrol-pro.json
+```
+
+Scoop's own `main` bucket excludes GUI applications; `extras` or a personal bucket is the right
+home. MonitorControl Pro is unsigned, which Scoop does not object to.
 
 ### Option 2: From PowerShell
 ```powershell

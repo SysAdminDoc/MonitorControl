@@ -163,6 +163,17 @@ Copy-Item -LiteralPath $licensePath -Destination (Join-Path $stageRoot "LICENSE"
 Copy-Item -LiteralPath $iconPath -Destination (Join-Path $stageRoot "icon.ico") -Force
 Copy-Item -LiteralPath $screenshotPath -Destination (Join-Path $stageRoot "screenshot.png") -Force
 
+# Scoop resolves `shortcuts` against a file it can execute. A bare .ps1 is not one, and a GUI
+# app should not get a `bin` shim either, so the ZIP carries a launcher that starts the script
+# with the STA host it needs and no console window left behind.
+$launcherText = @(
+    "@echo off"
+    "setlocal"
+    "start """" /b powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File ""%~dp0MonitorControlPro.ps1"" %*"
+    "endlocal"
+) -join "`r`n"
+[System.IO.File]::WriteAllText((Join-Path $stageRoot "MonitorControlPro.cmd"), $launcherText + "`r`n", (New-Object System.Text.ASCIIEncoding))
+
 $signStatus = "Unsigned: MonitorControl Pro release artifacts are intentionally not code signed."
 $builtAt = $buildTime.Timestamp.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
 $signingText = @(
@@ -180,7 +191,7 @@ $releaseManifest = [ordered]@{
     SourceDateEpoch = $buildTime.SourceDateEpoch
     Runtime = "Windows PowerShell 5.1"
     Signing = "Unsigned"
-    Payload = @("MonitorControlPro.ps1", "README.md", "LICENSE", "icon.ico", "screenshot.png", "SIGNING.txt")
+    Payload = @("MonitorControlPro.ps1", "MonitorControlPro.cmd", "README.md", "LICENSE", "icon.ico", "screenshot.png", "SIGNING.txt")
 }
 $manifestJson = ($releaseManifest | ConvertTo-Json -Depth 3) + "`r`n"
 [System.IO.File]::WriteAllText((Join-Path $stageRoot "RELEASE.json"), $manifestJson, (New-Object System.Text.ASCIIEncoding))
@@ -197,9 +208,21 @@ $hashLines = foreach ($name in Get-OrdinalFileNames -Directory $stageRoot) {
 New-DeterministicZip -SourceDirectory $stageRoot -DestinationPath $zipPath -Timestamp $buildTime.Timestamp
 $zipHash = Get-Sha256Hash -Path $zipPath
 
+# Scoop autoupdate fetches `$url.sha256` and expects a bare hash or a `hash *name` line. The
+# SHA256SUMS inside the ZIP covers the payload; this sidecar covers the ZIP itself, which is
+# the only thing a package manager can verify before extracting anything.
+$sidecarPath = "$zipPath.sha256"
+if (Test-Path -LiteralPath $sidecarPath) { Remove-Item -LiteralPath $sidecarPath -Force }
+[System.IO.File]::WriteAllText(
+    $sidecarPath,
+    ("$zipHash *$([System.IO.Path]::GetFileName($zipPath))`r`n"),
+    (New-Object System.Text.ASCIIEncoding)
+)
+
 [PSCustomObject]@{
     Version = $Version
     ZipPath = $zipPath
+    Sha256Path = $sidecarPath
     Sha256 = $zipHash
     Signing = $signStatus
     SourceDateEpoch = $buildTime.SourceDateEpoch
