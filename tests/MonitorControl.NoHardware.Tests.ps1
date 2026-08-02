@@ -4890,12 +4890,19 @@ Describe "Unsigned release packaging" {
     It "ships a launcher a package manager can make a shortcut to" {
         # Scoop resolves `shortcuts` against an executable file; a bare .ps1 is not one.
         $script:BuildReleaseText | Should -Match 'MonitorControlPro\.cmd'
-        $script:BuildReleaseText | Should -Match '"MonitorControlPro\.ps1", "MonitorControlPro\.cmd"'
+        $script:BuildReleaseText | Should -Match '\$payloadNames'
     }
 
     It "writes a checksum sidecar beside the ZIP" {
         $script:BuildReleaseText | Should -Match '\$sidecarPath = "\$zipPath\.sha256"'
         $script:BuildReleaseText | Should -Match 'Sha256Path = \$sidecarPath'
+    }
+
+    It "writes a manifest and CycloneDX SBOM sidecar for offline verification" {
+        $script:BuildReleaseText | Should -Match 'ManifestPath = \$manifestPath'
+        $script:BuildReleaseText | Should -Match 'SbomPath = \$sbomPath'
+        (Get-Content -LiteralPath (Join-Path $script:RepoRoot "tools\verify-release.ps1") -Raw) |
+            Should -Match 'The sidecar SBOM does not match the SBOM packaged in the ZIP'
     }
 
     It "keeps the Scoop manifest on the canonical version with a usable autoupdate route" {
@@ -4941,6 +4948,21 @@ Describe "Unsigned release packaging" {
             $manifest.SourceDateEpoch | Should -Be 1704067200
             $manifest.Runtime | Should -Be "Windows PowerShell 5.1"
             $manifest.Signing | Should -Be "Unsigned"
+            $manifest.Payload.Count | Should -BeGreaterThan 5
+            @($manifest.Payload | ForEach-Object { $_.Name }) | Should -Contain "MonitorControlPro.ps1"
+            @($manifest.Payload | ForEach-Object { $_.Name }) | Should -Contain "MonitorControlPro.cmd"
+            $manifest.SourceCommit | Should -Match '^[0-9a-f]{40}$'
+            $first.ManifestPath | Should -Exist
+            $first.SbomPath | Should -Exist
+            $verified = & (Join-Path $script:RepoRoot "tools\verify-release.ps1") `
+                -ZipPath $first.ZipPath `
+                -ManifestPath $first.ManifestPath `
+                -SbomPath $first.SbomPath `
+                -Sha256Path $first.Sha256Path
+            $verified.Sha256 | Should -Be $first.Sha256
+            $verified.Signing | Should -Be "Unsigned"
+            [System.IO.File]::ReadAllText($first.ManifestPath) | Should -Be ([System.IO.File]::ReadAllText($second.ManifestPath))
+            [System.IO.File]::ReadAllText($first.SbomPath) | Should -Be ([System.IO.File]::ReadAllText($second.SbomPath))
         } finally {
             $env:SOURCE_DATE_EPOCH = $previousEpoch
         }
