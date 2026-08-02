@@ -354,12 +354,18 @@ function Get-CliSetTarget {
 
 function Invoke-CliTransaction {
     param([object[]]$Operations, [scriptblock]$ReadAction, [scriptblock]$TransactionAction)
-    if ($null -ne $TransactionAction) { return (& $TransactionAction $Operations) }
+    if ($null -ne $TransactionAction) {
+        $transaction = & $TransactionAction $Operations
+        Register-DdcHealthVerificationResult -Transaction $transaction
+        return $transaction
+    }
     $transactionRead = {
         param($Operation)
         return Read-CliVcpValue -Monitor $Operation.Monitor -Code ([int]$Operation.Code) -ReadAction $ReadAction
     }
-    return Invoke-VerifiedVcpTransaction -Operations $Operations -ReadValue $transactionRead -RollbackOnFailure
+    $transaction = Invoke-VerifiedVcpTransaction -Operations $Operations -ReadValue $transactionRead -RollbackOnFailure
+    Register-DdcHealthVerificationResult -Transaction $transaction
+    return $transaction
 }
 
 function Get-CliTransactionData {

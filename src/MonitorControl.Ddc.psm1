@@ -1350,9 +1350,13 @@ function Register-DdcDiagnostic {
 function Drain-DdcWriteResults {
     $results = @([MonitorAPI]::DrainVCPWriteResults())
     foreach ($result in $results) {
+        Register-DdcHealthWriteResult -Result $result
         if (-not [bool]$result.Success) {
             Register-DdcDiagnostic -Operation "Write" -Monitor ([string]$result.MonitorName) -Code ([int]$result.Code) -Value ([uint32]$result.Value) -LastError ([int]$result.LastError) -Attempts ([int]$result.Attempts) -Message ([string]$result.ErrorMessage) | Out-Null
         }
+    }
+    if ($results.Count -gt 0) {
+        try { Update-SelectedMonitorRecoveryUi } catch { $null = $_ }
     }
 }
 
@@ -1649,7 +1653,10 @@ function Get-VCPValue {
     $vct = [uint32]0; $cur = [uint32]0; $max = [uint32]0
     $lastError = [int]0; $attempts = [int]0
     $stopOnNullResponse = $timingProfile.PSObject.Properties.Name -contains "NullMeansUnsupported" -and [bool]$timingProfile.NullMeansUnsupported
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
     $result = [MonitorAPI]::ReadVCPWithRetry($Handle, $VCPCode, [int]$timing.ReadRetries, [int]$timing.DelayMilliseconds, [bool]$stopOnNullResponse, [ref]$vct, [ref]$cur, [ref]$max, [ref]$lastError, [ref]$attempts)
+    $stopwatch.Stop()
+    Register-DdcHealthRead -IdentityKey $IdentityKey -Success ([bool]$result) -RoundTripMilliseconds ([int64]$stopwatch.ElapsedMilliseconds)
     if (-not [string]::IsNullOrWhiteSpace($IdentityKey)) {
         $dirty = Update-DdcTimingCalibration -IdentityKey $IdentityKey -Attempts $attempts -Success $result
         if (Register-DdcCodeOutcome -TimingProfile $timingProfile -Code ([int]$VCPCode) -Success $result -LastError $lastError -Attempts $attempts -OtherCodesResponded (Test-DdcMonitorResponded -IdentityKey $IdentityKey)) { $dirty = $true }
@@ -1674,13 +1681,109 @@ function Set-VCPValue {
 }
 
 function Queue-VCPValue {
-    param([IntPtr]$Handle, [byte]$VCPCode, [uint32]$Value, [string]$Key, [string]$MonitorName = "", [switch]$ForceWrite)
+    param([IntPtr]$Handle, [byte]$VCPCode, [uint32]$Value, [string]$Key, [string]$MonitorName = "", [string]$IdentityKey = "", [switch]$ForceWrite)
     if ($Handle -eq [IntPtr]::Zero) { return $false }
-    return [bool][MonitorAPI]::QueueVCPWrite($Handle, $VCPCode, $Value, $Key, $MonitorName, [bool]$ForceWrite)
+    return [bool][MonitorAPI]::QueueVCPWrite($Handle, $VCPCode, $Value, $Key, $MonitorName, $IdentityKey, [bool]$ForceWrite)
 }
 
 function Get-SuppressedDdcWriteCount {
     try { return [int64][MonitorAPI]::GetSuppressedVcpWriteCount() } catch { return [int64]0 }
+}
+
+function Get-DdcHealthRecord {
+    param([string]$IdentityKey)
+    if ([string]::IsNullOrWhiteSpace($IdentityKey)) { return $null }
+    if ($null -eq $script:DdcHealthRecords) { $script:DdcHealthRecords = @{} }
+    if (-not $script:DdcHealthRecords.ContainsKey($IdentityKey)) {
+        $script:DdcHealthRecords[$IdentityKey] = [PSCustomObject]@{
+            WritesSent = [int64]0
+            WritesSuppressed = [int64]0
+            LastSuccessfulReadUtc = ""
+            LastSuccessfulWriteUtc = ""
+            ConsecutiveFailures = 0
+            LastRoundTripMilliseconds = [int64]0
+            LastVerifyOutcome = "unknown"
+            UpdatedAtUtc = ""
+        }
+    }
+    return $script:DdcHealthRecords[$IdentityKey]
+}
+
+function Register-DdcHealthRead {
+    param([string]$IdentityKey, [bool]$Success, [int64]$RoundTripMilliseconds)
+    $record = Get-DdcHealthRecord -IdentityKey $IdentityKey
+    if ($null -eq $record) { return }
+    $now = [DateTime]::UtcNow.ToString("o")
+    $record.LastRoundTripMilliseconds = [int64][Math]::Max(0, $RoundTripMilliseconds)
+    $record.UpdatedAtUtc = $now
+    if ($Success) {
+        $record.LastSuccessfulReadUtc = $now
+        $record.ConsecutiveFailures = 0
+    } else {
+        $record.ConsecutiveFailures = [int]$record.ConsecutiveFailures + 1
+    }
+    Save-DdcHealthSettings | Out-Null
+}
+
+function Register-DdcHealthWriteResult {
+    param($Result)
+    if ($null -eq $Result) { return }
+    $identityKey = [string]$Result.IdentityKey
+    if ([string]::IsNullOrWhiteSpace($identityKey)) { return }
+    $record = Get-DdcHealthRecord -IdentityKey $identityKey
+    if ([bool]$Result.Suppressed) {
+        $record.WritesSuppressed = [int64]$record.WritesSuppressed + 1
+    } else {
+        $record.WritesSent = [int64]$record.WritesSent + 1
+        $record.LastRoundTripMilliseconds = [int64][Math]::Max(0, [int64]$Result.RoundTripMilliseconds)
+        if ([bool]$Result.Success) {
+            $record.LastSuccessfulWriteUtc = ([DateTime]$Result.TimestampUtc).ToUniversalTime().ToString("o")
+            $record.ConsecutiveFailures = 0
+            $record.LastVerifyOutcome = "applied"
+        } else {
+            $record.ConsecutiveFailures = [int]$record.ConsecutiveFailures + 1
+            $record.LastVerifyOutcome = "write failed"
+        }
+    }
+    $record.UpdatedAtUtc = [DateTime]::UtcNow.ToString("o")
+    Save-DdcHealthSettings | Out-Null
+}
+
+function Register-DdcHealthVerificationResult {
+    param($Transaction)
+    if ($null -eq $Transaction) { return }
+    $changed = $false
+    foreach ($entry in @($Transaction.Results)) {
+        if ($null -eq $entry -or $null -eq $entry.Operation) { continue }
+        $identityKey = [string]$entry.Operation.IdentityKey
+        if ([string]::IsNullOrWhiteSpace($identityKey)) { continue }
+        $record = Get-DdcHealthRecord -IdentityKey $identityKey
+        $record.WritesSent = [int64]$record.WritesSent + 1
+        $record.LastRoundTripMilliseconds = [int64][Math]::Max(0, [int64]$entry.WriteRoundTripMilliseconds)
+        $record.LastVerifyOutcome = [string]$entry.Verification
+        if ([bool]$entry.WriteSuccess) {
+            $record.LastSuccessfulWriteUtc = [DateTime]::UtcNow.ToString("o")
+            if ([string]$entry.Verification -in @("Verified", "VerifiedAfterRetry", "VerificationOff", "Off")) {
+                $record.ConsecutiveFailures = 0
+            } else {
+                $record.ConsecutiveFailures = [int]$record.ConsecutiveFailures + 1
+            }
+        } else {
+            $record.ConsecutiveFailures = [int]$record.ConsecutiveFailures + 1
+        }
+        $record.UpdatedAtUtc = [DateTime]::UtcNow.ToString("o")
+        $changed = $true
+    }
+    if ($changed) { Save-DdcHealthSettings | Out-Null }
+}
+
+function Get-DdcHealthSummaryText {
+    param([string]$IdentityKey)
+    $record = Get-DdcHealthRecord -IdentityKey $IdentityKey
+    if ($null -eq $record) { return "DDC health: no activity recorded" }
+    $total = [int64]$record.WritesSent + [int64]$record.WritesSuppressed
+    $ratio = if ($total -gt 0) { [Math]::Round(([double]$record.WritesSuppressed / $total) * 100, 0) } else { 0 }
+    return "DDC health: $($record.WritesSent) writes sent, $($record.WritesSuppressed) suppressed ($ratio%); failures $($record.ConsecutiveFailures); last RTT $($record.LastRoundTripMilliseconds) ms"
 }
 
 function Invoke-SelectedMonitorVcpReread {
@@ -1725,13 +1828,13 @@ function Set-VCPValueWithSync {
         for ($i = 0; $i -lt $script:PhysicalMonitors.Count; $i++) {
             $mon = $script:PhysicalMonitors[$i]
             $target = Resolve-VcpWriteValueForMonitor -Monitor $mon -Code $code -Value $Value -Percent:$Percent
-            if (Queue-VCPValue -Handle $mon.Handle -VCPCode $VCPCode -Value $target -Key "$i`:0x$("{0:X2}" -f $VCPCode)" -MonitorName $mon.Name -ForceWrite:$UserInitiated) { $queued++ }
+            if (Queue-VCPValue -Handle $mon.Handle -VCPCode $VCPCode -Value $target -Key "$i`:0x$("{0:X2}" -f $VCPCode)" -MonitorName $mon.Name -IdentityKey $mon.IdentityKey -ForceWrite:$UserInitiated) { $queued++ }
         }
         if ($VCPCode -eq [MonitorAPI]::VCP_BRIGHTNESS -and $script:WmiBrightnessAvailable) { Set-WmiBrightness -Value $wmiPercent | Out-Null }
     } elseif ($script:CurrentMonitorIndex -ge 0 -and $script:CurrentMonitorIndex -lt $script:PhysicalMonitors.Count) {
         $mon = $script:PhysicalMonitors[$script:CurrentMonitorIndex]
         $target = Resolve-VcpWriteValueForMonitor -Monitor $mon -Code $code -Value $Value -Percent:$Percent
-        if (Queue-VCPValue -Handle $mon.Handle -VCPCode $VCPCode -Value $target -Key "$script:CurrentMonitorIndex`:0x$("{0:X2}" -f $VCPCode)" -MonitorName $mon.Name -ForceWrite:$UserInitiated) { $queued++ }
+        if (Queue-VCPValue -Handle $mon.Handle -VCPCode $VCPCode -Value $target -Key "$script:CurrentMonitorIndex`:0x$("{0:X2}" -f $VCPCode)" -MonitorName $mon.Name -IdentityKey $mon.IdentityKey -ForceWrite:$UserInitiated) { $queued++ }
         elseif ($VCPCode -eq [MonitorAPI]::VCP_BRIGHTNESS -and $script:WmiBrightnessAvailable) { Set-WmiBrightness -Value $wmiPercent | Out-Null }
     } elseif ($VCPCode -eq [MonitorAPI]::VCP_BRIGHTNESS -and $script:WmiBrightnessAvailable) {
         Set-WmiBrightness -Value $wmiPercent | Out-Null
@@ -1846,7 +1949,9 @@ function Invoke-VerifiedVcpTransaction {
         $snapshotReadable = $null -ne $snapshot -and [bool]$snapshot.Success -and -not (Test-VcpReadbackOutOfRange -Readback $snapshot -Operation $operation)
         $previousValue = if ($snapshotReadable) { [uint32]$snapshot.Current } else { [uint32]0 }
         $writeSucceeded = $false
+        $writeStopwatch = [Diagnostics.Stopwatch]::StartNew()
         try { $writeSucceeded = [bool](& $WriteValue $operation ([uint32]$operation.Value)) } catch { $writeSucceeded = $false }
+        $writeStopwatch.Stop()
         $verification = "WriteFailed"
         $readbackValue = [uint32]0
         $readbackMaximum = [uint32]0
@@ -1913,6 +2018,7 @@ function Invoke-VerifiedVcpTransaction {
             VerifyPolicy = $verifyPolicy
             VerificationDelayMilliseconds = [int]$verificationSettings.DelayMilliseconds
             Verification = $verification
+            WriteRoundTripMilliseconds = [int64]$writeStopwatch.ElapsedMilliseconds
             ReadbackValue = $readbackValue
             ReadbackMaximum = $readbackMaximum
             VerificationReads = $verificationReads
@@ -2270,6 +2376,7 @@ function Get-DdcReportTargets {
             DdcLastProbeUtc = if ($mon.PSObject.Properties.Name -contains "DdcLastProbeUtc") { $mon.DdcLastProbeUtc } else { $null }
             DdcLastSuccessfulProbeUtc = if ($mon.PSObject.Properties.Name -contains "DdcLastSuccessfulProbeUtc") { $mon.DdcLastSuccessfulProbeUtc } elseif ($script:DdcLivenessLastSuccessUtc.ContainsKey([string]$mon.IdentityKey)) { $script:DdcLivenessLastSuccessUtc[[string]$mon.IdentityKey] } else { $null }
             DdcLastProbeSucceeded = if ($mon.PSObject.Properties.Name -contains "DdcLastProbeSucceeded") { [bool]$mon.DdcLastProbeSucceeded } else { $null }
+            DdcHealth = Get-DdcHealthRecord -IdentityKey ([string]$mon.IdentityKey)
             Handle = $mon.Handle
             HandleValue = [int64]$mon.Handle.ToInt64()
             Generation = [int]$script:DisplayRecoveryGeneration
@@ -2508,6 +2615,14 @@ function New-DdcCompatibilityReport {
         $livenessSuccess = if ($null -ne $target.DdcLastSuccessfulProbeUtc) { ([DateTime]$target.DdcLastSuccessfulProbeUtc).ToString("o") } else { "never" }
         $livenessAttempt = if ($null -ne $target.DdcLastProbeUtc) { ([DateTime]$target.DdcLastProbeUtc).ToString("o") } else { "never" }
         [void]$sb.AppendLine("  Liveness probe: last success=$livenessSuccess, last attempt=$livenessAttempt")
+        $health = $target.DdcHealth
+        if ($null -eq $health) {
+            [void]$sb.AppendLine("  DDC health: no activity recorded")
+        } else {
+            $writeTotal = [int64]$health.WritesSent + [int64]$health.WritesSuppressed
+            $suppressedRatio = if ($writeTotal -gt 0) { [Math]::Round(([double]$health.WritesSuppressed / $writeTotal) * 100, 0) } else { 0 }
+            [void]$sb.AppendLine("  DDC health: writes sent=$([int64]$health.WritesSent), suppressed=$([int64]$health.WritesSuppressed) ($suppressedRatio%), consecutive failures=$([int]$health.ConsecutiveFailures), last successful read=$([string]$health.LastSuccessfulReadUtc), last successful write=$([string]$health.LastSuccessfulWriteUtc), last RTT=$([int64]$health.LastRoundTripMilliseconds) ms, verify=$([string]$health.LastVerifyOutcome)")
+        }
         [void]$sb.AppendLine("  Risky VCP writes: $(if ([bool]$target.RiskyWritesEnabled) { 'identity unlocked; direct confirmation still required' } else { 'disabled' })")
         foreach ($line in @(Get-InputSourceMappingReportLines -Map $target.InputSourceMap -SingleByte ([bool]$target.InputSourceSingleByte) -IncludeRawNames:$IncludeRawNames)) { [void]$sb.AppendLine($line) }
         if (@($target.SkippedProbeCodes).Count -gt 0) {
@@ -2592,6 +2707,16 @@ function New-DdcCompatibilityReportJson {
                 }
             )
             RecoveryState = [string]$target.RecoveryState
+            DdcHealth = if ($null -eq $target.DdcHealth) { $null } else { [ordered]@{
+                WritesSent = [int64]$target.DdcHealth.WritesSent
+                WritesSuppressed = [int64]$target.DdcHealth.WritesSuppressed
+                LastSuccessfulReadUtc = [string]$target.DdcHealth.LastSuccessfulReadUtc
+                LastSuccessfulWriteUtc = [string]$target.DdcHealth.LastSuccessfulWriteUtc
+                ConsecutiveFailures = [int]$target.DdcHealth.ConsecutiveFailures
+                LastRoundTripMilliseconds = [int64]$target.DdcHealth.LastRoundTripMilliseconds
+                LastVerifyOutcome = [string]$target.DdcHealth.LastVerifyOutcome
+                UpdatedAtUtc = [string]$target.DdcHealth.UpdatedAtUtc
+            } }
             Probes = @($ProbeResults | Where-Object { [int]$_.TargetIndex -eq [int]$target.Index } | Sort-Object ProbeIndex | ForEach-Object {
                 [ordered]@{
                     Code = [int]$_.Code
