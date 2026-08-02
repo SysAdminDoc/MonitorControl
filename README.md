@@ -230,6 +230,11 @@ Run the release builder under Windows PowerShell 5.1. It reads the canonical ver
 
 The deterministic suite requires Pester 5.9.0, composes the same standalone script as the release builder, and imports only selected function definitions from that disposable output. It does not enumerate displays, open the WPF app, or require DDC/CI hardware.
 
+The suite also replays the versioned fixtures under `tests\fixtures\ddc` through the production
+verified-transaction path. Fixtures contain connector-scoped, redacted capability/read/write
+events for malformed, null, stale, and recovery cases; they never contain EDID serials, user
+paths, or live monitor credentials.
+
 ### Run the Full Windows Verification Lane
 ```powershell
 # Run from Windows PowerShell 5.1

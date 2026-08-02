@@ -5579,6 +5579,120 @@ Describe "Headless CLI contract" {
     }
 }
 
+Describe "DDC transcript replay corpus" {
+    BeforeAll {
+        $script:DdcTranscriptPath = Join-Path $script:RepoRoot "tests\fixtures\ddc\displayport-recovery-v1.json"
+        $script:DdcTranscriptCorpus = Get-Content -LiteralPath $script:DdcTranscriptPath -Raw | ConvertFrom-Json
+        $script:DdcTimingMinMultiplier = 1.0
+        $script:DdcTimingMaxMultiplier = 4.0
+        $script:DdcTimingMaxRetries = 10
+        $script:DdcTimingProfiles = @{}
+        $script:DdcSaveSettingsEnabled = $false
+        $script:DdcSaveSettingsLastUtc = @{}
+        function global:New-DdcTranscriptCursor {
+            param($Scenario)
+            return [PSCustomObject]@{
+                Scenario = $Scenario.Name
+                Events = @($Scenario.Events)
+                Index = 0
+                Writes = New-Object System.Collections.Generic.List[object]
+            }
+        }
+        function global:Read-DdcTranscriptEvent {
+            param($Cursor, [string]$Kind, [int]$Code = -1)
+            if ($Cursor.Index -ge $Cursor.Events.Count) { throw "Transcript ended before $Kind." }
+            $event = $Cursor.Events[$Cursor.Index]
+            if ([string]$event.Kind -ne $Kind) { throw "Transcript expected $Kind but found $($event.Kind)." }
+            if ($Code -ge 0 -and [int]([Convert]::ToInt32(([string]$event.Code).Replace('0x', ''), 16)) -ne $Code) {
+                throw "Transcript code mismatch for $Kind."
+            }
+            $Cursor.Index++
+            return $event
+        }
+        function global:Read-DdcTranscriptValue {
+            param($Cursor, $Operation)
+            $event = Read-DdcTranscriptEvent -Cursor $Cursor -Kind "Read" -Code ([int]$Operation.Code)
+            return [PSCustomObject]@{
+                Success = [bool]$event.Success
+                Current = [uint32]$event.Current
+                Maximum = [uint32]$event.Maximum
+                Type = [uint32]$event.Type
+                LastError = [int]$event.LastError
+                Attempts = [int]$event.Attempts
+            }
+        }
+        function global:Write-DdcTranscriptValue {
+            param($Cursor, $Operation, [uint32]$TargetValue)
+            $event = Read-DdcTranscriptEvent -Cursor $Cursor -Kind "Write" -Code ([int]$Operation.Code)
+            if ([uint32]$event.Value -ne $TargetValue) { throw "Transcript write value mismatch." }
+            $Cursor.Writes.Add([uint32]$TargetValue)
+            return [bool]$event.Success
+        }
+    }
+
+    It "keeps the corpus versioned, connector-scoped, and free of raw identifiers" {
+        $script:DdcTranscriptCorpus.SchemaVersion | Should -Be 1
+        $script:DdcTranscriptCorpus.Identity | Should -Match '^edid:'
+        $script:DdcTranscriptCorpus.Connector | Should -Be "DisplayPort"
+        foreach ($scenario in @($script:DdcTranscriptCorpus.Scenarios)) {
+            @($scenario.Events).Count | Should -BeGreaterThan 0
+            @($scenario.Events | Where-Object Kind -NotIn @("Capability", "Read", "Write")).Count | Should -Be 0
+            @($scenario.Events | Where-Object { $_.Kind -eq "Capability" -and [string]$_.Raw -match '[\\/:]|[A-Za-z]:\\' }).Count | Should -Be 0
+        }
+    }
+
+    It "replays a stale readback and verifies production rollback" {
+        $scenario = @($script:DdcTranscriptCorpus.Scenarios | Where-Object Name -eq "mismatch-rollback")[0]
+        $cursor = New-DdcTranscriptCursor -Scenario $scenario
+        $capability = Read-DdcTranscriptEvent -Cursor $cursor -Kind "Capability"
+        $capability.Raw | Should -Match 'vcp'
+        $operation = [PSCustomObject]@{
+            Monitor = [PSCustomObject]@{ IdentityKey = $script:DdcTranscriptCorpus.Identity }
+            MonitorName = "Fixture display"
+            IdentityKey = $script:DdcTranscriptCorpus.Identity
+            Handle = [IntPtr]0x701
+            Code = 0x10
+            Value = 60
+            ReportedMaximum = 100
+            Backend = "DDC"
+        }
+        $result = Invoke-VerifiedVcpTransaction -Operations @($operation) `
+            -ReadValue { param($item) Read-DdcTranscriptValue -Cursor $cursor -Operation $item } `
+            -WriteValue { param($item, $value) Write-DdcTranscriptValue -Cursor $cursor -Operation $item -TargetValue $value } `
+            -DelayAction { param($milliseconds) } -RollbackOnFailure
+        $result.Success | Should -BeFalse
+        $result.Outcome | Should -Be "Mismatched"
+        $result.Rollback | Should -Be "Restored"
+        ($cursor.Writes.ToArray() -join ",") | Should -Be "60,20"
+        $cursor.Index | Should -Be $cursor.Events.Count
+    }
+
+    It "replays a post-wake null response and never invents a rollback write" {
+        $scenario = @($script:DdcTranscriptCorpus.Scenarios | Where-Object Name -eq "null-read-after-wake")[0]
+        $cursor = New-DdcTranscriptCursor -Scenario $scenario
+        Read-DdcTranscriptEvent -Cursor $cursor -Kind "Capability" | Out-Null
+        $operation = [PSCustomObject]@{
+            Monitor = [PSCustomObject]@{ IdentityKey = $script:DdcTranscriptCorpus.Identity }
+            MonitorName = "Fixture display"
+            IdentityKey = $script:DdcTranscriptCorpus.Identity
+            Handle = [IntPtr]0x701
+            Code = 0x10
+            Value = 55
+            ReportedMaximum = 100
+            Backend = "DDC"
+        }
+        $result = Invoke-VerifiedVcpTransaction -Operations @($operation) `
+            -ReadValue { param($item) Read-DdcTranscriptValue -Cursor $cursor -Operation $item } `
+            -WriteValue { param($item, $value) Write-DdcTranscriptValue -Cursor $cursor -Operation $item -TargetValue $value } `
+            -DelayAction { param($milliseconds) } -RollbackOnFailure
+        $result.Success | Should -BeFalse
+        $result.Outcome | Should -Be "WriteFailed"
+        $result.Rollback | Should -Be "NotNeeded"
+        $cursor.Writes.Count | Should -Be 1
+        $cursor.Index | Should -Be $cursor.Events.Count
+    }
+}
+
 Describe "Ambient light hysteresis" {
     BeforeAll {
         Import-MonitorControlFunctions -Name @("Get-AmbientLevelIndex", "Get-AmbientBrightnessDecision")

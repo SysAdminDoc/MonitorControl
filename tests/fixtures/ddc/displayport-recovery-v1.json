@@ -1,0 +1,26 @@
+{
+  "SchemaVersion": 1,
+  "Identity": "edid:fixture-displayport",
+  "Connector": "DisplayPort",
+  "Scenarios": [
+    {
+      "Name": "mismatch-rollback",
+      "Events": [
+        { "Kind": "Capability", "Raw": "(vcp(10( 00 64) 12( 00 64) 60( 11 12 13)))" },
+        { "Kind": "Read", "Code": "0x10", "Success": true, "Current": 20, "Maximum": 100, "Type": 0, "Attempts": 1 },
+        { "Kind": "Write", "Code": "0x10", "Value": 60, "Success": true },
+        { "Kind": "Read", "Code": "0x10", "Success": true, "Current": 42, "Maximum": 100, "Type": 0, "Attempts": 1 },
+        { "Kind": "Write", "Code": "0x10", "Value": 20, "Success": true },
+        { "Kind": "Read", "Code": "0x10", "Success": true, "Current": 20, "Maximum": 100, "Type": 0, "Attempts": 1 }
+      ]
+    },
+    {
+      "Name": "null-read-after-wake",
+      "Events": [
+        { "Kind": "Capability", "Raw": "(vcp(10( 00 64) 12( 00 64)))" },
+        { "Kind": "Read", "Code": "0x10", "Success": false, "Current": 0, "Maximum": 100, "Type": 0, "LastError": -1073741515, "Attempts": 3 },
+        { "Kind": "Write", "Code": "0x10", "Value": 55, "Success": false }
+      ]
+    }
+  ]
+}
