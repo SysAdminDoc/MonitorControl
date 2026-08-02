@@ -9,6 +9,9 @@ param(
     [switch]$ExerciseValidationAlert,
     [string]$ScreenshotPath = "",
     [string]$ScreenshotDirectory = "",
+    [string]$AxeWindowsCliPath = "",
+    [string]$AxeOutputDirectory = "",
+    [string]$AxeScanId = "",
     [switch]$Quiet
 )
 
@@ -178,6 +181,55 @@ function Get-PageScreenshotFileName {
     return $fileName
 }
 
+function Invoke-AxeWindowsScan {
+    param(
+        [string]$CliPath,
+        [int]$ProcessId,
+        [string]$OutputDirectory,
+        [string]$ScanId
+    )
+    if ([string]::IsNullOrWhiteSpace($CliPath)) { return $null }
+    if (-not (Test-Path -LiteralPath $CliPath -PathType Leaf)) { throw "Axe.Windows CLI not found: $CliPath" }
+    if ([string]::IsNullOrWhiteSpace($OutputDirectory) -or [string]::IsNullOrWhiteSpace($ScanId)) {
+        throw "Axe.Windows scan requires an output directory and scan id."
+    }
+    $OutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
+    New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
+    $escapedOutput = $OutputDirectory.Replace('"', '\"')
+    $escapedScanId = $ScanId.Replace('"', '\"')
+    $arguments = "--processid $ProcessId --outputdirectory `"$escapedOutput`" --scanid `"$escapedScanId`" --verbosity quiet --alwayssavetestfile"
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $CliPath
+    $startInfo.Arguments = $arguments
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $scanner = New-Object System.Diagnostics.Process
+    $scanner.StartInfo = $startInfo
+    try {
+        if (-not $scanner.Start()) { throw "Axe.Windows CLI did not start." }
+        $null = $scanner.Handle
+        if (-not $scanner.WaitForExit(120000)) {
+            try { $scanner.Kill() } catch {}
+            throw "Axe.Windows CLI timed out after 120 seconds."
+        }
+        $stdout = $scanner.StandardOutput.ReadToEnd()
+        $stderr = $scanner.StandardError.ReadToEnd()
+        $exitCode = [int]$scanner.ExitCode
+        $artifacts = @(Get-ChildItem -LiteralPath $OutputDirectory -File -Filter "*.a11ytest" -ErrorAction SilentlyContinue)
+        if ($artifacts.Count -eq 0) {
+            throw "Axe.Windows CLI did not retain an .a11ytest artifact. Output: $stdout $stderr"
+        }
+        if ($exitCode -ne 0) {
+            throw "Axe.Windows reported accessibility violations or failed (exit $exitCode). Artifacts: $($artifacts.FullName -join ', ')"
+        }
+        return [PSCustomObject]@{ ExitCode = $exitCode; Artifacts = $artifacts; Output = $stdout }
+    } finally {
+        $scanner.Dispose()
+    }
+}
+
 $realAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)
 $realProfileRoot = Join-Path $realAppData "MonitorControlPro"
 $realProfileBefore = Get-DirectorySnapshot -Path $realProfileRoot
@@ -289,6 +341,8 @@ public static class MonitorControlWindowProbe
         $appWindowHandle = [MonitorControlWindowProbe]::Find($process.Id, $windowTitlePrefix)
     } while ($appWindowHandle -eq [IntPtr]::Zero -and [DateTime]::UtcNow -lt $deadline)
     if ($appWindowHandle -eq [IntPtr]::Zero) { throw "The WPF window did not appear within $LaunchTimeoutSeconds seconds." }
+
+    Invoke-AxeWindowsScan -CliPath $AxeWindowsCliPath -ProcessId $process.Id -OutputDirectory $AxeOutputDirectory -ScanId $AxeScanId | Out-Null
 
     Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
     if (-not ("MonitorControlLiveRegionProbe" -as [type])) {

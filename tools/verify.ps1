@@ -84,14 +84,33 @@ Write-Host "Static analysis passed with PSScriptAnalyzer $PSScriptAnalyzerVersio
 $windowsPowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 & $windowsPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot "tools\run-tests.ps1") -Quiet -PesterVersion $PesterVersion.ToString()
 if ($LASTEXITCODE -ne 0) { throw "The deterministic Pester lane failed with exit code $LASTEXITCODE." }
-& $windowsPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot "tests\MonitorControl.WpfSmoke.ps1") -Quiet
-if ($LASTEXITCODE -ne 0) { throw "The WPF smoke lane failed with exit code $LASTEXITCODE." }
-& $windowsPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot "tests\MonitorControl.WpfSmoke.ps1") -Quiet -AppTheme HighContrast -TextScalePercent 200 -UiCulture qps-ploc -ResizeToMinimum -ExerciseValidationAlert
-if ($LASTEXITCODE -ne 0) { throw "The high-contrast, pseudo-localized, and 200% text WPF smoke lane failed with exit code $LASTEXITCODE." }
-
 $verificationRoot = Join-Path ([System.IO.Path]::GetTempPath()) "MonitorControl-Verify-$([guid]::NewGuid().ToString('N'))"
+$accessibilityArtifactRoot = Join-Path $repoRoot "dist\accessibility"
 try {
     New-Item -ItemType Directory -Path $verificationRoot -Force | Out-Null
+    if (Test-Path -LiteralPath $accessibilityArtifactRoot) {
+        $artifactItem = Get-Item -LiteralPath $accessibilityArtifactRoot -Force
+        if (($artifactItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Accessibility artifact output cannot be a reparse point: $accessibilityArtifactRoot"
+        }
+        Remove-Item -LiteralPath $accessibilityArtifactRoot -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $accessibilityArtifactRoot -Force | Out-Null
+    $axePackage = & (Join-Path $repoRoot "tools\install-axe-windows.ps1") -OutputRoot (Join-Path $verificationRoot "axe")
+    if ($null -eq $axePackage -or -not (Test-Path -LiteralPath $axePackage.Path -PathType Leaf)) {
+        throw "The pinned Axe.Windows CLI package did not produce an executable."
+    }
+    $standardAxeOutput = Join-Path $accessibilityArtifactRoot "standard"
+    & $windowsPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot "tests\MonitorControl.WpfSmoke.ps1") `
+        -Quiet -AxeWindowsCliPath $axePackage.Path -AxeOutputDirectory $standardAxeOutput -AxeScanId "standard"
+    if ($LASTEXITCODE -ne 0) { throw "The standard WPF smoke or Axe.Windows accessibility lane failed with exit code $LASTEXITCODE." }
+    $highContrastAxeOutput = Join-Path $accessibilityArtifactRoot "high-contrast-200"
+    & $windowsPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot "tests\MonitorControl.WpfSmoke.ps1") `
+        -Quiet -AppTheme HighContrast -TextScalePercent 200 -UiCulture qps-ploc -ResizeToMinimum -ExerciseValidationAlert `
+        -AxeWindowsCliPath $axePackage.Path -AxeOutputDirectory $highContrastAxeOutput -AxeScanId "high-contrast-200"
+    if ($LASTEXITCODE -ne 0) { throw "The high-contrast, pseudo-localized, and Axe.Windows accessibility lane failed with exit code $LASTEXITCODE." }
+    Write-Host "Axe.Windows 2.4.2 accessibility artifacts retained under $accessibilityArtifactRoot."
+
     $release = & (Join-Path $repoRoot "tools\build-release.ps1") -OutputRoot (Join-Path $verificationRoot "dist")
     if ($null -eq $release -or -not (Test-Path -LiteralPath $release.ZipPath -PathType Leaf)) {
         throw "The unsigned release builder did not produce its declared ZIP."
@@ -110,5 +129,4 @@ try {
 } finally {
     Remove-ValidatedVerificationDirectory -Path $verificationRoot
 }
-
-Write-Host "Verification passed: Pester $PesterVersion, standard and pseudo-localized accessible WPF smokes, and unsigned release build."
+Write-Host "Verification passed: Pester $PesterVersion, standard and pseudo-localized accessible WPF smokes, Axe.Windows 2.4.2, and unsigned release build."
