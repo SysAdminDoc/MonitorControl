@@ -1,5 +1,6 @@
 # Changelog
 
+- Added: an opt-in, notify-only update check under **System > Overview**. It queries the GitHub releases API with an `ETag` cache, compares the release tag with the installed version, and offers dismissible links to the release page without downloading or executing anything; failures stay silent beyond diagnostics.
 - Added: the UI now selects the Windows display language by default, resolves static, runtime, tray, dialog, and automation-accessible text through invariant resource keys with English fallback, and formats displayed values with the selected culture. A `-Culture` override and expanded/accented `qps-ploc` pseudo-locale exercise localization without requiring a translated build.
 - Changed: alert severity is explicit data instead of an English-text classifier, and the 200% high-contrast smoke lane now drives pseudo-localized navigation, validation alerts, reflow, and visible-control geometry.
 - Added: a headless `list`, `get`, `set`, `profile`, and `diagnostics` command line runs without WPF, targets stable monitor identities, supports human text or a schema-v1 JSON envelope, and terminates a hung native worker at a documented timeout.

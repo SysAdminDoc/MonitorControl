@@ -679,6 +679,27 @@ public sealed class MonitorControlLiveRegionProbe : IDisposable
     if ($systemTab.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$systemTabPattern)) {
         ([System.Windows.Automation.SelectionItemPattern]$systemTabPattern).Select()
         Start-Sleep -Milliseconds 150
+        $overviewCategory = Get-TabByName -Root $root -Name (Get-SmokeUiText -Text "Overview system settings")
+        if ($null -eq $overviewCategory) { throw "The System page did not expose its Overview category." }
+        $overviewCategoryPattern = $null
+        if (-not $overviewCategory.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$overviewCategoryPattern)) {
+            throw "The Overview category does not expose SelectionItemPattern."
+        }
+        ([System.Windows.Automation.SelectionItemPattern]$overviewCategoryPattern).Select()
+        Start-Sleep -Milliseconds 150
+        $updateCheck = Get-ControlByName -Root $root -Name (Get-SmokeUiText -Text "Check for updates (notify only)") -ControlType ([System.Windows.Automation.ControlType]::CheckBox)
+        $updateCheckNow = Get-ControlByName -Root $root -Name (Get-SmokeUiText -Text "Check now") -ControlType ([System.Windows.Automation.ControlType]::Button)
+        $updateCheckStatus = Get-ControlByName -Root $root -Name (Get-SmokeUiText -Text "Off") -ControlType ([System.Windows.Automation.ControlType]::Text)
+        if ($null -eq $updateCheck -or $null -eq $updateCheckNow -or $null -eq $updateCheckStatus) {
+            throw "The System page did not expose the opt-in notify-only update check controls."
+        }
+        $updateToggle = $null
+        if (-not $updateCheck.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern, [ref]$updateToggle)) {
+            throw "The notify-only update check control does not expose TogglePattern."
+        }
+        if (([System.Windows.Automation.TogglePattern]$updateToggle).Current.ToggleState -ne [System.Windows.Automation.ToggleState]::Off) {
+            throw "The notify-only update check control was not disabled by default."
+        }
         $displayDdcCategory = Get-TabByName -Root $root -Name (Get-SmokeUiText -Text "Display and DDC system settings")
         if ($null -eq $displayDdcCategory) { throw "The System page did not expose its Display and DDC category." }
         $displayDdcCategoryPattern = $null

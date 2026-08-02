@@ -356,6 +356,12 @@ public static class MonitorControlVcpWriteProbe
         "Get-OptionalHelperSettingsObject",
         "Save-OptionalHelperSettings",
         "Import-OptionalHelperSettings",
+        "Get-UpdateCheckSettingsObject",
+        "Save-UpdateCheckSettings",
+        "Import-UpdateCheckSettings",
+        "Test-UpdateCheckDue",
+        "Get-UpdateCheckReleaseUrl",
+        "ConvertFrom-UpdateCheckResponse",
         "Find-FirstExistingPath",
         "Get-RunAtLoginShortcutDefinition",
         "Get-RunAtLoginShortcutPath",
@@ -937,7 +943,7 @@ Describe "Unified settings document registry" {
             "Profile", "ProfileBundle", "ProfileStorage", "MonitorIdentity", "AppProfileRules",
             "ProfileSchedules", "IdleDim", "BatteryProfile", "AutomationBridge", "CapabilitiesSafety",
             "CapabilitiesProbeSentinel", "VcpWriteSafety", "OptionalHelpers", "DisplayRestore",
-            "CapabilitiesCache", "DdcTiming", "InputSources", "UsbInputRules", "ProfileTrash"
+            "CapabilitiesCache", "DdcTiming", "InputSources", "UsbInputRules", "UpdateCheck", "ProfileTrash"
         )
         @($script:SettingsDocumentRegistry.Keys) | Should -Be $expected
         foreach ($definition in $script:SettingsDocumentRegistry.Values) {
@@ -3475,6 +3481,96 @@ Describe "Optional helper gating and provenance" {
         $text | Should -Match "Source: Other"
         $text | Should -Match "2\.5\.1\.0"
         $text | Should -Match ("a" * 64)
+    }
+}
+
+Describe "Opt-in notify-only update checks" {
+    BeforeEach {
+        Get-ChildItem -LiteralPath $TestDrive -Force | Remove-Item -Recurse -Force
+        $script:UpdateCheckSettingsPath = Join-Path $TestDrive "update-check.json"
+        $script:UpdateCheckSchemaVersion = 1
+        $script:UpdateCheckEnabled = $false
+        $script:UpdateCheckETag = ""
+        $script:UpdateCheckLastCheckedUtc = ""
+        $script:UpdateCheckLastVersion = ""
+        $script:UpdateCheckLastReleaseUrl = ""
+        $script:UpdateCheckDismissedVersion = ""
+        $script:LastStatusMessage = ""
+        $script:PendingStatusMessage = ""
+    }
+
+    It "round-trips the opt-in flag and ETag cache" {
+        $script:UpdateCheckEnabled = $true
+        $script:UpdateCheckETag = '"abc123"'
+        $script:UpdateCheckLastCheckedUtc = [DateTime]::UtcNow.ToString("o")
+        $script:UpdateCheckLastVersion = "3.39.0"
+        $script:UpdateCheckLastReleaseUrl = "https://github.com/SysAdminDoc/MonitorControl/releases/tag/v3.39.0"
+        $script:UpdateCheckDismissedVersion = "3.38.0"
+        Save-UpdateCheckSettings | Should -BeTrue
+
+        $script:UpdateCheckEnabled = $false
+        $script:UpdateCheckETag = ""
+        $script:UpdateCheckLastVersion = ""
+        $script:UpdateCheckLastReleaseUrl = ""
+        $script:UpdateCheckDismissedVersion = ""
+        Import-UpdateCheckSettings
+
+        $script:UpdateCheckEnabled | Should -BeTrue
+        $script:UpdateCheckETag | Should -Be '"abc123"'
+        $script:UpdateCheckLastVersion | Should -Be "3.39.0"
+        $script:UpdateCheckLastReleaseUrl | Should -Be "https://github.com/SysAdminDoc/MonitorControl/releases/tag/v3.39.0"
+        $script:UpdateCheckDismissedVersion | Should -Be "3.38.0"
+    }
+
+    It "stays disabled for a future settings schema" {
+        Write-JsonFileSafely -Path $script:UpdateCheckSettingsPath -Data ([PSCustomObject]@{ SchemaVersion = 99; Enabled = $true; ETag = '"future"' }) -Depth 4 | Out-Null
+
+        Import-UpdateCheckSettings
+
+        $script:UpdateCheckEnabled | Should -BeFalse
+        $script:UpdateCheckETag | Should -BeNullOrEmpty
+        $script:PendingStatusMessage | Should -Match "schema"
+    }
+
+    It "only schedules enabled checks that are older than one day" {
+        $script:UpdateCheckEnabled = $false
+        Test-UpdateCheckDue | Should -BeFalse
+        $script:UpdateCheckEnabled = $true
+        $script:UpdateCheckLastCheckedUtc = ""
+        Test-UpdateCheckDue | Should -BeTrue
+        $script:UpdateCheckLastCheckedUtc = [DateTime]::UtcNow.AddHours(-1).ToString("o")
+        Test-UpdateCheckDue | Should -BeFalse
+        $script:UpdateCheckLastCheckedUtc = [DateTime]::UtcNow.AddHours(-25).ToString("o")
+        Test-UpdateCheckDue | Should -BeTrue
+    }
+
+    It "parses a release response and preserves its ETag" {
+        $response = [PSCustomObject]@{
+            Content = '{"tag_name":"v3.39.0","html_url":"https://github.com/SysAdminDoc/MonitorControl/releases/tag/v3.39.0"}'
+            Headers = @{ ETag = '"release-etag"' }
+        }
+        $result = ConvertFrom-UpdateCheckResponse -Response $response -StatusCode 200 -CheckedUtc "2026-08-01T12:00:00Z"
+
+        $result.Success | Should -BeTrue
+        $result.Status | Should -Be "Success"
+        $result.Version | Should -Be "3.39.0"
+        $result.ETag | Should -Be '"release-etag"'
+        $result.ReleaseUrl | Should -Match '/releases/tag/v3\.39\.0$'
+    }
+
+    It "treats a not-modified response as a successful cached check" {
+        $result = ConvertFrom-UpdateCheckResponse -Response $null -StatusCode 304 -ETag '"cached"' -CheckedUtc "2026-08-01T12:00:00Z"
+
+        $result.Success | Should -BeTrue
+        $result.Status | Should -Be "NotModified"
+        $result.ETag | Should -Be '"cached"'
+    }
+
+    It "fails closed for invalid releases and untrusted release URLs" {
+        $badResponse = [PSCustomObject]@{ Content = '{"tag_name":"nightly"}'; Headers = @{} }
+        (ConvertFrom-UpdateCheckResponse -Response $badResponse -StatusCode 200).Success | Should -BeFalse
+        $safeUrl = Get-UpdateCheckReleaseUrl -Version ([version]"3.39.0") -Candidate "https://example.test/download.exe"
+        $safeUrl | Should -Be "https://github.com/SysAdminDoc/MonitorControl/releases/tag/v3.39.0"
     }
 }
 
