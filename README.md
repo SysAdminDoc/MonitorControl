@@ -781,6 +781,20 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 3. Run `MonitorControlPro.ps1` to exercise the modular development source, or run `tools\compile.ps1` to inspect the composed standalone script under `build`
 4. Run `tools\run-tests.ps1` before submitting changes
 
+### Dependency Freshness Audit
+
+`tools\dependency-pins.json` is the reviewable source of truth for every GitHub Action,
+PowerShell Gallery test module, and downloaded verification CLI used by CI. Run
+`tools\audit-dependencies.ps1` locally for an offline consistency check; it fails if a
+workflow pin or downloaded-CLI version/hash no longer matches the manifest. The scheduled
+GitHub Actions job adds read-only release, advisory, and archive-hash checks and writes a
+summary without changing the pinned verification lane.
+
+To update a dependency, verify the new release from its official source, update its version
+and SHA-256 in `tools\dependency-pins.json` and the matching workflow or installer, then run
+the offline audit and the full verification lane. No credentials, code signing, or installer
+step is required.
+
 ### Areas for Improvement
 - [ ] Multi-monitor profile linking
 - [ ] WMI fallback for laptop displays
