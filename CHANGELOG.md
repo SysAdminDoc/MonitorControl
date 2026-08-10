@@ -285,3 +285,125 @@ All notable changes to MonitorControl will be documented in this file.
 - Added: minimize-to-tray behavior for persistent background operation.
 - Added: tray link-monitor toggle and profile cycling from the tray surface.
 - Changed: moved global hotkey work to blocked because current project rules disallow keyboard shortcuts.
+
+## Roadmap archive — 2026-08-10 — ROADMAP.md
+
+<details>
+<summary>Original roadmap snapshot</summary>
+
+```markdown
+# Roadmap
+
+PowerShell/WPF utility for DDC/CI monitor control - brightness, contrast, color temp, input
+switching, RGB gain, gamma, VCP exploration, profiles, and local automation. Remaining work
+only; see RESEARCH.md (2026-08-02) for the evidence behind every item below.
+
+## Nice-to-Haves
+
+- OSD overlay rendered by the app itself (DXGI output duplication) when a monitor lacks its own OSD
+- NUC / mini-PC HDMI-CEC remote control compatibility
+- Per-monitor wallpaper switcher
+
+## Research-Driven Additions
+
+### P1
+
+### P2
+
+- [ ] P2 - Calibrate brightness per monitor in a normalized perceptual space
+  Why: A shared percentage produces visibly different brightness on different panels because `0x10` is vendor-mapped to backlight in an undocumented per-model way and panels differ in minimum and maximum luminance, so "apply to all", sync, ambient, and schedules are all perceptually wrong on mixed setups.
+  Evidence: Twinkle Tray issue 712 and issue 443 (leader/follower); Poynton's Gamma FAQ (lightness is approximately a cube root of luminance; 18% luminance reads as roughly 50% brightness); Microsoft's adaptive-brightness guidance that percent-to-luminance "should follow an exponential pattern"; Lunar's per-display learned curves.
+  Touches: per-monitor calibration storage, brightness apply path, sync/ambient/schedule inputs, calibration UI, tests
+  Acceptance: A guided flow lets the user match monitors at three anchor points and fits a monotone per-monitor curve stored with the monitor identity; a simpler per-monitor usable-range clamp (for example 20-80%) is available without full calibration, matching Monitorian's adjustable range; sync, ambient, idle, and profile apply operate in the normalized space and convert per monitor on write; calibration is resettable and clearly indicated; uncalibrated monitors fall back to the current linear behavior.
+  Complexity: L
+
+- [ ] P2 - Store Windows display topology in profiles
+  Why: Profiles capture DDC state but not which displays are active, which is primary, or their resolution, refresh rate, and HDR/WCG state - so a "docked" versus "undocked" profile cannot actually restore the arrangement, and no tool combines topology profiles with DDC profiles.
+  Evidence: PowerToys issues 47301 (resolution in profiles), 47489 (placement profiles), 48286 (display-config switching), 47789 (disconnect this display); the MonitorSwitcher family solves topology but not DDC; `DISPLAYCONFIG_DEVICE_INFO_TYPE` gained `SET_HDR_STATE` and `SET_WCG_STATE` as separate members, so HDR and wide-gamut must be stored independently rather than through the legacy combined advanced-color state.
+  Touches: new DisplayConfig interop, profile schema, capture and apply pipeline, preview and rollback UI, tests
+  Acceptance: A profile can optionally include the active display set, primary display, per-display resolution/refresh/orientation, and independent HDR and WCG state; apply previews the change, validates all targets first, and reverts on failure; profiles without topology data behave exactly as today; unsupported OS builds degrade to DDC-only with a clear reason.
+  Complexity: L
+
+- [ ] P2 - Publish a PowerShell module facade
+  Why: The only direct PowerShell competitor exposes a discoverable verb-noun cmdlet surface with argument completers, and the PowerShell Gallery requires no code signing - so a module channel reaches a PowerShell-native audience the ZIP does not, and mirroring the competitor's cmdlet names lets existing scripts port unchanged.
+  Evidence: https://www.powershellgallery.com/packages/MonitorConfig (16,218 downloads; public `ArgumentCompleter` and `ArgumentTransformation` attribute types); https://learn.microsoft.com/en-us/powershell/gallery/concepts/publishing-guidelines (signing is a best practice, never a gate); WPF GUI module precedent on the Gallery (`AnyBox`, `ShowUI`, `PSClock`, `PSSysTray`).
+  Touches: module manifest, extracted core modules, cmdlet wrappers and completers, publishing runbook, README
+  Acceptance: A manifest-backed module exposes get/set cmdlets over the extracted core with tab completion for monitor identity and VCP code, passes PSScriptAnalyzer cleanly on upload, and is installable alongside the portable ZIP without conflicting with it; the ZIP remains the primary artifact. Depends on the P1 module extraction.
+  Complexity: L
+
+- [ ] P2 - Add sub-zero dimming below the panel's hardware minimum
+  Why: Panels commonly bottom out far brighter than a dark room needs, and this is the single most-copied feature from the leading macOS tool; the gamma machinery this needs already exists in the codebase and is currently used only for colour temperature.
+  Evidence: `Set-GammaRamp` at `MonitorControlPro.ps1:5964` is already implemented and used at `:5991` and `:9645` for colour temperature only. Lunar ships sub-zero dimming in its free tier (https://lunar.fyi/); Twinkle Tray issue 620 requests it.
+  Touches: `Set-GammaRamp`, brightness apply path, brightness slider range, profiles, ambient and idle automation
+  Acceptance: Below the monitor's minimum usable DDC brightness the control continues into a software-dimming range implemented with the gamma ramp, clearly indicated as software dimming; the gamma ramp is restored on exit, on display change, and on switching away from sub-zero; profiles and automation record and reapply the software-dimmed level; a monitor whose gamma ramp cannot be set falls back to hardware minimum with a stated reason.
+  Complexity: S
+
+- [ ] P2 - Save and restore a full per-monitor VCP snapshot
+  Why: The closest portable competitor's most useful feature is dumping every supported VCP value to a file and restoring it later or on another machine, which is also the safest possible undo before experimenting in VCP Explorer - and this project already has the capability enumeration and verified-write machinery to do it properly.
+  Evidence: ControlMyMonitor v1.42 save/load monitor configuration to file (https://www.nirsoft.net/utils/control_my_monitor.html); MonitorConfig exposes `Save-MonitorSettings`/`Reset-MonitorSettings` (https://github.com/MartinGC94/MonitorConfig).
+  Touches: capability enumeration, new snapshot document with schema version, VCP Explorer UI, verified write path, profile bundle export
+  Acceptance: A snapshot captures every readable supported VCP code for a monitor identity with its value, reported maximum, and capture time; restore validates the target identity, applies through the verified write path with rollback, and reports per-code results; risky codes are excluded unless that identity is unlocked; snapshots are exportable and importable alongside profile bundles and carry a schema version.
+  Complexity: M
+
+- [ ] P2 - Classify fused and connection-dependent display paths
+  Why: Two well-documented environment classes still report as generic failures - GPU-fused multi-panel modes present several physical panels as one logical monitor that cannot be addressed individually, and many monitors expose DDC/CI on one connector but not another, so a per-monitor verdict is wrong where a per-connection verdict is right.
+  Evidence: "NVIDIA Surround and AMD Eyefinity are not compatible with DDC/CI" - https://github.com/xanderfrangos/twinkle-tray/wiki/Display-Detection-&-Support-Issues ; ddcutil monitor notes record LG 29UM69G with no DDC over DisplayPort and Samsung Odyssey G9 LC49G95T with DDC/CI completely non-functional over DisplayPort while working over HDMI. `PhysicalConnector` is available free from the WinRT display API verified on 2026-08-01. Extends the path classification shipped in v3.37.0 (`Get-DisplayPathClassification`).
+  Touches: `Get-DisplayPathClassification`, `Get-DisplayPathInventory`, capability and quirk storage, DDC report
+  Acceptance: A logical monitor whose reported size or panel count indicates a fused Surround/Eyefinity configuration is named as such with the reason that individual panels cannot be addressed; the DDC verdict is recorded per monitor identity and connector rather than per identity alone; the report shows the connector alongside each verdict; a monitor that works on one input and not another produces two distinct records instead of one contradictory one.
+  Complexity: M
+
+- [ ] P2 - Adjust brightness by scrolling the tray icon
+  Why: This is the single most-praised interaction from the abandoned tool whose users are the most convertible audience, it is requested repeatedly against both current market leaders, and it needs no keyboard shortcut - so it does not touch the project's no-hotkeys rule.
+  Evidence: the ClickMonitorDDC scroll-wheel-over-tray-icon behaviour is singled out as a must-have in https://news.ycombinator.com/item?id=24431827 ; PowerToys issues 47502, 47262, 47523 and Monitorian issues 637 and 174 request it. The file currently contains no `MouseWheel` handler anywhere.
+  Touches: tray icon, tray popup, brightness apply path
+  Acceptance: Scrolling over the tray icon changes brightness on the selected or linked monitors in a configurable step, coalesced so a fast scroll produces one terminal write rather than one per notch; a transient indicator shows the resulting level; the behaviour is off by default or clearly discoverable; no keyboard shortcut is registered.
+  Complexity: S
+
+### P3
+
+- [ ] P3 - Publish a WinGet manifest for the portable release
+  Why: Scoop is supported, but Windows users have no first-party WinGet discovery path. A manifest can distribute the same unsigned ZIP with SHA-256 validation and no installer, service, registry, or administrator dependency.
+  Evidence: `packaging/scoop/monitorcontrol-pro.json` is the only package manifest; no WinGet manifest exists; Microsoft documents SHA-256 validation and repository manifest checks at https://learn.microsoft.com/en-us/windows/package-manager/winget/hash and https://learn.microsoft.com/en-us/windows/package-manager/package/repository.
+  Touches: new WinGet manifest, release checklist, README distribution table, artifact hash manifest
+  Acceptance: A versioned WinGet manifest points at the exact portable ZIP, validates its SHA-256, preserves the no-install/no-admin behavior, and is tested with the local manifest validator before submission; updates are generated only from the release integrity metadata and never from an unverified URL.
+  Complexity: S
+
+- [ ] P3 - Localize the remaining fixed-choice pickers
+  Why: `ComboBoxItem` content declared in XAML is skipped by the localization sweep (that content is normally runtime data such as monitor labels), so a fixed set of choices written in XAML stays English under every UI culture. The idle-dim and USB-trigger pickers were converted to `Add-LocalizedComboChoices`; the DDC verify-policy picker still declares its items in XAML.
+  Evidence: `src/MonitorControl.App.ps1` `DdcVerifyPolicyCombo` static `ComboBoxItem` entries; `Initialize-FixedChoiceCombos` shows the working pattern; the pseudo-localized smoke lane is what surfaced the gap on the idle-dim picker.
+  Touches: verify-policy combo XAML, `Initialize-FixedChoiceCombos`, the handler that reads its selection, WPF smoke
+  Acceptance: No `ComboBoxItem` with literal `Content` remains in the XAML; every fixed-choice picker is built through the resource table with the invariant value in `Tag`; every handler reads `Tag` rather than displayed text; the pseudo-localized smoke asserts one converted picker's text is transformed.
+  Complexity: S
+
+- [ ] P3 - Add HDR-aware SDR reference-white diagnostics
+  2026-08-01 research note: the platform picture is now concrete. `DISPLAYCONFIG_DEVICE_INFO_TYPE` members 12-17 exist in the Windows 11 SDK header (`wingdi.h`, 10.0.26100.0) but Microsoft documents none of them and the Learn page's `ms.date` is 2018-12-05. Kodi migrated from the documented `GET_ADVANCED_COLOR_INFO` (9) / `SET_ADVANCED_COLOR_STATE` (10) to `GET_ADVANCED_COLOR_INFO_2` (15) / `SET_HDR_STATE` (16) because 24H2's Auto Color Management broke member 10 (xbmc/xbmc PR 26096). `DISPLAYCONFIG_SDR_WHITE_LEVEL` remains read-only - there is no `SET_SDR_WHITE_LEVEL` member - and the header documents the conversion as `nits = (SDRWhiteLevel / 1000) * 80`. Gate on the API's own return code, never on OS build number.
+  2026-07-31 research note: demand is far higher than the original framing suggested - SDR brightness under HDR is the single most-requested unmet feature across all three competitors (Twinkle Tray issue 97 at 22 reactions and 90 comments since 2020, Monitorian issues 705 and 756, PowerToys issue 47291). An undocumented setter exists (`DISPLAYCONFIG_DEVICE_INFO_SET_SDR_WHITE_LEVEL = 0xFFFFFFEE`, known from ledoge/set_maxtml), but writing it contradicts this item's own no-undocumented-write-path rule; ship the read-only diagnostics first and treat the setter as a separate policy decision (see RESEARCH.md Open Questions).
+  Why: Windows exposes a read-only per-display SDR reference-white value while HDR is enabled; surfacing it explains apparent brightness changes without relying on undocumented setters.
+  Evidence: Microsoft `DISPLAYCONFIG_SDR_WHITE_LEVEL` and Advanced Color documentation; ColorControl HDR state surfaces.
+  Touches: DisplayConfig interop, display identity/mode state, system/diagnostics UI, DDC report, tests
+  Acceptance: The value appears only for an HDR-enabled target when `DisplayConfigGetDeviceInfo` succeeds; raw units and the documented 80-nit conversion are shown; topology/HDR changes invalidate stale data; reports distinguish OS reference white from physical DDC brightness; the UI states plainly when DDC brightness will not affect SDR content because HDR is active; tests cover unsupported APIs and mixed HDR/SDR displays; no registry or undocumented write path is used.
+  Complexity: M
+
+- [ ] P3 - Expose the bridge to Home Assistant via MQTT discovery
+  Why: Tying monitor state into home-automation scenes needs an MQTT presence, but the obvious Windows host is not a safe dependency - HASS.Agent has not shipped a release since 2022 and last pushed in 2023 - so this should be native and should follow the current device-based discovery shape rather than the deprecated per-entity one.
+  Evidence: https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery (single retained device config message with a `components` map); LAB02-Research/HASS.Agent repository activity; Defozo/ddc-ci-control-bridge (5 stars) shows the niche is empty rather than proven; Twinkle Tray issue 1087 asks for exactly this.
+  Touches: bridge core, new MQTT adapter, settings and consent UI, availability/LWT handling, README
+  Acceptance: An opt-in, separately toggled adapter publishes one retained device-discovery message exposing a brightness `light`, `number` entities for supported continuous codes, a `select` for input source, and a `sensor` for DDC health, each with `unique_id` and an availability topic backed by a last-will message so entities gray out when the PC sleeps; state is published after readback, never after write; disabling it removes all network activity and leaves core control untouched. Depends on the P2 headless CLI contract landing first so both share one command model.
+  Complexity: M
+
+- [ ] P3 - Remove stale shipped items from the README improvement checklist
+  Why: The feature sections and recent commits show multi-monitor profile linking and WMI laptop fallback are shipped, but the final `Areas for Improvement` checklist still marks both incomplete; this undermines release-trust and causes future research to rediscover finished work.
+  Evidence: `README.md` feature sections and final `Areas for Improvement` list; commits `a758b07`, `27169ec`, and current profile schema v5.
+  Touches: `README.md`, documentation consistency tests
+  Acceptance: The stale checklist is removed or rewritten to contain only genuinely incomplete work, and a no-hardware documentation test fails if a shipped feature is reintroduced there; no product behavior changes.
+  Complexity: S
+
+- [ ] P3 - Add an optional USB Monitor Control Class transport seam
+  Why: The Windows backend currently reaches monitors through `dxva2.dll` DDC/CI only, while ddcutil documents panels such as Eizo and Apple displays that expose monitor control over USB; a transport seam would expand coverage without pulling a second native stack into the portable release prematurely.
+  Evidence: `src/MonitorControl.App.ps1` inline `MonitorAPI`/dxva2 declarations; `src/MonitorControl.Ddc.psm1` DDC-only read/write paths; ddcutil USB monitor support (https://github.com/rockowitz/ddcutil, https://www.ddcutil.com/).
+  Touches: DDC transport interface, capability/read/write workers, identity and diagnostics records, fake transport tests, optional-helper consent boundary
+  Acceptance: A fakeable transport contract can enumerate, read, write, and report capabilities without changing existing dxva2 behavior; an optional USB backend is disabled unless a supported, driver-free device is detected; risky writes still use identity unlock, readback, rollback, and write-budget accounting; no vendor SDK, service, administrator install, or GPL dependency enters the ZIP.
+  Complexity: L
+```
+
+</details>
