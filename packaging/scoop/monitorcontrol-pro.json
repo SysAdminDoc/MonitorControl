@@ -12,7 +12,7 @@
     "architecture":  {
                          "64bit":  {
                                        "url":  "https://github.com/SysAdminDoc/MonitorControl/releases/download/v3.38.1/MonitorControlPro-v3.38.1.zip",
-                                       "hash":  "b80ba1e57b63abe2f39196fa12bbc63635b888a89fd5875909579950e49ff7b9"
+                                       "hash":  "09ca17b6744c066af16327717d3a8096d2b54161152ce5f85c20e49c74d0a1b9"
                                    }
                      },
     "shortcuts":  [
