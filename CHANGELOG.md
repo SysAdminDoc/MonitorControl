@@ -2,13 +2,14 @@
 
 All notable changes to MonitorControl are documented here.
 
-## [v3.38.1] (2026-09-06)
+## [v3.38.2] (2026-09-06)
 
 - Added: a new blue calibration mark, application icon, repository banner, and social preview give the project one consistent visual identity.
 - Added: seven product views are rendered by the real WPF app on a private Windows desktop. A fixed two-display dataset keeps the captures useful, repeatable, and free of personal data.
 - Changed: the README now leads with the product, download path, verified screenshots, compatibility notes, safety model, and concise setup guidance. Separate CLI and DDC safety guides keep the main page focused.
 - Changed: the new application mark appears in the WPF sidebar and ships as PNG and multi-size ICO assets in the portable release.
 - Fixed: the main window's accessible name no longer repeats its control type, and an empty auto-mode status is removed from the accessibility tree instead of exposing a zero-size visible element.
+- Changed: repository history and release provenance now resolve to the sole project owner, removing an obsolete contributor identity from public attribution.
 - Added: per-monitor DDC health is persisted by stable identity, tracking reads, writes sent, writes suppressed, round-trip latency, consecutive failures, and the last verify outcome. The Monitor tab exposes a compact summary and per-monitor reset, and support reports include the same counters.
 - Changed: external verification dependencies now live in a version and SHA-256 manifest. Local verification checks downloader pins before a release and can run a read-only remote freshness audit.
 - Added: the full Windows verification lane now runs pinned Axe.Windows 2.4.2 scans against both standard and high-contrast/200% WPF smokes, fails on scanner violations, and retains structured JSON reports for review. The scanner disables its screen-based artifact path on the private desktop while preserving the complete rule result set.
