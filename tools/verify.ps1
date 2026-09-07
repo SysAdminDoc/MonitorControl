@@ -5,9 +5,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$privateScanHost = [string]$env:MONITORCONTROL_PRIVATE_RUNNER
 
 if ($PSVersionTable.PSEdition -ne "Desktop" -or $PSVersionTable.PSVersion.Major -ne 5) {
     throw "Verification must run in Windows PowerShell 5.1."
+}
+if ([string]::IsNullOrWhiteSpace($privateScanHost) -or -not (Test-Path -LiteralPath $privateScanHost -PathType Leaf)) {
+    throw "Full WPF verification must be launched through tools\MonitorControl.MarketingCapture on a private Windows desktop."
 }
 
 function Import-RequiredModuleVersion {
@@ -102,14 +106,14 @@ try {
     }
     $standardAxeOutput = Join-Path $accessibilityArtifactRoot "standard"
     & $windowsPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot "tests\MonitorControl.WpfSmoke.ps1") `
-        -Quiet -AxeWindowsCliPath $axePackage.Path -AxeOutputDirectory $standardAxeOutput -AxeScanId "standard"
+        -Quiet -AxeWindowsCliPath $axePackage.Path -AxeScanHostPath $privateScanHost -AxeOutputDirectory $standardAxeOutput -AxeScanId "standard"
     if ($LASTEXITCODE -ne 0) { throw "The standard WPF smoke or Axe.Windows accessibility lane failed with exit code $LASTEXITCODE." }
     $highContrastAxeOutput = Join-Path $accessibilityArtifactRoot "high-contrast-200"
     & $windowsPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot "tests\MonitorControl.WpfSmoke.ps1") `
         -Quiet -AppTheme HighContrast -TextScalePercent 200 -UiCulture qps-ploc -ResizeToMinimum -ExerciseValidationAlert `
-        -AxeWindowsCliPath $axePackage.Path -AxeOutputDirectory $highContrastAxeOutput -AxeScanId "high-contrast-200"
+        -AxeWindowsCliPath $axePackage.Path -AxeScanHostPath $privateScanHost -AxeOutputDirectory $highContrastAxeOutput -AxeScanId "high-contrast-200"
     if ($LASTEXITCODE -ne 0) { throw "The high-contrast, pseudo-localized, and Axe.Windows accessibility lane failed with exit code $LASTEXITCODE." }
-    Write-Host "Axe.Windows 2.4.2 accessibility artifacts retained under $accessibilityArtifactRoot."
+    Write-Host "Axe.Windows 2.4.2 structured accessibility reports retained under $accessibilityArtifactRoot."
 
     $release = & (Join-Path $repoRoot "tools\build-release.ps1") -OutputRoot (Join-Path $verificationRoot "dist")
     if ($null -eq $release -or -not (Test-Path -LiteralPath $release.ZipPath -PathType Leaf)) {

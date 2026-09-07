@@ -62,7 +62,7 @@ try {
     }
 
     $json = ($manifest | ConvertTo-Json -Depth 6)
-    [System.IO.File]::WriteAllText($ManifestPath, ($json -replace "`r?`n", "`r`n") + "`r`n", (New-Object System.Text.UTF8Encoding($false)))
+    [System.IO.File]::WriteAllText($ManifestPath, ($json -replace "`r?`n", "`n") + "`n", (New-Object System.Text.UTF8Encoding($false)))
     Write-Host "Wrote $ManifestPath for v$version (sha256 $($release.Sha256))"
     [PSCustomObject]@{ ManifestPath = $ManifestPath; Version = $version; Sha256 = [string]$release.Sha256 }
 } finally {

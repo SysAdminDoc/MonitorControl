@@ -1,0 +1,51 @@
+{
+  "capturedAtUtc": "2026-09-07T00:22:50.3832097+00:00",
+  "privateDesktop": "MonitorControlCapture_92344_639243373640129310",
+  "source": "MonitorControlPro.ps1",
+  "theme": "Dark",
+  "marketingCapture": true,
+  "screenshots": [
+    {
+      "file": "display.png",
+      "width": 1306,
+      "height": 763,
+      "sampledColors": 53
+    },
+    {
+      "file": "monitor.png",
+      "width": 1306,
+      "height": 763,
+      "sampledColors": 46
+    },
+    {
+      "file": "hardware.png",
+      "width": 1306,
+      "height": 763,
+      "sampledColors": 32
+    },
+    {
+      "file": "vcp-explorer.png",
+      "width": 1306,
+      "height": 763,
+      "sampledColors": 38
+    },
+    {
+      "file": "profiles.png",
+      "width": 1306,
+      "height": 763,
+      "sampledColors": 56
+    },
+    {
+      "file": "automation.png",
+      "width": 1306,
+      "height": 763,
+      "sampledColors": 47
+    },
+    {
+      "file": "system.png",
+      "width": 1306,
+      "height": 763,
+      "sampledColors": 41
+    }
+  ]
+}

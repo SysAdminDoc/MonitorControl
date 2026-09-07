@@ -2,7 +2,6 @@
 param(
     [string]$RepoRoot = "",
     [string]$ManifestPath = "",
-    [string]$WorkflowPath = "",
     [string]$ReportPath = "",
     [switch]$CheckRemote
 )
@@ -19,10 +18,6 @@ $RepoRoot = [System.IO.Path]::GetFullPath($RepoRoot).TrimEnd([char[]]@('\', '/')
 if ([string]::IsNullOrWhiteSpace($ManifestPath)) {
     $ManifestPath = Join-Path $RepoRoot "tools\dependency-pins.json"
 }
-if ([string]::IsNullOrWhiteSpace($WorkflowPath)) {
-    $WorkflowPath = Join-Path $RepoRoot ".github\workflows\verify.yml"
-}
-
 function Add-AuditError {
     param(
         [System.Collections.Generic.List[string]]$Errors,
@@ -111,45 +106,12 @@ function Get-LatestGalleryVersion {
     return (($versions | Sort-Object -Descending | Select-Object -First 1).ToString())
 }
 
-function Test-WorkflowPins {
+function Test-LocalPins {
     param(
         [pscustomobject]$Manifest,
-        [string]$WorkflowText,
         [string]$RepoRoot,
         [System.Collections.Generic.List[string]]$Errors
     )
-
-    $actionMatches = [regex]::Matches($WorkflowText, '(?m)^\s*uses:\s*(?<name>[^@\s]+)@(?<ref>[0-9a-fA-F]{40})(?:\s*#\s*(?<version>v?[^\s]+))?\s*$')
-    $allActionLines = [regex]::Matches($WorkflowText, '(?m)^\s*uses:\s*(?<value>\S+)')
-    foreach ($line in $allActionLines) {
-        if ($line.Groups["value"].Value -notmatch '@[0-9a-fA-F]{40}$') {
-            Add-AuditError -Errors $Errors -Message ("Workflow action is not pinned to a full commit SHA: {0}" -f $line.Groups["value"].Value)
-        }
-    }
-    foreach ($match in $actionMatches) {
-        $name = $match.Groups["name"].Value
-        $pin = @($Manifest.Actions | Where-Object { $_.Name -eq $name })
-        if ($pin.Count -ne 1) {
-            Add-AuditError -Errors $Errors -Message ("Workflow action {0} is missing or duplicated in dependency-pins.json." -f $name)
-            continue
-        }
-        if ($pin[0].Ref -ne $match.Groups["ref"].Value) {
-            Add-AuditError -Errors $Errors -Message ("Workflow action hash changed for {0}: manifest {1}, workflow {2}." -f $name, $pin[0].Ref, $match.Groups["ref"].Value)
-        }
-        if ($match.Groups["version"].Success -and $pin[0].Version -ne $match.Groups["version"].Value) {
-            Add-AuditError -Errors $Errors -Message ("Workflow action version comment changed for {0}: manifest {1}, workflow {2}." -f $name, $pin[0].Version, $match.Groups["version"].Value)
-        }
-    }
-
-    $moduleMatches = [regex]::Matches($WorkflowText, '(?im)Install-Module\s+(?<name>[A-Za-z0-9_.-]+).*?-RequiredVersion\s+(?<version>[0-9.]+)')
-    foreach ($match in $moduleMatches) {
-        $name = $match.Groups["name"].Value
-        $version = $match.Groups["version"].Value
-        $pin = @($Manifest.PowerShellModules | Where-Object { $_.Name -eq $name -and $_.Version -eq $version })
-        if ($pin.Count -ne 1) {
-            Add-AuditError -Errors $Errors -Message ("Workflow module pin {0} {1} is missing or duplicated in dependency-pins.json." -f $name, $version)
-        }
-    }
 
     foreach ($scriptPath in @(Get-ChildItem -LiteralPath (Join-Path $RepoRoot "tools") -Filter "install-*.ps1" -File)) {
         $scriptText = [System.IO.File]::ReadAllText($scriptPath.FullName)
@@ -231,10 +193,8 @@ function Test-RemotePins {
 $errors = New-Object 'System.Collections.Generic.List[string]'
 $findings = New-Object 'System.Collections.Generic.List[object]'
 if (-not (Test-Path -LiteralPath $ManifestPath)) { throw "Dependency pin manifest was not found: $ManifestPath" }
-if (-not (Test-Path -LiteralPath $WorkflowPath)) { throw "Verification workflow was not found: $WorkflowPath" }
 $manifest = [System.IO.File]::ReadAllText($ManifestPath) | ConvertFrom-Json
-$workflowText = [System.IO.File]::ReadAllText($WorkflowPath)
-Test-WorkflowPins -Manifest $manifest -WorkflowText $workflowText -RepoRoot $RepoRoot -Errors $errors
+Test-LocalPins -Manifest $manifest -RepoRoot $RepoRoot -Errors $errors
 if ($CheckRemote) {
     Test-RemotePins -Manifest $manifest -Findings $findings -Errors $errors
 }

@@ -3,12 +3,16 @@
 *.tmp
 dist/
 build/
+**/bin/
+**/obj/
 .vs/
 CLAUDE.md
 
-# Markdown files local-only (except README)
+# Markdown files are local-only unless explicitly published below
 *.md
 !README.md
+!docs/
+!docs/*.md
 
 # AI config
 CODEX_CHANGELOG.md
