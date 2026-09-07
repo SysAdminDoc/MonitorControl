@@ -1210,6 +1210,99 @@ function Get-DdcAvailabilityDiagnosis {
     }
 }
 
+function New-MarketingCaptureMonitor {
+    param(
+        [int]$Index,
+        [string]$Name,
+        [string]$UserLabel,
+        [int]$Width,
+        [int]$Height,
+        [int]$RefreshRate,
+        [int]$Left,
+        [bool]$IsPrimary,
+        [string]$Model,
+        [string]$Serial,
+        [string]$Connector,
+        [int]$Brightness,
+        [int]$Contrast,
+        [int]$Volume,
+        [int]$InputSource
+    )
+
+    $supportedCodes = @{}
+    foreach ($code in @(0x10, 0x12, 0x16, 0x18, 0x1A, 0x62, 0x87)) {
+        $supportedCodes[[int]$code] = @()
+    }
+    $supportedCodes[0x14] = @(0x01, 0x04, 0x05, 0x08)
+    $supportedCodes[0x60] = @(0x0F, 0x11, 0x12, 0x13)
+    $supportedCodes[0x8D] = @(0x01, 0x02)
+    $supportedCodes[0xD6] = @(0x01, 0x02, 0x04)
+    $supportedCodes[0xDC] = @(0x00, 0x01, 0x03, 0x05)
+
+    $maximums = @{}
+    $currentValues = @{}
+    $observedAt = [DateTime]::UtcNow
+    foreach ($setting in @(
+        [PSCustomObject]@{ Code = 0x10; Current = $Brightness; Maximum = 100 },
+        [PSCustomObject]@{ Code = 0x12; Current = $Contrast; Maximum = 100 },
+        [PSCustomObject]@{ Code = 0x16; Current = 96; Maximum = 100 },
+        [PSCustomObject]@{ Code = 0x18; Current = 98; Maximum = 100 },
+        [PSCustomObject]@{ Code = 0x1A; Current = 100; Maximum = 100 },
+        [PSCustomObject]@{ Code = 0x60; Current = $InputSource; Maximum = 255 },
+        [PSCustomObject]@{ Code = 0x62; Current = $Volume; Maximum = 100 },
+        [PSCustomObject]@{ Code = 0x87; Current = 50; Maximum = 100 }
+    )) {
+        $maximums[[int]$setting.Code] = [int]$setting.Maximum
+        $currentValues[[int]$setting.Code] = [PSCustomObject]@{
+            Current = [uint32]$setting.Current
+            Maximum = [uint32]$setting.Maximum
+            ObservedAtUtc = $observedAt
+        }
+    }
+
+    $deviceName = "$Connector connection"
+    $identityKey = "capture:monitor-$Index"
+    return [PSCustomObject]@{
+        Handle = [IntPtr]::Zero
+        HMonitor = [IntPtr]::Zero
+        Name = $Name
+        Index = $Index
+        DeviceName = $deviceName
+        Width = $Width
+        Height = $Height
+        RefreshRate = $RefreshRate
+        IsPrimary = $IsPrimary
+        Left = $Left
+        Top = 0
+        Right = $Left + $Width
+        Bottom = $Height
+        Capabilities = "prot(monitor) type(LCD) model($Model) cmds(01 02 03 07 0C E3 F3) vcp(10 12 14(01 04 05 08) 16 18 1A 60(0F 11 12 13) 62 87 8D(01 02) D6(01 02 04) DC(00 01 03 05))"
+        CapabilitiesKnown = $true
+        SupportedVcpCodes = $supportedCodes
+        CapabilitiesPending = $false
+        VcpMaximums = $maximums
+        VcpCurrentValues = $currentValues
+        CapabilitiesExcluded = $false
+        CapabilitiesSafetyError = ""
+        IdentityKey = $identityKey
+        IdentitySource = "EDID"
+        IdentityDefaultLabel = $Name
+        IdentityAliases = @()
+        DevicePath = "\\?\DISPLAY#MCP$Index#$Serial"
+        LegacyDevicePath = ""
+        MonitorDeviceString = $Name
+        HardwareId = "MCP$Index"
+        Manufacturer = "MCP"
+        EdidModel = $Model
+        EdidSerial = $Serial
+        EdidName = $Name
+        PeakLuminanceNits = if ($IsPrimary) { 500.0 } else { 400.0 }
+        PhysicalConnector = $Connector
+        UserLabel = $UserLabel
+        DisplayLabel = if ([string]::IsNullOrWhiteSpace($UserLabel)) { $Name } else { $UserLabel }
+    }
+}
+
 function Get-Monitors {
     Stop-VerifiedVcpTransactionWorker -Cancel -WaitForCompletion
     Stop-MonitorSettingsWorker -Cancel
@@ -1220,6 +1313,31 @@ function Get-Monitors {
         throw "Monitor refresh aborted because the DDC write worker still owns a physical monitor handle"
     }
     try {
+    if ($MarketingCapture) {
+        $script:WmiBrightnessAvailable = $false
+        $script:PhysicalMonitors = @(
+            New-MarketingCaptureMonitor -Index 1 -Name "AuroraView 27 Pro" -UserLabel "Design Display" -Width 3840 -Height 2160 -RefreshRate 144 -Left 0 -IsPrimary $true -Model "AV27P" -Serial "MC270144" -Connector "DisplayPort" -Brightness 72 -Contrast 68 -Volume 34 -InputSource 0x0F
+            New-MarketingCaptureMonitor -Index 2 -Name "FocusPanel 24" -UserLabel "Reference Display" -Width 2560 -Height 1440 -RefreshRate 120 -Left 3840 -IsPrimary $false -Model "FP24Q" -Serial "MC240120" -Connector "USB-C" -Brightness 58 -Contrast 64 -Volume 22 -InputSource 0x13
+        )
+        $script:DisplayPathInventory = @($script:PhysicalMonitors | ForEach-Object {
+            [PSCustomObject]@{
+                DeviceName = [string]$_.DeviceName
+                Name = [string]$_.Name
+                Adapter = "Direct GPU output"
+                Kind = "Direct"
+                HasControlChannel = $true
+                Reason = ""
+                Fix = ""
+            }
+        })
+        $script:GpuDriverAdvisories = @()
+        $script:DdcAvailabilityDiagnosis = Get-DdcAvailabilityDiagnosis -Paths $script:DisplayPathInventory -GpuAdvisories @() -WmiBrightnessAvailable $false
+        Sync-DisplayRecoveryInventory
+        foreach ($monitor in @($script:PhysicalMonitors)) {
+            Set-DisplayRecoveryOutcome -IdentityKey ([string]$monitor.IdentityKey) -Outcome "Success" -Generation $script:DisplayRecoveryGeneration | Out-Null
+        }
+        return
+    }
     $winRtMonitorInventory = @(Get-WinRtDisplayMonitorInventory)
     $monitorHandles = [MonitorAPI]::GetAllMonitorHandles()
     $monitorIndex = 1

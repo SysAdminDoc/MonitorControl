@@ -1,16 +1,5 @@
 {
-  "Actions": [
-    {
-      "Name": "actions/checkout",
-      "Version": "v4.2.2",
-      "Ref": "11bd71901bbe5b1630ceea73d27597364c9af683"
-    },
-    {
-      "Name": "actions/attest",
-      "Version": "v4",
-      "Ref": "508db95dd578ae2727ebd6217d5ba78e4fbda05d"
-    }
-  ],
+  "Actions": [],
   "PowerShellModules": [
     {
       "Name": "Pester",

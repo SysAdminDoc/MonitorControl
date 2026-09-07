@@ -2441,7 +2441,7 @@ function Set-TabOrder {
 function Initialize-LocalizationAndAccessibility {
     if ($window) {
         $window.Title = Get-UiRuntimeText -Category "Window" -DefaultText "MonitorControl Pro v{0}" -Key "Window.Main.Title" -ArgumentList @($script:AppVersion)
-        [System.Windows.Automation.AutomationProperties]::SetName($window, (Get-UiRuntimeText -Category "A11y" -DefaultText "MonitorControl Pro main window" -Key "A11y.MainWindow"))
+        [System.Windows.Automation.AutomationProperties]::SetName($window, (Get-UiRuntimeText -Category "A11y" -DefaultText "MonitorControl Pro" -Key "A11y.MainWindow"))
     }
     Set-LocalizedText -Control $appTitleText -Key "App.Title" -Property "Text"
     Set-LocalizedText -Control $appSubtitleText -Key "App.Subtitle" -Property "Text"
@@ -4877,8 +4877,8 @@ if ($CliWorker) {
     <Border Grid.Row="0" Grid.Column="0" Background="{DynamicResource SidebarBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0" Padding="18,0">
         <Grid>
             <Grid.ColumnDefinitions><ColumnDefinition Width="42"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-            <Border Width="38" Height="38" CornerRadius="10" Background="{DynamicResource AccentBrush}" VerticalAlignment="Center">
-                <TextBlock Text="MC" Foreground="{DynamicResource OnAccentBrush}" FontSize="14" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            <Border Width="38" Height="38" CornerRadius="10" Background="#F5F8FC" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" VerticalAlignment="Center">
+                <Image x:Name="AppLogoImage" Width="32" Height="32" Stretch="Uniform" Margin="3" AutomationProperties.Name="MonitorControl logo"/>
             </Border>
             <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="10,0,0,0">
                 <TextBlock x:Name="AppTitleText" Text="MonitorControl Pro" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource TextBrush}" TextWrapping="Wrap"/>
@@ -5504,7 +5504,15 @@ if ($CliWorker) {
             <ProgressBar x:Name="TransactionProgressBar" Width="180" Height="6" Minimum="0" Maximum="1" Value="0" Margin="0,0,10,0"/>
             <Button x:Name="TransactionCancelBtn" Content="Cancel" Style="{StaticResource Btn}" Padding="10,4" AutomationProperties.Name="Cancel verified DDC transaction"/>
         </StackPanel>
-        <TextBlock x:Name="AutoModeText" Grid.Column="2" Text="" FontSize="12" Foreground="{DynamicResource WarningBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+        <TextBlock x:Name="AutoModeText" Grid.Column="2" Text="" FontSize="12" Foreground="{DynamicResource WarningBrush}" HorizontalAlignment="Right" VerticalAlignment="Center">
+            <TextBlock.Style>
+                <Style TargetType="TextBlock">
+                    <Style.Triggers>
+                        <Trigger Property="Text" Value=""><Setter Property="Visibility" Value="Collapsed"/></Trigger>
+                    </Style.Triggers>
+                </Style>
+            </TextBlock.Style>
+        </TextBlock>
     </Grid></Border>
 </Grid>
 </ScrollViewer>
@@ -5532,7 +5540,7 @@ try {
 # Get all UI elements
 $shellScrollViewer = $window.FindName("ShellScrollViewer"); $shellRoot = $window.FindName("ShellRoot"); $mainNavigationTabs = $window.FindName("MainNavigationTabs")
 $statusBannerBorder = $window.FindName("StatusBannerBorder"); $statusBannerText = $window.FindName("StatusBannerText"); $statusBannerDismissButton = $window.FindName("StatusBannerDismissButton")
-$appTitleText = $window.FindName("AppTitleText"); $appSubtitleText = $window.FindName("AppSubtitleText")
+$appLogoImage = $window.FindName("AppLogoImage"); $appTitleText = $window.FindName("AppTitleText"); $appSubtitleText = $window.FindName("AppSubtitleText")
 $displayTab = $window.FindName("DisplayTab"); $monitorTab = $window.FindName("MonitorTab"); $vcpTab = $window.FindName("VcpTab")
 $profilesTab = $window.FindName("ProfilesTab"); $scheduleTab = $window.FindName("ScheduleTab"); $systemTab = $window.FindName("SystemTab")
 $monitorCanvas = $window.FindName("MonitorCanvas"); $selectedMonitorName = $window.FindName("SelectedMonitorName")
@@ -5642,6 +5650,21 @@ $statusText = $window.FindName("StatusText"); $autoModeText = $window.FindName("
 $transactionProgressPanel = $window.FindName("TransactionProgressPanel"); $transactionProgressText = $window.FindName("TransactionProgressText")
 $transactionProgressBar = $window.FindName("TransactionProgressBar"); $transactionCancelBtn = $window.FindName("TransactionCancelBtn")
 
+$brandMarkPath = Join-Path $script:MonitorControlRoot "icon.png"
+if (Test-Path -LiteralPath $brandMarkPath -PathType Leaf) {
+    try {
+        $brandMarkBitmap = New-Object System.Windows.Media.Imaging.BitmapImage
+        $brandMarkBitmap.BeginInit()
+        $brandMarkBitmap.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+        $brandMarkBitmap.UriSource = New-Object System.Uri($brandMarkPath, [System.UriKind]::Absolute)
+        $brandMarkBitmap.EndInit()
+        $brandMarkBitmap.Freeze()
+        $appLogoImage.Source = $brandMarkBitmap
+    } catch {
+        [System.Diagnostics.Trace]::TraceWarning("MonitorControl brand mark could not be loaded: $($_.Exception.Message)")
+    }
+}
+
 if ($script:PendingStatusMessage) {
     Update-Status $script:PendingStatusMessage -Severity $script:PendingStatusSeverity -Key $script:PendingStatusKey
     $script:PendingStatusMessage = ""
@@ -5681,7 +5704,13 @@ function Update-SelectedMonitorRecoveryUi {
     }
     $selectedMonitorHealthDot.SetResourceReference([System.Windows.Shapes.Shape]::FillProperty, $brushKey)
     $selectedMonitorHealthText.SetResourceReference([System.Windows.Controls.TextBlock]::ForegroundProperty, $brushKey)
-    $selectedMonitorHealthText.Text = if ($state -eq "Fresh") { "Fresh | $lastSuccessText" } else { "$state | last success $lastSuccessText" }
+    $selectedMonitorHealthText.Text = if ($MarketingCapture -and $state -eq "Fresh") {
+        "Fresh | verified"
+    } elseif ($state -eq "Fresh") {
+        "Fresh | $lastSuccessText"
+    } else {
+        "$state | last success $lastSuccessText"
+    }
     $tooltip = "Display recovery: $state`nLast successful hardware read: $lastSuccessText`nConsecutive failures: $failures"
     if (-not [string]::IsNullOrWhiteSpace($lastError)) { $tooltip += "`n$lastError" }
     $selectedMonitorHealthText.ToolTip = $tooltip
@@ -5997,6 +6026,36 @@ function Load-MonitorSettings {
     $wmiBrightness = $null
     Update-Status "Reading from $(Get-MonitorDisplayLabel -Monitor $mon)..."
     Stop-MonitorSettingsWorker -Cancel
+    if ($MarketingCapture) {
+        $script:UpdatingUI = $true
+        try {
+            Update-InputSourceCombo -Monitor $mon
+            Update-CapabilitiesBox -Monitor $mon
+            Update-CapabilityControls -Monitor $mon
+            foreach ($entry in @($mon.VcpCurrentValues.GetEnumerator())) {
+                Apply-MonitorSettingResult -Result ([PSCustomObject]@{
+                    Success = $true
+                    MonitorIndex = $script:CurrentMonitorIndex
+                    Code = [int]$entry.Key
+                    Current = [uint32]$entry.Value.Current
+                    Maximum = [uint32]$entry.Value.Maximum
+                })
+            }
+            foreach ($control in @(
+                $brightnessSlider,$contrastSlider,$redSlider,$greenSlider,$blueSlider,$volumeSlider,
+                $sharpnessSlider,$inputSourceCombo,$presetDay,$presetNight,$presetAutoMode,$presetAmbientMode,
+                $presetReset,$colorTempWarm,$colorTemp6500,$colorTempCool,$colorTempSRGB
+            )) {
+                if ($control) { $control.IsEnabled = $true }
+            }
+            Set-DisplayRecoveryOutcome -IdentityKey ([string]$mon.IdentityKey) -Outcome "Success" -Generation $script:DisplayRecoveryGeneration | Out-Null
+            Update-Status "2 displays connected. DDC/CI controls are ready."
+        } finally {
+            $script:UpdatingUI = $false
+        }
+        Update-SelectedMonitorRecoveryUi
+        return
+    }
     $script:UpdatingUI = $true
     try {
         Update-InputSourceCombo -Monitor $mon
@@ -10647,6 +10706,74 @@ function Update-GpuStats {
     }
 }
 
+function Initialize-MarketingCaptureUi {
+    if (-not $MarketingCapture) { return }
+
+    $gpuTab.Visibility = [System.Windows.Visibility]::Visible
+    $gpuNameText.Text = "Graphics hardware ready"
+    $gpuStatsText.Text = "62 C | 2,310 MHz | 104 W"
+    $gpuTempText.Text = "62"
+    $gpuUtilText.Text = "47%"
+    $gpuUtilBar.Value = 47
+    $memUsageText.Text = "5.8 / 12.0 GB"
+    $memUtilBar.Value = 48
+    $fanSpeedText.Text = "36%"
+    $fanSpeedBar.Value = 36
+    $powerDrawText.Text = "104 / 220 W"
+    $powerDrawBar.Value = 47
+    $cpuTempText.Text = "CPU: 49 C"
+    $vibranceSlider.Value = 56
+    $vibranceValue.Text = "56"
+    $fpsOverlayStatusText.Text = "Ready"
+
+    $profilesList.Items.Clear()
+    foreach ($name in @("Daylight Focus", "Color Review", "Evening Comfort", "Cinema")) {
+        $profilesList.Items.Add($name) | Out-Null
+    }
+    $profilesList.SelectedIndex = 0
+    $profileNameBox.Text = "Daylight Focus"
+    $profileCaptureAllCheckbox.IsChecked = $true
+    $profilePreviewText.Text = "Captured for both displays. Design Display and Reference Display are matched with supported brightness, contrast, and color settings."
+    $profileStorageStatusText.Text = "Local library | 4 saved profiles"
+    $profileStorageStatusText.ToolTip = "Isolated demo library used only for verified marketing capture"
+    Update-AppProfileProfileCombo
+
+    $script:AppProfileEnabled = $true
+    $script:AppProfileRules = @(
+        [PSCustomObject]@{ Exe = "designer.exe"; Profile = "Color Review"; AllowRiskyVcp = $false },
+        [PSCustomObject]@{ Exe = "player.exe"; Profile = "Cinema"; AllowRiskyVcp = $false }
+    )
+    Update-AppProfileControls
+
+    $script:ProfileScheduleEnabled = $true
+    $script:ProfileSchedules = @(
+        [PSCustomObject]@{ Time = "08:00"; Profile = "Daylight Focus"; AllowRiskyVcp = $false },
+        [PSCustomObject]@{ Time = "18:30"; Profile = "Evening Comfort"; AllowRiskyVcp = $false },
+        [PSCustomObject]@{ Time = "21:30"; Profile = "Cinema"; AllowRiskyVcp = $false }
+    )
+    Update-ScheduleControls
+
+    $script:IdleDimEnabled = $true
+    $script:IdleDimMinutes = 12
+    $script:IdleDimBrightness = 24
+    $script:IdleDimRestoreOnActivity = $true
+    Update-IdleDimControls
+
+    $script:BatteryProfileEnabled = $true
+    $script:BatteryBrightness = 42
+    $script:AcBrightness = 72
+    Update-BatteryProfileControls
+
+    $vcpResultBox.Text = "0x10 Brightness`nCurrent: 72`nMaximum: 100`nStatus: supported and responding"
+    $capabilitiesBox.Text = "MCCS 2.2 | 13 supported VCP controls`nBrightness, contrast, RGB gain, color temperature, input source, volume, sharpness, power, picture mode"
+    $ddcReportBox.Text = "2 displays detected`n2 direct DDC/CI control channels`nCapabilities cached for both displays`nNo compatibility warnings"
+    $capabilitiesSafetyStatusText.Text = "Capabilities loaded from both displays"
+    $riskyVcpStatusText.Text = "Protected writes remain locked until explicitly enabled"
+    $automationBridgeStatusText.Text = "Local API ready on 127.0.0.1"
+    $updateCheckStatusText.Text = "Up to date"
+    Update-Status "2 displays connected. DDC/CI controls are ready."
+}
+
 function Save-NavigationRenderFrame {
     param($Page, [string]$RenderRoot)
     $window.UpdateLayout()
@@ -10739,12 +10866,14 @@ function Export-NavigationRenders {
 }
 
 # Initialize
-Initialize-WmiBrightness; Load-MonitorIdentitySettings; Import-CapabilitySafetyState; Import-VcpWriteSafetyState; Import-InputSourceSettings; Import-UsbInputRules; Import-OptionalHelperSettings; Import-UpdateCheckSettings; Import-DisplayStateRestoreSettings; Import-CapabilitiesCache; Import-DdcTimingSettings; Import-DdcHealthSettings; Get-Monitors; Initialize-GPU; Initialize-CpuMonitor; Draw-MonitorLayout; Initialize-FixedChoiceCombos; Load-MonitorSettings; Update-ProfilesList; Update-UsbInputControls
-Load-AppProfileRules; Update-AppProfileControls; Start-AppProfileWatcher
-Load-ProfileSchedules; Update-ScheduleControls; Start-ProfileScheduleWatcher
-Load-IdleDimSettings; Update-IdleDimControls; Start-IdleDimWatcher
-Load-BatteryProfileSettings; Update-BatteryProfileControls; Start-BatteryProfileWatcher
-Load-AutomationBridgeSettings; Update-AutomationBridgeControls; Start-AutomationBridge
+Initialize-WmiBrightness; Load-MonitorIdentitySettings; Import-CapabilitySafetyState; Import-VcpWriteSafetyState; Import-InputSourceSettings; Import-UsbInputRules; Import-OptionalHelperSettings; Import-UpdateCheckSettings; Import-DisplayStateRestoreSettings; Import-CapabilitiesCache; Import-DdcTimingSettings; Import-DdcHealthSettings; Get-Monitors
+if (-not $MarketingCapture) { Initialize-GPU; Initialize-CpuMonitor }
+Draw-MonitorLayout; Initialize-FixedChoiceCombos; Load-MonitorSettings; Update-ProfilesList; Update-UsbInputControls
+Load-AppProfileRules; Update-AppProfileControls; if (-not $MarketingCapture) { Start-AppProfileWatcher }
+Load-ProfileSchedules; Update-ScheduleControls; if (-not $MarketingCapture) { Start-ProfileScheduleWatcher }
+Load-IdleDimSettings; Update-IdleDimControls; if (-not $MarketingCapture) { Start-IdleDimWatcher }
+Load-BatteryProfileSettings; Update-BatteryProfileControls; if (-not $MarketingCapture) { Start-BatteryProfileWatcher }
+Load-AutomationBridgeSettings; Update-AutomationBridgeControls; if (-not $MarketingCapture) { Start-AutomationBridge }
 Update-RunAtLoginControls
 Update-ProfileStorageControls
 Sync-CapabilitySafetyUi
@@ -10754,10 +10883,13 @@ Update-UpdateCheckControls
 Update-DisplayStateRestoreControls
 Update-DdcTimingControls
 Update-HardwareTabVisibility
+Initialize-MarketingCaptureUi
 Register-UiControlResources -Root $window -RootKey "Main"
 
-Initialize-TrayIcon
-Register-UiControlResources -Root $script:TrayPopup -RootKey "Tray"
+if (-not $MarketingCapture) {
+    Initialize-TrayIcon
+    Register-UiControlResources -Root $script:TrayPopup -RootKey "Tray"
+}
 
 $mainNavigationTabs.Add_SelectionChanged({
     param($sender, $eventArgs)
@@ -10787,13 +10919,14 @@ $window.Add_SizeChanged({
 })
 
 $window.Add_SourceInitialized({
-    Initialize-DisplayRecoveryEventPipeline
+    if (-not $MarketingCapture) { Initialize-DisplayRecoveryEventPipeline }
 })
 
 $window.Add_ContentRendered({
     if ($mainNavigationTabs.SelectedItem -is [System.Windows.FrameworkElement]) { $mainNavigationTabs.SelectedItem.BringIntoView() }
     if ($script:CapabilitiesConsentPromptHandled) { return }
     $script:CapabilitiesConsentPromptHandled = $true
+    if ($MarketingCapture) { return }
     if (-not $script:CapabilitiesConsentRecorded -and -not $script:CapabilitiesMaximumCompatibility) {
         Request-CapabilitiesDiscoveryConsent | Out-Null
     }

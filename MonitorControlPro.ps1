@@ -32,7 +32,8 @@ param(
     [ValidateRange(0, 200)]
     [int]$TextScalePercent = 0,
     [string]$Culture = "",
-    [string]$RenderDirectory = ""
+    [string]$RenderDirectory = "",
+    [switch]$MarketingCapture
 )
 
 $script:MonitorControlRoot = $PSScriptRoot
