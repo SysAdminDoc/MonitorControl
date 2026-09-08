@@ -78,7 +78,7 @@ GPU telemetry is optional. NVIDIA and AMD paths are detected when their local AP
 4. Extract the ZIP to a writable folder.
 5. Start `MonitorControlPro.cmd`.
 
-The ZIP also contains the standalone PowerShell script, icon files, a CycloneDX SBOM, an artifact manifest, and checksums for the extracted payload.
+The ZIP includes the standalone PowerShell script and its icons. This README's screenshots, the CLI and safety guides, and the original brand concepts are included too, so the local documentation doesn't depend on GitHub being available. A CycloneDX SBOM, artifact manifest, and checksums describe the extracted files.
 
 The current release is unsigned. Windows may show its normal reputation warning the first time you open it. The checksum and manifest let you verify exactly what you downloaded.
 
@@ -188,7 +188,7 @@ For a support request, build the redacted DDC report under **System > Diagnostic
 
 ## Build and verify
 
-Use Windows PowerShell 5.1 for the application and release tools.
+Clone the repository to work on the source or run these checks. The portable ZIP is for running the app and reading its user guides. Use Windows PowerShell 5.1 for the application and release tools.
 
 ```powershell
 # Deterministic no-hardware tests
@@ -222,6 +222,10 @@ Key paths:
 | `tests/` | No-hardware coverage, transcript replay, WPF smoke, and accessibility checks |
 | `assets/brand/` | Approved mark and generated brand surfaces |
 | `assets/screenshots/` | Verified product captures and capture report |
+
+## Brand files
+
+The [concept archive](assets/brand/concepts/README.md) keeps all four original logo studies, including the alternatives, with an untouched selected master and [selection record](assets/brand/concepts/selection.json). The app continues to use its existing calibration-control icon. Original studies are reference material, not replacement app icons.
 
 ## License
 

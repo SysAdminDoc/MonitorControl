@@ -80,7 +80,10 @@ function Get-Sha256Hash {
 
 function Get-OrdinalFileNames {
     param([string]$Directory)
-    [string[]]$names = @(Get-ChildItem -LiteralPath $Directory -File | ForEach-Object { $_.Name })
+    $prefix = [System.IO.Path]::GetFullPath($Directory).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+    [string[]]$names = @(Get-ChildItem -LiteralPath $Directory -Recurse -File | ForEach-Object {
+        $_.FullName.Substring($prefix.Length).Replace('\', '/')
+    })
     [System.Array]::Sort($names, [System.StringComparer]::Ordinal)
     return $names
 }
@@ -253,6 +256,9 @@ Copy-Item -LiteralPath $iconPngPath -Destination (Join-Path $stageRoot "icon.png
 Copy-Item -LiteralPath $screenshotPath -Destination (Join-Path $stageRoot "screenshot.png") -Force
 Copy-Item -LiteralPath $cliSchemaPath -Destination (Join-Path $stageRoot "monitorcontrol-cli-v1.schema.json") -Force
 Copy-Item -LiteralPath $ddcCompatibilityPath -Destination (Join-Path $stageRoot "ddc-compatibility.json") -Force
+foreach ($directory in @("assets", "docs", "schemas")) {
+    Copy-Item -LiteralPath (Join-Path $repoRoot $directory) -Destination $stageRoot -Recurse -Force
+}
 
 # Scoop resolves `shortcuts` against a file it can execute. A bare .ps1 is not one, and a GUI
 # app should not get a `bin` shim either, so the ZIP carries a launcher that starts the script

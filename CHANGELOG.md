@@ -2,6 +2,12 @@
 
 All notable changes to MonitorControl are documented here.
 
+## [v3.38.3] (2026-09-07)
+
+- Preserved all four original logo studies, the untouched selected master, and the selection record in a browsable concept archive. The existing production icon is unchanged.
+- The portable ZIP now includes the README gallery, CLI and safety guides, linked JSON schema, and brand archive. Nested files are covered by the package manifest and checksums.
+- Clarified which files belong to the portable download and which developer commands require a source checkout. Added regression checks for packaged documentation and original image hashes.
+
 ## [v3.38.2] (2026-09-06)
 
 - Added: a new blue calibration mark, application icon, repository banner, and social preview give the project one consistent visual identity.

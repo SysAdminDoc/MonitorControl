@@ -1,4 +1,4 @@
 @{
     AppName = "MonitorControl Pro"
-    Version = "3.38.2"
+    Version = "3.38.3"
 }
