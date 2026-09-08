@@ -1,5 +1,5 @@
 {
-    "version":  "3.38.2",
+    "version":  "3.38.3",
     "description":  "Portable Windows DDC/CI display control center for brightness, contrast, color temperature, input switching, and profiles.",
     "homepage":  "https://github.com/SysAdminDoc/MonitorControl",
     "license":  "MIT",
@@ -11,8 +11,8 @@
               ],
     "architecture":  {
                          "64bit":  {
-                                       "url":  "https://github.com/SysAdminDoc/MonitorControl/releases/download/v3.38.2/MonitorControlPro-v3.38.2.zip",
-                                       "hash":  "c54df0a182f633e94f4fd1659db8debbf6d6399d4f4f95be73f9cdf388c93c36"
+                                       "url":  "https://github.com/SysAdminDoc/MonitorControl/releases/download/v3.38.3/MonitorControlPro-v3.38.3.zip",
+                                       "hash":  "b1183e615a2f4643fd781d16b3b894d5d382433d7ce2c8404daa6142a516096c"
                                    }
                      },
     "shortcuts":  [
