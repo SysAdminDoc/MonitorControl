@@ -5,6 +5,16 @@
 [![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-2563C7?style=flat-square&logo=powershell)](#install)
 [![MIT license](https://img.shields.io/badge/license-MIT-2EA44F?style=flat-square)](LICENSE)
 
+<p align="center">
+  <a href="https://ko-fi.com/X8K126YVER">
+    <img height="42" src="https://storage.ko-fi.com/cdn/kofi2.png?v=3" alt="Buy me a coffee on Ko-fi" />
+  </a>
+</p>
+
+<p align="center">
+  <sub><em>If this project helps you, a coffee helps me keep working on it.</em></sub>
+</p>
+
 MonitorControl Pro puts brightness, color, inputs, profiles, and display automation in one focused Windows app. It talks to compatible monitors through DDC/CI, so you can stop reaching for tiny buttons under the bezel.
 
 [Download the latest portable release](https://github.com/SysAdminDoc/MonitorControl/releases/latest)
